@@ -1,0 +1,15 @@
+[package]
+name = "tv-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[features]
+native-ui = []
+gstreamer-player = []
+cec = []
+airplay = []
+webrtc = []
+
+[dependencies]
+clap = { version = "4.6.10", features = ["derive"] }
