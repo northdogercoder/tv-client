@@ -2,7 +2,7 @@
 
 > Executor: C001. Work in an isolated worktree, follow steps in order, run each gate, and stop on mismatch. Read the full plan before acting. The reviewer (not executor) owns the index. No push, merge, deployment, or production credentials without separate operator approval.
 >
-> Drift check: planned-at is UNBOUND because this is a new repo. Advisor records actual baseline SHA with `git rev-parse HEAD` and live file excerpts (or explicitly absent) before dispatch. Then run `git diff --stat <BOUND_SHA>..HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .gitignore .github/workflows/ci.yml src/main.rs src/lib.rs tests/bootstrap.rs scripts/check.sh docs/build.md`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
+> Drift check: planned-at is bound to `a445a0fba4cbc66432f1550226f901de76432f01` (2026-11-25). Advisor verified the baseline with `git rev-parse HEAD`; all C001 target paths are explicitly absent below. Then run `git diff --stat a445a0fba4cbc66432f1550226f901de76432f01..HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .gitignore .github/workflows/ci.yml src/main.rs src/lib.rs tests/bootstrap.rs scripts/check.sh docs/build.md`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
 
 ## Status
 - **Priority**: P1
@@ -10,8 +10,30 @@
 - **Risk**: LOW
 - **Depends on**: none
 - **Category**: direction
-- **Planned at**: UNBOUND (greenfield), 2026-11-25
+- **Planned at**: a445a0fba4cbc66432f1550226f901de76432f01 (greenfield seed), 2026-11-25
 - **State**: TODO (index authoritative)
+
+## Baseline evidence (advisor preflight, 2026-11-25)
+
+Bound to the sole seed commit. Worktree clean; 20 tracked files, all documentation/spec/example files.
+
+| Check | Command | Result |
+|---|---|---|
+| Baseline SHA | `git rev-parse HEAD` | `a445a0fba4cbc66432f1550226f901de76432f01` |
+| Worktree | `git status --short --branch` | `## main...origin/main` (clean) |
+| Inventory | `git ls-files` | 20 files: `AGENTS.md`, `docs/` (2), `deploy/*.example` (3), `plans/` (14) |
+| Rust stable (recommended pin) | `rustup run stable rustc --version` | `rustc 1.100.0 (0ef1bc386 2026-11-09)` |
+| Cargo stable | `rustup run stable cargo --version` | `cargo 1.100.0 (3acc79c0c 2026-11-05)` |
+| Clippy stable | `rustup run stable cargo clippy --version` | `clippy 0.1.100 (0ef1bc3860 2026-11-09)` |
+| rustfmt stable | `rustup run stable cargo fmt --version` | `rustfmt 1.11.0-stable (0ef1bc3860 2026-11-09)` |
+| Edition 2024 smoke | `rustup run stable cargo new --edition 2024` scratch crate outside the repo, then `cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check` | pass; edition 2024 accepted by 1.100.0 |
+| Host arch | `uname -m` | `x86_64` (not the ARM64 target) |
+| Native libs | `pkg-config --modversion gstreamer-1.0 sqlite3 openssl` | `1.28.2`, `3.46.1`, `3.5.5` |
+| Cross toolchain | `rustup target list --installed`; `command -v aarch64-linux-gnu-gcc` | x86_64 only; `aarch64-linux-gnu-gcc` present but no Rust aarch64 std |
+
+Explicit absence at the bound SHA, covering every C001 scope target: `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.gitignore`, `.github/workflows/ci.yml`, `src/main.rs`, `src/lib.rs`, `tests/bootstrap.rs`, `scripts/check.sh`, `docs/build.md`.
+
+Not run: any `cargo build|test|clippy|fmt` gate inside this repository, because no package exists yet. The scratch edition-2024 crate above is the only executed Rust check. `rust-toolchain.toml` must pin the tested version the executor uses: pin `1.100.0` as verified above. `$HOME/.cargo/bin` is not on the default non-login shell PATH, so run `source "$HOME/.cargo/env"` before gates. The also-installed 1.93.1 caps Slint at 1.18.1 (MSRV 1.92); current Slint 1.19.1 requires 1.95, so 1.100.0 avoids a later C004 blocker.
 
 ## Why this matters
 Start with a single Rust package `tv-client` (binary and library), edition 2024 if toolchain supports it. Keep platform dependencies behind features so headless CI works.
