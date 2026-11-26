@@ -67,8 +67,12 @@ and state machine compile, lint and pass their tests on the CI host.
 - The supervisor, protocol and `ProgramChildFactory` are always compiled and
   backend neutral, so a future libmpv/yt-dlp child can be added without
   touching the gated GStreamer code.
-- `cec`, `airplay` and `webrtc` remain empty arrays that reserve future seams.
-  No default feature is set, so a plain build stays headless.
+- `cec` remains an empty array reserved for future feature-gated CEC work.
+  The kernel CEC bridge in `src/input/cec.rs` is always compiled and is
+  started by the `native-ui` entry point; it needs no Cargo feature.
+  `airplay` and `webrtc` remain empty arrays that reserve future seams. No
+  default feature is set, so a plain build stays headless and starts no CEC
+  process.
 
 The headless gate deliberately passes `--no-default-features`; it exercises
 the protocol, the state machine, the UI view model and the scripted fake-child
@@ -121,6 +125,32 @@ The Slint feature adds a large dependency graph. Do not build it in `/tmp` on
 the Pi (453 MiB tmpfs); use `~` as above. If the Pi runs out of memory, stop
 and report that instead of raising the job count.
 
+## HDMI-CEC runtime helper
+
+The kernel CEC bridge adds **no Cargo dependency and no build-time package**.
+It runs the system `cec-ctl` tool from v4l-utils/cec-utils as a supervised
+child with a fixed argument list:
+
+```text
+cec-ctl --device /dev/cec0 --playback --no-rc-passthrough --wait-for-msgs --skip-info
+```
+
+- The Pi has `cec-ctl` 1.30.1, `/dev/cec0` on the `vc4_hdmi` driver, and
+  `anders` in the `video` group. The device is `crw-rw---- root:video`.
+- Follow mode is used because `cec-ctl --monitor` requires root. Do **not**
+  install libCEC or enable the root-only monitor mode for this client.
+- The bridge starts only from the `native-ui` entry point and is stopped with a
+  two-second bound during teardown; the headless build never spawns it.
+- A missing helper or adapter is a typed `CecStatus::Unavailable` state logged
+  at startup, not a fatal error. The USB keyboard remains usable.
+- `--no-rc-passthrough` is required: it prevents the kernel from also emitting
+  keyboard events for the same CEC press, which would create a duplicate input
+  path.
+
+If the helper is absent, install the distribution package that provides
+`cec-ctl` (usually `v4l-utils` or `cec-utils`) or use the USB keyboard. The
+bridge itself still builds and its tests run without the helper.
+
 ## GStreamer player build
 
 On the Pi, install the GStreamer development headers first:
@@ -162,7 +192,13 @@ The direct dependencies are:
   (required by the crate's forward-compatibility check) and selects the
   `fluent` widget style explicitly; it does not pull the software-renderer
   resource pipeline because the launcher uses no images.
-- `tempfile`, dev-only, for isolated test state directories.
+- `cec-ctl` is a **runtime** helper, not a Cargo dependency: the kernel CEC
+  bridge spawns it with fixed arguments. It is present on the Pi (1.30.1) and
+  absent on the headless CI host, where the bridge reports
+  `CecStatus::Unavailable` and the feature-independent tests use fixture
+  programs instead.
+- `tempfile`, dev-only, for isolated test state directories and fixture CEC
+  helpers.
 
 Their transitive dependencies follow from these direct ones. The version
 requirements live in `Cargo.toml`; exact resolved versions live in the
@@ -212,6 +248,11 @@ approval and was not started; the active session remained labwc.
 - `cage` 0.3.1 is installed but is not used. The active console session is
   labwc 0.20.2 on tty1, with `XDG_RUNTIME_DIR=/run/user/1000` and
   `WAYLAND_DISPLAY=wayland-0`.
+- `cec-ctl` 1.30.1 is installed. `cec-ctl --list-devices` reports
+  `vc4_hdmi (vc4-hdmi): /dev/cec0`; the device is `crw-rw---- root:video` and
+  `anders` is in the `video` group. Follow mode works without root; monitor
+  mode does not. See [`input.md`](input.md) for the exact helper arguments,
+  supervision behavior and the remote-input verification status.
 - `bash scripts/probe-pi.sh` reruns the read-only capability probe from a
   development host; it needs only SSH access to the host alias `raspberry`
   (override with `PI_HOST=...`). It installs nothing and changes no

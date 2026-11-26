@@ -83,6 +83,7 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
         }
     })?;
     let handle = ui.handle();
+    let cec_bridge = start_cec_bridge(&handle);
 
     #[cfg(feature = "gstreamer-player")]
     let playback_thread = start_playback_thread(
@@ -103,11 +104,64 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
     }
 
     let result = ui.run();
+    if let Some(bridge) = cec_bridge {
+        match bridge.shutdown(std::time::Duration::from_secs(2)) {
+            tv_client::input::ShutdownOutcome::Stopped => {}
+            tv_client::input::ShutdownOutcome::TimedOut => {
+                tracing::warn!("CEC bridge did not stop within 2 s");
+            }
+        }
+    }
     shutdown.cancel();
     #[cfg(feature = "gstreamer-player")]
     join_playback_thread(playback_thread);
     result?;
     Ok(())
+}
+
+/// Start the kernel HDMI-CEC bridge for local physical input.
+///
+/// A missing adapter or helper is reported as a typed [`tv_client::input::CecStatus`]
+/// by the bridge thread; startup itself only fails when the supervisor thread
+/// cannot be created, in which case the keyboard path remains usable.
+#[cfg(feature = "native-ui")]
+fn start_cec_bridge(ui: &tv_client::ui::UiHandle) -> Option<tv_client::input::CecBridge> {
+    use tv_client::input::{CecBridge, CecConfig};
+
+    let sink = ui.clone();
+    match CecBridge::start(
+        CecConfig::kernel(),
+        move |event| sink.submit_input(event),
+        log_cec_status,
+    ) {
+        Ok(bridge) => Some(bridge),
+        Err(error) => {
+            tracing::warn!(%error, "CEC bridge unavailable; keyboard input remains available");
+            None
+        }
+    }
+}
+
+#[cfg(feature = "native-ui")]
+fn log_cec_status(status: &tv_client::input::CecStatus) {
+    use tv_client::input::CecStatus;
+
+    match status {
+        CecStatus::Starting => tracing::debug!("CEC bridge starting"),
+        CecStatus::Monitoring { device } => {
+            tracing::info!(device = %device.display(), "CEC monitoring started");
+        }
+        CecStatus::Unavailable { reason } => {
+            tracing::warn!(
+                ?reason,
+                "CEC unavailable; USB keyboard input remains available"
+            );
+        }
+        CecStatus::Disconnected { reason, retry_in } => {
+            tracing::warn!(?reason, ?retry_in, "CEC disconnected; retrying");
+        }
+        CecStatus::Stopped => tracing::debug!("CEC bridge stopped"),
+    }
 }
 
 /// Wait for the controller to finish its final Stop/progress/transcode

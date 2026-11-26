@@ -1,12 +1,14 @@
 //! Core library for the `tv-client` package.
 //!
-//! The portable state, storage, Jellyfin, player-protocol and UI view-model
-//! layers are always compiled. The GStreamer child binary and its production
-//! factory are gated behind the `gstreamer-player` feature; the Slint window
-//! and its bridge are gated behind `native-ui`. The `cec`, `airplay` and
-//! `webrtc` flags remain seams without an implementation.
+//! The portable state, storage, Jellyfin, player-protocol, input and UI
+//! view-model layers are always compiled. The GStreamer child binary and its
+//! production factory are gated behind the `gstreamer-player` feature; the
+//! Slint window and its bridge are gated behind `native-ui`. The `airplay` and
+//! `webrtc` flags remain seams without an implementation; the kernel HDMI-CEC
+//! bridge is runtime code, not a feature.
 
 pub mod config;
+pub mod input;
 pub mod jellyfin;
 pub mod model;
 pub mod playback;
@@ -16,6 +18,11 @@ pub mod storage;
 pub mod ui;
 
 pub use config::ClientConfig;
+pub use input::{
+    CecBridge, CecConfig, CecDisconnect, CecError, CecParser, CecStatus, CecUnavailable,
+    InputEvent, InputQueue, InputReject, LocalOrigin, PhysicalApproval, RepeatGate, Route, Router,
+    ShutdownOutcome,
+};
 pub use jellyfin::{
     BaseItem, CancelHandle, CancelToken, JellyfinClient, JellyfinError, Page, QueryResult, Session,
     cancellation,

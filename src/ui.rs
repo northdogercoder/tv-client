@@ -28,7 +28,7 @@ pub const MAX_QUERY_CHARS: usize = 48;
 /// Maximum error text length in characters.
 pub const MAX_ERROR_CHARS: usize = 160;
 /// Minimum interval between accepted repeats of a navigation key.
-pub const REPEAT_INTERVAL: Duration = Duration::from_millis(120);
+pub const REPEAT_INTERVAL: Duration = crate::input::REPEAT_INTERVAL;
 
 /// A key that the launcher understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +52,44 @@ impl Key {
             self,
             Self::Up | Self::Down | Self::Left | Self::Right | Self::Backspace
         )
+    }
+
+    /// Convert a physical input key into a launcher key.
+    ///
+    /// Volume keys have no launcher representation and return `None`.
+    #[must_use]
+    pub fn from_input(key: crate::input::Key) -> Option<Self> {
+        Some(match key {
+            crate::input::Key::Up => Self::Up,
+            crate::input::Key::Down => Self::Down,
+            crate::input::Key::Left => Self::Left,
+            crate::input::Key::Right => Self::Right,
+            crate::input::Key::Select => Self::Enter,
+            crate::input::Key::Back => Self::Escape,
+            crate::input::Key::Home => Self::Home,
+            crate::input::Key::PlayPause => Self::Char(' '),
+            crate::input::Key::Char(character) => Self::Char(character),
+            crate::input::Key::Backspace => Self::Backspace,
+            crate::input::Key::VolumeUp
+            | crate::input::Key::VolumeDown
+            | crate::input::Key::Mute => return None,
+        })
+    }
+
+    /// Convert a launcher key into a physical input key.
+    #[must_use]
+    pub const fn into_input(self) -> crate::input::Key {
+        match self {
+            Self::Up => crate::input::Key::Up,
+            Self::Down => crate::input::Key::Down,
+            Self::Left => crate::input::Key::Left,
+            Self::Right => crate::input::Key::Right,
+            Self::Enter => crate::input::Key::Select,
+            Self::Escape => crate::input::Key::Back,
+            Self::Home => crate::input::Key::Home,
+            Self::Backspace => crate::input::Key::Backspace,
+            Self::Char(character) => crate::input::Key::Char(character),
+        }
     }
 }
 
@@ -404,34 +442,25 @@ impl PairPrompt {
 }
 
 /// Repeat gate for held navigation keys.
+///
+/// The interval and slot table live in [`crate::input`] so the keyboard and
+/// CEC paths cannot drift.
 #[derive(Debug, Clone, Default)]
 struct RepeatThrottle {
-    last: [Option<Duration>; 5],
+    gate: crate::input::RepeatGate,
 }
 
 impl RepeatThrottle {
-    const fn slot(key: Key) -> Option<usize> {
-        match key {
-            Key::Up => Some(0),
-            Key::Down => Some(1),
-            Key::Left => Some(2),
-            Key::Right => Some(3),
-            Key::Backspace => Some(4),
-            Key::Enter | Key::Escape | Key::Home | Key::Char(_) => None,
-        }
-    }
-
     fn accept(&mut self, key: Key, now: Duration) -> bool {
-        let Some(slot) = Self::slot(key) else {
-            return true;
+        let slot = match key {
+            Key::Up => 0,
+            Key::Down => 1,
+            Key::Left => 2,
+            Key::Right => 3,
+            Key::Backspace => 4,
+            Key::Enter | Key::Escape | Key::Home | Key::Char(_) => return true,
         };
-        if let Some(last) = self.last[slot]
-            && now.saturating_sub(last) < REPEAT_INTERVAL
-        {
-            return false;
-        }
-        self.last[slot] = Some(now);
-        true
+        self.gate.accept(slot, now)
     }
 }
 
@@ -1363,6 +1392,38 @@ impl UiModel {
         )
     }
 
+    /// Feed one physical input event through the provenance router.
+    ///
+    /// This is the single path used by the Slint keyboard callback and the CEC
+    /// bridge. A remote origin is refused before it can become a key; while a
+    /// local confirmation is pending it produces the same rejection as the
+    /// existing remote path. The `repeat` flag is metadata: the shared repeat
+    /// gate applies the interval to both keyboard and CEC presses.
+    pub fn handle_event(&mut self, event: crate::input::InputEvent, now: Duration) -> UiOutcome {
+        match crate::input::Router::route(event) {
+            crate::input::Route::Ui { key, origin, .. } => {
+                let Some(key) = Key::from_input(key) else {
+                    return UiOutcome::Ignored;
+                };
+                self.handle_input(
+                    UiInput::LocalKey {
+                        key,
+                        origin: origin.into(),
+                    },
+                    now,
+                )
+            }
+            crate::input::Route::Volume { .. } => UiOutcome::Ignored,
+            crate::input::Route::Rejected(_) => {
+                if self.modal.is_some() {
+                    UiOutcome::Rejected(UiReject::RemoteApprovalDenied)
+                } else {
+                    UiOutcome::Ignored
+                }
+            }
+        }
+    }
+
     fn handle_local_key(&mut self, key: Key, now: Duration) -> UiOutcome {
         if !self.throttle.accept(key, now) {
             return UiOutcome::Throttled;
@@ -2061,27 +2122,7 @@ pub const VERSION_LABEL: &str = concat!("tv-client ", env!("CARGO_PKG_VERSION"))
 /// become search text; only printable characters produce [`Key::Char`].
 #[must_use]
 pub fn key_from_text(text: &str) -> Option<Key> {
-    Some(match text {
-        "\u{000a}" | "\r" => Key::Enter,
-        "\u{001b}" => Key::Escape,
-        "\u{0008}" | "\u{007f}" => Key::Backspace,
-        "\u{F700}" => Key::Up,
-        "\u{F701}" => Key::Down,
-        "\u{F702}" => Key::Left,
-        "\u{F703}" => Key::Right,
-        "\u{F729}" => Key::Home,
-        _ => {
-            let mut characters = text.chars();
-            let character = characters.next()?;
-            if characters.next().is_some()
-                || character.is_control()
-                || ('\u{F700}'..='\u{F7FF}').contains(&character)
-            {
-                return None;
-            }
-            Key::Char(character)
-        }
-    })
+    Key::from_input(crate::input::key_from_text(text)?)
 }
 
 fn format_time(milliseconds: u64) -> String {
@@ -2123,7 +2164,7 @@ mod native {
 
     use super::{
         Key, LoadState, MediaItem, PairChoice, PlayerMenu, Screen, UiInput, UiModel, UiOutcome,
-        UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, key_from_text, source_label,
+        UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, source_label,
     };
     use crate::model::Action;
 
@@ -2155,17 +2196,52 @@ mod native {
         Platform(#[from] slint::PlatformError),
     }
 
+    /// Type-erased callback for commands produced by local input.
+    type CommandSink = Arc<dyn Fn(UiCommand) + Send + Sync>;
+
     /// Weak, thread-safe handle for pushing reducer state into the window.
     ///
     /// All window mutation is queued on the Slint event loop; the handle never
-    /// blocks the caller and never performs I/O.
+    /// blocks the caller and never performs I/O. Physical input submitted from
+    /// a bridge thread is first placed in a bounded [`crate::input::InputQueue`]
+    /// and drained on the event loop, so a stalled UI cannot block CEC.
     #[derive(Clone)]
     pub struct UiHandle {
         window: slint::Weak<AppWindow>,
         model: Arc<Mutex<UiModel>>,
+        on_command: CommandSink,
+        inputs: Arc<crate::input::InputQueue>,
+        start: Instant,
     }
 
     impl UiHandle {
+        /// Submit one physical input event from a bridge thread.
+        ///
+        /// A full queue drops the event instead of blocking. The event keeps
+        /// its origin all the way to [`UiModel::handle_event`], so a remote
+        /// origin can never become a local key.
+        pub fn submit_input(&self, event: crate::input::InputEvent) {
+            if let Err(error) = self.inputs.try_push(event) {
+                let dropped = self.inputs.dropped();
+                if dropped == 1 || dropped.is_multiple_of(32) {
+                    tracing::warn!(%error, dropped, "physical input queue full; event dropped");
+                }
+                return;
+            }
+            let window = self.window.clone();
+            let model = Arc::clone(&self.model);
+            let on_command = Arc::clone(&self.on_command);
+            let inputs = Arc::clone(&self.inputs);
+            let start = self.start;
+            let _ = window.upgrade_in_event_loop(move |window| {
+                let mut model = lock_model(&model);
+                while let Some(event) = inputs.pop() {
+                    apply_input_event(&mut model, event, start.elapsed(), &on_command);
+                }
+                refresh(&window, &model);
+            });
+        }
+
         /// Post a reducer snapshot to the event loop.
         pub fn apply_state(&self, state: crate::model::AppState) {
             self.post(move |model| model.apply_state(&state));
@@ -2250,6 +2326,9 @@ mod native {
     pub struct NativeUi {
         window: AppWindow,
         model: Arc<Mutex<UiModel>>,
+        on_command: CommandSink,
+        inputs: Arc<crate::input::InputQueue>,
+        start: Instant,
     }
 
     impl NativeUi {
@@ -2270,26 +2349,41 @@ mod native {
                 model_guard.apply_state(&initial_state);
                 refresh(&window, &model_guard);
             }
-            let on_command = Arc::new(on_command);
+            let on_command: CommandSink = Arc::new(on_command);
+            let inputs = Arc::new(
+                crate::input::InputQueue::new(crate::input::DEFAULT_INPUT_CAPACITY)
+                    .expect("the default physical-input capacity is valid"),
+            );
             let start = Instant::now();
 
             {
                 let weak = window.as_weak();
                 let model = Arc::clone(&model);
                 let on_command = Arc::clone(&on_command);
-                window.on_key_pressed(move |text, _repeat| {
-                    let Some(key) = key_from_text(text.as_str()) else {
+                window.on_key_pressed(move |text, repeat| {
+                    let Some(key) = crate::input::key_from_text(text.as_str()) else {
                         return;
                     };
+                    let event = crate::input::InputEvent {
+                        origin: crate::model::InputOrigin::LocalKeyboard,
+                        key,
+                        repeat,
+                    };
                     with_window(&weak, &model, |window, model| {
-                        handle_local_input(window, model, key, start.elapsed(), &on_command);
+                        handle_input_event(window, model, event, start.elapsed(), &on_command);
                     });
                 });
             }
 
             install_pointer_callbacks(&window, &model, &on_command, start);
 
-            Ok(Self { window, model })
+            Ok(Self {
+                window,
+                model,
+                on_command,
+                inputs,
+                start,
+            })
         }
 
         /// Weak handle for a controller running on another thread.
@@ -2298,6 +2392,9 @@ mod native {
             UiHandle {
                 window: self.window.as_weak(),
                 model: Arc::clone(&self.model),
+                on_command: Arc::clone(&self.on_command),
+                inputs: Arc::clone(&self.inputs),
+                start: self.start,
             }
         }
 
@@ -2326,7 +2423,7 @@ mod native {
     fn install_pointer_callbacks(
         window: &AppWindow,
         model: &Arc<Mutex<UiModel>>,
-        on_command: &Arc<impl Fn(UiCommand) + Send + Sync + 'static>,
+        on_command: &CommandSink,
         start: Instant,
     ) {
         {
@@ -2428,28 +2525,47 @@ mod native {
         }
     }
 
-    fn handle_local_input<F>(
+    fn handle_local_input(
         window: &AppWindow,
         model: &mut UiModel,
         key: Key,
         now: Duration,
-        on_command: &Arc<F>,
-    ) where
-        F: Fn(UiCommand) + Send + Sync + 'static,
-    {
+        on_command: &CommandSink,
+    ) {
+        let event = crate::input::InputEvent {
+            origin: crate::model::InputOrigin::LocalKeyboard,
+            key: key.into_input(),
+            repeat: false,
+        };
+        handle_input_event(window, model, event, now, on_command);
+    }
+
+    fn handle_input_event(
+        window: &AppWindow,
+        model: &mut UiModel,
+        event: crate::input::InputEvent,
+        now: Duration,
+        on_command: &CommandSink,
+    ) {
+        apply_input_event(model, event, now, on_command);
+        refresh(window, model);
+    }
+
+    fn apply_input_event(
+        model: &mut UiModel,
+        event: crate::input::InputEvent,
+        now: Duration,
+        on_command: &CommandSink,
+    ) {
         let was_loading = model.is_library_loading();
-        let outcome = model.handle_key(key, now);
+        let outcome = model.handle_event(event, now);
         dispatch(on_command, outcome);
         if let Some(filter) = model.pending_library_load(was_loading) {
             (**on_command)(UiCommand::LoadLibrary { filter });
         }
-        refresh(window, model);
     }
 
-    fn dispatch<F>(on_command: &Arc<F>, outcome: UiOutcome)
-    where
-        F: Fn(UiCommand) + Send + Sync + 'static,
-    {
+    fn dispatch(on_command: &CommandSink, outcome: UiOutcome) {
         match outcome {
             UiOutcome::Action(action) => (**on_command)(UiCommand::Action(action)),
             UiOutcome::ApprovePairing { request_id } => {
