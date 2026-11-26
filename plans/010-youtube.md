@@ -12,7 +12,7 @@
 - **Category**: direction
 - **Planned at**: UNBOUND (amended 2026-11-25 for native local playback)
 - **State**: TODO (index authoritative)
-- **Cross-repo contract**: `HANDOFF.md` (untracked live handoff; baseline hash `7c9df0cc102c578700189602dc188dc603eb3703095c6704e1c69105969b9d8d`). Server S006 Phase A staging `ovh-1.minotaur-gacrux.ts.net`, release `0.1.0-ee4814880aca` (branch `advisor/s006-youtube`, commit `ee4814880aca8278ba6fd1f840d8db84e4157c3c`). Re-read the handoff before dispatch and integration.
+- **Cross-repo contract**: `HANDOFF.md` (untracked live handoff; last seen hash `082c1a98e700b2d84662d3c53ebc3ce6504ad5f078814e0575ab98c74002d689`; re-read before dispatch). Server S006 Phase A staging `ovh-1.minotaur-gacrux.ts.net`, release `0.1.0-ee4814880aca` (branch `advisor/s006-youtube`, commit `ee4814880aca8278ba6fd1f840d8db84e4157c3c`). Re-read the handoff before dispatch and integration.
 
 ## Why this matters
 The operator split YouTube work: the server owns YouTube Data API search/browse only, while the Pi resolves and plays locally with yt-dlp + libmpv + ffmpeg. No media URL, API key or player ticket crosses the wire. Playback bypasses the official embed/ads/branding path; yt-dlp is unofficial and may break. This is the accepted tradeoff.
@@ -20,8 +20,10 @@ The operator split YouTube work: the server owns YouTube Data API search/browse 
 ## Baseline evidence (advisor, 2026-11-25)
 - Server contract: `GET https://<server>/v1/youtube/search?q=<query>&page_token=<opaque>` with exactly one of device bearer or paired remote session; device bearer is the C009/C010 credential. Feature-off `404`, key/upstream `503`, bad auth `401`, bad query/token `400`, rate/quota `429`. Response `{items:[{video_id,title,channel_title,thumbnail_url}],next_page_token}`; at most 10 items; no stream URL/ticket/player endpoints.
 - Limits: query 1–100 chars; page token <=512 chars; 5-minute server cache; explicit submit only; `thumbnail_url` is official i.ytimg.com and is not a playback source.
-- Pi at amendment: `ffmpeg 7.1.5`; `mpv`, `yt-dlp`, `libmpv-dev` **ABSENT**. Install prerequisite: `sudo apt-get install -y mpv yt-dlp libmpv-dev`; verify `mpv --version`, `yt-dlp --version`, `pkg-config --modversion mpv`.
-- Pi playback context: labwc 0.20.2 with `WLR_RENDERER=pixman`; C002 found ~2.8%/2.7% presentation drops at 720p/1080p. Prefer H.264 <=720p and report actual codec/hardware decode.
+- Pi at amendment: `mpv 0.40.0`, `libmpv-dev 0.40.0` (pkg-config `2.5.0`), `ffmpeg 7.1.5`, Debian `yt-dlp 2025.04.30` installed. Verify with `mpv --version`, `yt-dlp --version`, `pkg-config --modversion mpv`.
+- `yt-dlp` policy: the distro `2025.04.30` failed a public metadata test with `The page needs to be reloaded` (a later retry succeeded, so treat it as unreliable); current PyPI `2026.11.23` in `/tmp/ytdlp-venv` resolves metadata and selected H.264 720p. The `/tmp` venv is a probe, not an install path. C010 must use a managed supported release/update policy and a kill switch; do not pin the distro binary as the playback dependency.
+- Pi playback context: the TV is **1080p**. A 12 s mpv test with current yt-dlp exited 0 with H.264 720p selected, but libplacebo Vulkan was unavailable and Vulkan H.264 hwaccel failed; explicit `v4l2m2m` verification was still pending. Do not claim hardware decode or 1080p playback until measured. C002 proved 720p30 and 1080p30 H.264 via GStreamer with ~2.8%/2.7% drops under labwc `WLR_RENDERER=pixman`.
+- Target H.264 **1080p30** where available, fall back to **720p30**; never claim 1080p60. Record the actual selected codec/resolution and whether hardware decode is used.
 - Repo baseline: C002, C003 and C005 merged; C006 provides the exclusive player supervisor; C008 input and C009 device/auth are prerequisites.
 
 ## Current state
@@ -66,7 +68,7 @@ Use the C009 device bearer; call `GET /v1/youtube/search` with query and opaque 
 
 ### Step 2: Resolve and play locally
 
-Accept only the existing `play_youtube` action with a validated 11-character `video_id`; reject arbitrary URLs and any server-supplied media URL. Resolve locally with yt-dlp using an explicit argument vector and no shell: fixed `https://www.youtube.com/watch?v=<id>` constructed from the validated ID, `--no-playlist`, bounded timeout, no persistent cache/cookies, fixed H.264 <=720p selection (prefer `avc1` + `mp4a`; do not prefer VP9/AV1). Feed libmpv directly or through its private IPC socket; use ffmpeg only for local mux/remux. Never place tokens in argv or logs; never persist media or resolved URLs.
+Accept only the existing `play_youtube` action with a validated 11-character `video_id`; reject arbitrary URLs and any server-supplied media URL. Resolve locally with a managed, current yt-dlp using an explicit argument vector and no shell: fixed `https://www.youtube.com/watch?v=<id>` constructed from the validated ID, `--no-playlist`, bounded timeout, no persistent cache/cookies, fixed H.264 **1080p30** selection with **720p30** fallback (prefer `avc1` + `mp4a`; do not prefer VP9/AV1; no 1080p60 claim). Detect stale/blocked extractors and surface a typed `ExtractorUnavailable`; honour a client kill switch and do not retry unboundedly. Feed libmpv directly or through its private IPC socket; use ffmpeg only for local mux/remux. Never place tokens in argv or logs; never persist media or resolved URLs.
 
 **Verify:** `cargo test --locked --no-default-features --test youtube` → exit 0; mock yt-dlp/mpv lifecycle, invalid ID, missing binary, non-zero exit, timeout, cancellation, late events, duplicate actions.
 
@@ -78,7 +80,7 @@ Integrate with the C006 exclusive player supervisor; never run a Jellyfin GStrea
 
 ### Step 4: Real Pi playback
 
-Install/verify `mpv`, `yt-dlp`, `libmpv-dev`; use a public video and the 720p H.264 path. Run short load/seek/pause/stop cycles (not a long soak unless the operator asks), report actual codec/decoder, CPU, memory, temperature, FD count, and clean teardown. Do not run at the same time as C006/Jellyfin playback.
+Verify the managed yt-dlp, `mpv` and `libmpv-dev`; use a public video and try H.264 1080p30, then 720p30 fallback. Explicitly test the Pi `v4l2m2m`/hardware decode path and record whether it is actually used; Vulkan hwaccel is not assumed. Run short load/seek/pause/stop cycles (not a long soak unless the operator asks), report actual codec/resolution/decoder, CPU, memory, temperature, FD count, and clean teardown. Do not run at the same time as C006/Jellyfin playback.
 
 **Verify:** `test -s docs/youtube.md` → exit 0; documented real measurements must meet the stated gate, file existence alone is not acceptance.
 
@@ -92,8 +94,8 @@ Mock server search responses and mock yt-dlp/mpv children: auth header, paging, 
 - [ ] Reviewer independently reruns checks and records evidence, commit ID and verdict in index after merge (or records approved awaiting merge as IN PROGRESS).
 
 ## STOP conditions
-- `mpv`, `yt-dlp`, `libmpv-dev` unavailable; Pi cannot decode a usable 720p H.264 path; exclusive ownership cannot be guaranteed; server contract/handoff hash mismatches; no legitimate local playback path; yt-dlp is blocked and the operator declines the accepted risk. Do not mark DONE on simulated results.
+- `mpv`, `libmpv-dev` or a managed current yt-dlp unavailable; the extractor is stale/blocked with no supported update path or kill switch; Pi cannot decode a usable 1080p30 or 720p30 H.264 path; exclusive ownership cannot be guaranteed; server contract/handoff hash mismatches; no legitimate local playback path; the operator declines the accepted yt-dlp risk. Do not mark DONE on simulated results.
 - Prerequisite missing, baseline drift, verification fails twice, or scope expansion required. Report observed evidence and a bounded proposed next step.
 
 ## Maintenance notes
-Pin/update policy and a kill switch for yt-dlp are required before release. Age-restricted/member-only/DRM content is unsupported; do not add cookies or account credentials to the device. Report the actual selected codec and whether hardware decode is used. Ads/branding/ToS are not preserved; this is the accepted consequence. Re-read `HANDOFF.md` before integration; the server S006 Phase A branch may not be merged.
+A managed yt-dlp version/update policy and a client kill switch are required before release; the distro 2025.04.30 binary is unreliable and must not be the pinned playback dependency. Target H.264 1080p30 on the 1080p TV, fall back to 720p30, never claim 1080p60. Age-restricted/member-only/DRM content is unsupported; do not add cookies or account credentials to the device. Report the actual selected codec/resolution and whether hardware decode is used. Ads/branding/ToS are not preserved; this is the accepted consequence. Re-read `HANDOFF.md` before integration; the server S006 Phase A branch may not be merged.
