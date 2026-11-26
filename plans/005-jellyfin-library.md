@@ -12,7 +12,7 @@
 - **Category**: direction
 - **Planned at**: UNBOUND (greenfield), 2026-11-25
 - **State**: TODO (index authoritative)
-- **Test server**: Jellyfin 12.4.0 at `http://jellyfin:8096` (verified 2026-11-25); limited non-admin user `test`; credentials are in `~/.config/tv-client/jellyfin-test.env` (0600, outside the repo) and must never be committed or logged. Send the `Authorization: MediaBrowser ...` header; this server returned HTTP 400 for `X-Emby-Authorization`.
+- **Test server**: Jellyfin 12.4.0 at `http://jellyfin:8096` (verified 2026-11-25); limited non-admin user `test`; credentials are in `~/.config/tv-client/jellyfin-test.env` (0600, outside the repo) and must never be committed or logged. Send the `Authorization: MediaBrowser ...` header with `Token="..."`; this server returned HTTP 400 for `X-Emby-Authorization` and HTTP 401 for `X-Emby-Token`.
 
 ## Why this matters
 Jellyfin is authoritative for identity and library. Pi contacts it directly, independent of cloud.
