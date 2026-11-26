@@ -309,18 +309,132 @@ pub struct UserDataUpdate {
     pub is_favorite: Option<bool>,
 }
 
+/// A stream URL returned by the server.
+///
+/// The value is kept opaque: `Debug` never prints it, and [`Self::resolve`]
+/// refuses an absolute URL whose origin (or configured path prefix) differs
+/// from the configured Jellyfin server. Relative values are resolved below
+/// the configured base path, so a reverse proxy prefix is preserved.
+#[derive(Clone, PartialEq, Eq)]
+pub struct StreamUrl(String);
+
+impl StreamUrl {
+    /// Validate and retain a server-provided URL string.
+    pub fn parse(raw: &str) -> Result<Self, crate::jellyfin::JellyfinError> {
+        if raw.is_empty()
+            || raw.len() > 8192
+            || raw.chars().any(char::is_control)
+            || raw.chars().any(char::is_whitespace)
+            || raw.contains('\\')
+            || raw.starts_with("//")
+        {
+            return Err(crate::jellyfin::JellyfinError::InvalidResponse);
+        }
+        if let Ok(absolute) = url::Url::parse(raw) {
+            if !matches!(absolute.scheme(), "http" | "https")
+                || absolute.host_str().is_none()
+                || !absolute.username().is_empty()
+                || absolute.password().is_some()
+                || absolute.fragment().is_some()
+            {
+                return Err(crate::jellyfin::JellyfinError::InvalidResponse);
+            }
+        } else if !(raw.starts_with('/') || raw.contains('/')) {
+            return Err(crate::jellyfin::JellyfinError::InvalidResponse);
+        }
+        Ok(Self(raw.to_owned()))
+    }
+
+    /// Original server string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Resolve against the configured base URL and enforce the origin and
+    /// base-path allowlist.
+    pub fn resolve(&self, base: &url::Url) -> Result<url::Url, crate::jellyfin::JellyfinError> {
+        let resolved = match url::Url::parse(&self.0) {
+            Ok(absolute) => absolute,
+            Err(_) => {
+                let relative = self.0.strip_prefix('/').unwrap_or(&self.0);
+                base.join(relative)
+                    .map_err(|_| crate::jellyfin::JellyfinError::InvalidResponse)?
+            }
+        };
+        if !matches!(resolved.scheme(), "http" | "https")
+            || resolved.host_str().is_none()
+            || !resolved.username().is_empty()
+            || resolved.password().is_some()
+            || resolved.fragment().is_some()
+            || resolved.origin() != base.origin()
+            || !resolved.path().starts_with(base.path())
+        {
+            return Err(crate::jellyfin::JellyfinError::UnexpectedRedirect);
+        }
+        Ok(resolved)
+    }
+
+    /// Whether the URL is safe to hand to the media child for `base`.
+    #[must_use]
+    pub fn is_allowed_for(&self, base: &url::Url) -> bool {
+        self.resolve(base).is_ok()
+    }
+}
+
+impl std::fmt::Debug for StreamUrl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("StreamUrl(<redacted>)")
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamUrl {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Playback negotiation response.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct PlaybackInfoResponse {
     /// Opaque play-session identifier.
     pub play_session_id: Option<String>,
-    /// Media sources. URLs inside the upstream response are not modeled.
+    /// Server-side error code such as `NoCompatibleStream`.
+    pub error_code: Option<String>,
+    /// Media sources. Stream URLs are typed and origin-restricted.
     #[serde(default, deserialize_with = "null_to_default")]
     pub media_sources: Vec<MediaSourceInfo>,
 }
 
-/// One playable media source, without URLs or file paths.
+impl PlaybackInfoResponse {
+    /// Reject any stream URL outside the configured origin and base path.
+    pub fn restrict_stream_origins(
+        &self,
+        base: &url::Url,
+    ) -> Result<(), crate::jellyfin::JellyfinError> {
+        for source in &self.media_sources {
+            for url in [&source.transcoding_url, &source.direct_stream_url]
+                .into_iter()
+                .flatten()
+            {
+                url.resolve(base)?;
+            }
+            for stream in &source.media_streams {
+                if let Some(url) = &stream.delivery_url {
+                    url.resolve(base)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One playable media source, without file paths.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct MediaSourceInfo {
@@ -328,18 +442,40 @@ pub struct MediaSourceInfo {
     pub id: Option<String>,
     /// Display name.
     pub name: Option<String>,
+    /// Transport protocol, usually `Http`.
+    pub protocol: Option<String>,
     /// Container, for example `mkv`.
     pub container: Option<String>,
     /// Encoded size in bytes.
     pub size: Option<u64>,
     /// Nominal bitrate in bits per second.
     pub bitrate: Option<u64>,
+    /// Duration in 100 ns ticks.
+    pub run_time_ticks: Option<u64>,
+    /// Whether the source is outside the local network.
+    pub is_remote: bool,
     /// Direct-play capability.
     pub supports_direct_play: bool,
     /// Direct-stream capability.
     pub supports_direct_stream: bool,
     /// Transcoding capability.
     pub supports_transcoding: bool,
+    /// Whether the server can probe the source.
+    pub supports_probing: bool,
+    /// Encoded media type, for example `VideoFile`.
+    pub video_type: Option<String>,
+    /// Default audio stream index chosen by the server.
+    pub default_audio_stream_index: Option<i32>,
+    /// Default subtitle stream index chosen by the server.
+    pub default_subtitle_stream_index: Option<i32>,
+    /// HLS or HTTP transcoding URL, origin-validated by the client.
+    pub transcoding_url: Option<StreamUrl>,
+    /// Transcoding container, for example `ts`.
+    pub transcoding_container: Option<String>,
+    /// Transcoding protocol, for example `hls`.
+    pub transcoding_sub_protocol: Option<String>,
+    /// Direct-stream URL, when the server supplies one.
+    pub direct_stream_url: Option<StreamUrl>,
     /// Stream metadata.
     #[serde(default, deserialize_with = "null_to_default")]
     pub media_streams: Vec<MediaStreamInfo>,
@@ -352,14 +488,38 @@ pub struct MediaStreamInfo {
     /// Stream kind, for example `Video` or `Audio`.
     #[serde(rename = "Type")]
     pub stream_type: Option<String>,
+    /// Index inside the media source.
+    pub index: Option<i32>,
     /// Codec name.
     pub codec: Option<String>,
+    /// Codec profile such as `High`.
+    pub profile: Option<String>,
+    /// Codec level such as `41`.
+    pub level: Option<i32>,
     /// Language tag.
     pub language: Option<String>,
+    /// Human-readable title.
+    pub display_title: Option<String>,
     /// Video width in pixels.
     pub width: Option<u32>,
     /// Video height in pixels.
     pub height: Option<u32>,
+    /// Video bit depth.
+    pub bit_depth: Option<u32>,
+    /// Video range, for example `SDR` or `HDR`.
+    pub video_range: Option<String>,
+    /// Detailed video range type, for example `HDR10`.
+    pub video_range_type: Option<String>,
+    /// Pixel format.
+    pub pixel_format: Option<String>,
+    /// Colour transfer function.
+    pub color_transfer: Option<String>,
+    /// Nominal frame rate.
+    pub average_frame_rate: Option<f64>,
+    /// Nominal frame rate reported by the container.
+    pub real_frame_rate: Option<f64>,
+    /// Whether the video is interlaced.
+    pub is_interlaced: bool,
     /// Bitrate in bits per second.
     pub bit_rate: Option<u64>,
     /// Audio channel count.
@@ -368,6 +528,16 @@ pub struct MediaStreamInfo {
     pub sample_rate: Option<u32>,
     /// Whether the stream is external to the container.
     pub is_external: bool,
+    /// Whether the server marks the stream as default.
+    pub is_default: bool,
+    /// Whether the subtitle is forced.
+    pub is_forced: bool,
+    /// Whether the subtitle is text-based.
+    pub is_text_subtitle_stream: bool,
+    /// Subtitle delivery method, for example `Encode`.
+    pub delivery_method: Option<String>,
+    /// Subtitle delivery URL, when supplied.
+    pub delivery_url: Option<StreamUrl>,
 }
 
 /// A request for one cached artwork image.

@@ -1,21 +1,35 @@
 // Copyright (C) 2026 the tv-client authors.
 // SPDX-License-Identifier: GPL-3.0-only
 
-// Player surface: metadata, progress and three large controls.
+// Player surface: metadata, progress and seven large controls.
+
+export struct TrackRow {
+    label: string,
+    index: int,
+    selected: bool,
+}
 
 export component PlayerScreen inherits Rectangle {
     in property <length> base: 720px;
     in property <string> title: "Nothing playing";
     in property <string> source;
+    in property <string> method;
     in property <string> position: "0:00 / --:--";
     in property <float> progress: 0.0;
     in property <bool> paused: false;
     in property <bool> loading: false;
+    in property <bool> next-episode-available: false;
+    in property <bool> retry-available: false;
     in property <int> focus-index: 0;
+    in property <bool> track-menu-visible: false;
+    in property <string> track-menu-title;
+    in property <int> track-focus: 0;
+    in property <[TrackRow]> track-items;
 
     callback control-activated(int);
+    callback track-activated(int);
 
-    property <[string]> controls: ["Play / Pause", "Stop", "Back"];
+    property <[string]> controls: ["Play / Pause", "Subtitles", "Audio", "Next", "Retry", "Stop", "Back"];
 
     VerticalLayout {
         padding: root.base / 16;
@@ -33,7 +47,7 @@ export component PlayerScreen inherits Rectangle {
 
         Text {
             height: root.base / 12;
-            text: root.source;
+            text: root.method == "" ? root.source : root.source + " · " + root.method;
             font-size: root.base / 22;
             color: #9fc2ff;
             vertical-alignment: center;
@@ -70,7 +84,7 @@ export component PlayerScreen inherits Rectangle {
 
         HorizontalLayout {
             height: root.base / 8;
-            spacing: root.base / 28;
+            spacing: root.base / 48;
 
             for label[idx] in root.controls : Rectangle {
                 horizontal-stretch: 1;
@@ -83,9 +97,9 @@ export component PlayerScreen inherits Rectangle {
                     width: parent.width;
                     height: parent.height;
                     text: label;
-                    font-size: root.base / 20;
+                    font-size: root.base / 26;
                     font-weight: idx == root.focus-index ? 700 : 400;
-                    color: #f4f7fb;
+                    color: (idx == 3 && !root.next-episode-available) || (idx == 4 && !root.retry-available) ? #6c7a8a : #f4f7fb;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                     overflow: elide;
@@ -98,6 +112,68 @@ export component PlayerScreen inherits Rectangle {
                         root.control-activated(idx);
                     }
                 }
+            }
+        }
+    }
+
+    if root.track-menu-visible : Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        background: #0b0e13e6;
+
+        VerticalLayout {
+            padding: root.base / 12;
+            spacing: root.base / 48;
+
+            Text {
+                height: root.base / 12;
+                text: root.track-menu-title;
+                font-size: root.base / 16;
+                font-weight: 700;
+                color: #f4f7fb;
+                vertical-alignment: center;
+            }
+
+            for row[idx] in root.track-items : Rectangle {
+                height: root.base / 12;
+                border-radius: root.base / 120;
+                background: idx == root.track-focus ? #1f6feb : #151c25;
+                border-width: idx == root.track-focus ? 4px : 1px;
+                border-color: row.selected ? #a8c7ff : #2c3642;
+
+                Text {
+                    x: root.base / 32;
+                    width: parent.width - root.base / 16;
+                    height: parent.height;
+                    text: row.selected ? "✓  " + row.label : row.label;
+                    font-size: root.base / 22;
+                    color: #f4f7fb;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.track-activated(idx);
+                    }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                background: transparent;
+            }
+
+            Text {
+                height: root.base / 24;
+                text: "Enter selects · Esc closes";
+                font-size: root.base / 34;
+                color: #8fa3b8;
+                vertical-alignment: center;
             }
         }
     }
