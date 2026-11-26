@@ -2567,8 +2567,13 @@ mod native {
         }
 
         /// Clear a stale playback error before a remote retry.
+        ///
+        /// The model is updated synchronously so the cloud applier can seed
+        /// its failure detection from the cleared state; the event loop post
+        /// only refreshes the window.
         pub fn clear_player_error(&self) {
-            self.post(UiModel::clear_player_error);
+            lock_model(&self.model).clear_player_error();
+            self.post(|_model| {});
         }
 
         /// Update the persistent cloud status line.

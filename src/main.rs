@@ -663,13 +663,19 @@ impl NativeCloudApplier {
             .is_some_and(|state| state.error_code.is_some());
         let ui = self.ui_handle();
         ui.clear_player_error();
+        // `clear_player_error` updates the model synchronously, so a fast
+        // failure that sets a new error before the first 100 ms snapshot is
+        // still classified as a playback failure rather than a timeout.
+        let mut saw_recovery = !was_error
+            || self
+                .snapshot()
+                .is_some_and(|state| state.error_code.is_none());
         if let Err(rejection) = self.send_command(tv_client::playback::PlaybackCommand::Play(
             tv_client::playback::PlayRequest::new(item_id.clone()),
         )) {
             return ApplyOutcome::Rejected(rejection);
         }
         let target = item_id;
-        let mut saw_recovery = !was_error;
         match self
             .wait_for(std::time::Duration::from_secs(8), |state| {
                 if state.error_code.is_none() {
@@ -790,7 +796,8 @@ impl tv_client::cloud::CommandApplier for NativeCloudApplier {
                     match ui.apply_remote_action(request.action).await {
                         Ok(tv_client::ui::UiOutcome::Action(_))
                         | Ok(tv_client::ui::UiOutcome::Navigated { .. })
-                        | Ok(tv_client::ui::UiOutcome::Playback(_)) => ApplyOutcome::Applied,
+                        | Ok(tv_client::ui::UiOutcome::Playback(_))
+                        | Ok(tv_client::ui::UiOutcome::Retry) => ApplyOutcome::Applied,
                         Ok(tv_client::ui::UiOutcome::Ignored) => ApplyOutcome::Rejected(
                             Rejection::new("not_applicable", "the UI ignored the navigation"),
                         ),

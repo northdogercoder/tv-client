@@ -1437,6 +1437,17 @@ fn pairing_dismissal_error_clear_and_ended_state_contracts() {
     assert!(cleared.error.is_none());
     assert_eq!(cleared.source, None);
 
+    // A retry can fail before the first snapshot; the new error must remain
+    // observable rather than being mistaken for the cleared stale error.
+    model.apply_playback_update(&PlaybackUpdate::Failed {
+        item_id: Some("opaque-item".to_owned()),
+        code: "playback_failed".to_owned(),
+        message: Some("fast failure".to_owned()),
+        retry_available: true,
+    });
+    assert!(model.snapshot().error.is_some());
+    model.clear_player_error();
+
     model.apply_playback_update(&PlaybackUpdate::Loading {
         item_id: "opaque-item".to_owned(),
         title: Some("Episode one".to_owned()),
@@ -1468,6 +1479,23 @@ fn pairing_dismissal_error_clear_and_ended_state_contracts() {
             Duration::ZERO
         ),
         UiOutcome::Ignored
+    );
+}
+
+#[test]
+fn library_error_remote_select_requests_a_retry() {
+    let mut model = UiModel::new();
+    model.handle_key(Key::Down, Duration::ZERO);
+    model.handle_key(Key::Enter, Duration::ZERO);
+    model.set_library_error("offline");
+    assert_eq!(
+        model.handle_remote_action(
+            Action::Navigate {
+                direction: Direction::Select
+            },
+            Duration::ZERO
+        ),
+        UiOutcome::Retry
     );
 }
 
