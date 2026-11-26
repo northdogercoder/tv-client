@@ -56,12 +56,12 @@ CLI `tv-client enroll --config PATH --state-dir DIR` prompts token via stdin; st
 
 ### Step 2: Implement pairing and remote actions
 
-Pair init UI code, comparison code, local-only confirm; add `pair_request` WS event payload {request_id,comparison_code,expires_at} and `pair_status` as defined in docs/protocol-v1.md. Validate typed action, dedupe, send ack after real application; remote never invokes physical approval. For not yet supported play actions send rejected.
+Pair init UI code, comparison code, local-only confirm; add `pair_request` WS event payload {request_id,comparison_code,expires_at} and `pair_status` as defined in docs/protocol-v1.md. Validate typed action, dedupe, send ack after real application; remote never invokes physical approval. For `play_youtube`, route to C010's local playback path once C010 is merged and ack applied only after playback actually starts; until then reject with a typed reason. Never ack before playback is applied.
 
 **Verify:** `cargo test --locked --no-default-features --test cloud_device` → exit 0; all named checks pass; inspect actual assertions/output.
 
 ## Test plan
-Fixture parity, mock WS reconnect/heartbeat, duplicate command, expired pairing, invalid mode, no remote approval, offline no fatal exit. Integration after S004.
+Fixture parity, mock WS reconnect/heartbeat, duplicate command, expired pairing, invalid mode, no remote approval, offline no fatal exit; `play_youtube` is acked only after C010 playback actually starts. Integration after S004.
 
 ## Done criteria
 - [ ] Every step command run with actual exit status and meaningful assertions; hardware evidence where specified.
