@@ -65,21 +65,48 @@ impl Rejection {
 pub struct CommandPolicy {
     /// A local Jellyfin origin and session are configured.
     pub jellyfin: bool,
-    /// YouTube playback exists and may be started remotely.
-    ///
-    /// This stays false until the C010 playback path is merged. Advertising
-    /// it earlier would acknowledge a command before playback can start.
-    pub youtube_playback: bool,
+    /// Local YouTube playback availability.
+    pub youtube: YoutubeAccess,
+}
+
+/// Why remote YouTube playback may or may not be applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YoutubeAccess {
+    /// This build has no local playback path at all.
+    Unsupported,
+    /// The operator kill switch is off or the managed extractor is invalid.
+    Disabled,
+    /// Local playback is configured and permitted.
+    Enabled,
 }
 
 impl CommandPolicy {
-    /// Policy matching the current client build.
+    /// Policy matching the current client build (no YouTube playback).
     #[must_use]
     pub const fn for_build(jellyfin: bool) -> Self {
         Self {
             jellyfin,
-            youtube_playback: false,
+            youtube: YoutubeAccess::Unsupported,
         }
+    }
+
+    /// Policy for a build with the C010 local playback path.
+    #[must_use]
+    pub const fn with_youtube(jellyfin: bool, youtube_enabled: bool) -> Self {
+        Self {
+            jellyfin,
+            youtube: if youtube_enabled {
+                YoutubeAccess::Enabled
+            } else {
+                YoutubeAccess::Disabled
+            },
+        }
+    }
+
+    /// Whether YouTube playback is currently permitted.
+    #[must_use]
+    pub const fn youtube_playback(&self) -> bool {
+        matches!(self.youtube, YoutubeAccess::Enabled)
     }
 
     /// Check mode and permissions before any application is attempted.
@@ -103,16 +130,23 @@ impl CommandPolicy {
                 }
                 Ok(())
             }
-            Action::PlayYoutube { .. } => {
-                if self.youtube_playback {
-                    Ok(())
-                } else {
-                    Err(Rejection::unsupported(
-                        "unsupported_source",
-                        "YouTube playback is not available in this build",
-                    ))
+            Action::PlayYoutube { .. } => match self.youtube {
+                YoutubeAccess::Enabled => {
+                    if mode == Mode::Standby {
+                        Err(Rejection::invalid_mode())
+                    } else {
+                        Ok(())
+                    }
                 }
-            }
+                YoutubeAccess::Disabled => Err(Rejection::new(
+                    "youtube_disabled",
+                    "YouTube playback is disabled by local configuration",
+                )),
+                YoutubeAccess::Unsupported => Err(Rejection::unsupported(
+                    "unsupported_source",
+                    "YouTube playback is not available in this build",
+                )),
+            },
             Action::Standby { enabled: true } if mode == Mode::Standby => {
                 Err(Rejection::invalid_mode())
             }
@@ -381,6 +415,36 @@ mod tests {
                 "unsupported_source",
                 "YouTube playback is not available in this build"
             ))
+        );
+    }
+
+    #[test]
+    fn youtube_policy_distinguishes_disabled_and_enabled() {
+        let action = Action::PlayYoutube {
+            video_id: "M7lc1UVf-VE".to_owned(),
+        };
+        let disabled = CommandPolicy::with_youtube(true, false);
+        assert_eq!(
+            disabled.evaluate(&action, Mode::Home),
+            Err(Rejection::new(
+                "youtube_disabled",
+                "YouTube playback is disabled by local configuration"
+            ))
+        );
+        let enabled = CommandPolicy::with_youtube(true, true);
+        assert_eq!(enabled.evaluate(&action, Mode::Home), Ok(()));
+        assert_eq!(
+            enabled.evaluate(&action, Mode::Standby),
+            Err(Rejection::invalid_mode())
+        );
+        assert_eq!(
+            enabled.evaluate(
+                &Action::PlayYoutube {
+                    video_id: "short".to_owned()
+                },
+                Mode::Home
+            ),
+            Err(Rejection::invalid_action())
         );
     }
 }

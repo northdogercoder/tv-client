@@ -25,10 +25,12 @@ export component LibraryScreen inherits Rectangle {
     in property <bool> empty: false;
     in property <bool> error: false;
     in property <string> error-text;
+    in property <bool> next-page-available: false;
 
     callback activated(int);
     callback retry-requested();
     callback search-requested();
+    callback more-requested();
 
     changed items => {
         if root.items.length > 0 {
@@ -154,10 +156,36 @@ export component LibraryScreen inherits Rectangle {
 
         if root.empty : Text {
             height: root.base / 8;
-            text: "Nothing here yet.";
+            text: root.filter-label == "YouTube" ? "Search YouTube with Enter." : "Nothing here yet.";
             font-size: root.base / 18;
             color: #a9b7c8;
             vertical-alignment: center;
+        }
+
+        if root.next-page-available : Rectangle {
+            height: root.base / 10;
+            border-radius: root.base / 120;
+            background: #151c25;
+            border-width: 2px;
+            border-color: #38485c;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "More results";
+                font-size: root.base / 24;
+                color: #f4f7fb;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    root.more-requested();
+                }
+            }
         }
 
         list := ListView {

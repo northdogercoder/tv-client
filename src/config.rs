@@ -34,6 +34,42 @@ pub const MAX_ARTWORK_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 /// Largest configuration file accepted.
 pub const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_URL_BYTES: usize = 2048;
+const MAX_TOOL_PATH_BYTES: usize = 1024;
+
+/// Lowest accepted YouTube playback timeout.
+pub const MIN_YOUTUBE_TIMEOUT_SECS: u64 = 10;
+/// Highest accepted YouTube playback timeout.
+pub const MAX_YOUTUBE_TIMEOUT_SECS: u64 = 300;
+/// Default resolve-and-start budget for local YouTube playback.
+pub const DEFAULT_YOUTUBE_TIMEOUT_SECS: u64 = 60;
+
+/// Hardware decoding preference for the local YouTube libmpv child.
+///
+/// The value becomes an mpv `--hwdec=` argument from a fixed allowlist; it is
+/// never interpolated from remote input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum YoutubeHwdec {
+    /// Let mpv choose a safe hardware decoder, falling back to software.
+    #[default]
+    AutoSafe,
+    /// Raspberry Pi V4L2 mem-to-mem decoder.
+    V4l2m2m,
+    /// Software decoding only.
+    None,
+}
+
+impl YoutubeHwdec {
+    /// Value passed to mpv's `--hwdec` option.
+    #[must_use]
+    pub const fn as_arg(self) -> &'static str {
+        match self {
+            Self::AutoSafe => "auto-safe",
+            Self::V4l2m2m => "v4l2m2m",
+            Self::None => "no",
+        }
+    }
+}
 
 /// Strict client settings.
 ///
@@ -48,6 +84,20 @@ pub struct ClientConfig {
     pub server_url: Option<String>,
     pub cloud_enabled: bool,
     pub youtube_enabled: bool,
+    /// Local YouTube playback kill switch.
+    ///
+    /// Effective only when [`Self::youtube_ytdlp_path`] names an executable
+    /// managed extractor; a missing or invalid path silently leaves playback
+    /// disabled rather than failing startup.
+    pub youtube_playback_enabled: bool,
+    /// Absolute path to the managed `yt-dlp` release used for extraction.
+    pub youtube_ytdlp_path: Option<PathBuf>,
+    /// Optional absolute path to the mpv binary; the default is `mpv` on PATH.
+    pub youtube_mpv_path: Option<PathBuf>,
+    /// Bounded resolve-and-start budget in whole seconds.
+    pub youtube_playback_timeout_secs: u64,
+    /// Hardware decoding preference for the libmpv child.
+    pub youtube_hwdec: YoutubeHwdec,
     pub airplay_enabled: bool,
     pub webrtc_enabled: bool,
     pub max_width: u32,
@@ -66,6 +116,11 @@ impl Default for ClientConfig {
             server_url: None,
             cloud_enabled: false,
             youtube_enabled: false,
+            youtube_playback_enabled: false,
+            youtube_ytdlp_path: None,
+            youtube_mpv_path: None,
+            youtube_playback_timeout_secs: DEFAULT_YOUTUBE_TIMEOUT_SECS,
+            youtube_hwdec: YoutubeHwdec::AutoSafe,
             airplay_enabled: false,
             webrtc_enabled: false,
             max_width: 1280,
@@ -158,6 +213,20 @@ impl ClientConfig {
         if let Some(url) = self.server_url.as_deref() {
             validate_url("server_url", url, false)?;
         }
+        if !(MIN_YOUTUBE_TIMEOUT_SECS..=MAX_YOUTUBE_TIMEOUT_SECS)
+            .contains(&self.youtube_playback_timeout_secs)
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "youtube_playback_timeout_secs",
+                reason: "must be within 10..=300",
+            });
+        }
+        if let Some(path) = self.youtube_ytdlp_path.as_deref() {
+            validate_tool_path("youtube_ytdlp_path", path)?;
+        }
+        if let Some(path) = self.youtube_mpv_path.as_deref() {
+            validate_tool_path("youtube_mpv_path", path)?;
+        }
         if self.cloud_enabled && self.server_url.is_none() {
             return Err(ConfigError::Missing {
                 field: "server_url",
@@ -171,6 +240,27 @@ impl ClientConfig {
             });
         }
         Ok(())
+    }
+
+    /// Whether local YouTube playback may start.
+    ///
+    /// The kill switch is `youtube_playback_enabled`; it only takes effect
+    /// when the managed extractor exists and is executable. A missing or
+    /// invalid path therefore fails safe instead of surfacing a partial
+    /// feature.
+    #[must_use]
+    pub fn youtube_playback_ready(&self) -> bool {
+        self.youtube_playback_enabled
+            && self
+                .youtube_ytdlp_path
+                .as_deref()
+                .is_some_and(is_executable_file)
+    }
+
+    /// Configured resolve-and-start budget.
+    #[must_use]
+    pub fn youtube_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.youtube_playback_timeout_secs)
     }
 }
 
@@ -240,6 +330,59 @@ pub fn default_config_path() -> Option<PathBuf> {
     env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(|home| PathBuf::from(home).join(".config/tv-client/client.toml"))
+}
+
+fn validate_tool_path(field: &'static str, path: &Path) -> Result<(), ConfigError> {
+    let raw = path.as_os_str();
+    let bytes = raw.len();
+    if bytes == 0 || bytes > MAX_TOOL_PATH_BYTES {
+        return Err(ConfigError::InvalidValue {
+            field,
+            reason: "must be a non-empty absolute path of at most 1024 bytes",
+        });
+    }
+    if !path.is_absolute() {
+        return Err(ConfigError::InvalidValue {
+            field,
+            reason: "must be an absolute path",
+        });
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(ConfigError::InvalidValue {
+            field,
+            reason: "must not contain parent-directory components",
+        });
+    }
+    if !raw.to_str().is_some_and(|text| {
+        !text.is_empty() && !text.chars().any(|character| character.is_control())
+    }) {
+        return Err(ConfigError::InvalidValue {
+            field,
+            reason: "must be valid UTF-8 without control characters",
+        });
+    }
+    Ok(())
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn validate_url(

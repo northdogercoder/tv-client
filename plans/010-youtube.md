@@ -56,6 +56,7 @@ C002–C009 are merged; the C010 target files are absent. Add `src/youtube/`, th
 - `tests/youtube.rs`
 - `docs/youtube.md`
 - `docs/build.md`
+- `docs/config.md`
 
 **Out of scope**: sibling repository, protocol contract edits, plans index edits by executor, Chromium/IFrame/ticket/player-bridge code, server-side download/relay or media proxy, arbitrary URL playback, cookies/account credentials, DRM/age-restriction bypass, ad blocking, persistent media, destructive infrastructure changes. If a required file is missing from scope, STOP and request a scope amendment.
 

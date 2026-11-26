@@ -17,6 +17,7 @@ pub mod player;
 pub mod state;
 pub mod storage;
 pub mod ui;
+pub mod youtube;
 
 pub use cloud::{
     CloudError, CloudHttp, DeviceLink, DeviceToken, Enrollment, EnrollmentToken, LinkConfig,

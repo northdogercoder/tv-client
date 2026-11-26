@@ -401,6 +401,24 @@ pub enum UiOutcome {
     DenyPairing { request_id: Uuid },
     /// Start a pairing-code request from the local settings screen.
     StartPairing,
+    /// Submit one explicit YouTube search after local input.
+    YoutubeSearch {
+        /// Monotonic request identifier used to drop late results.
+        request_id: u64,
+        /// Validated query text.
+        query: String,
+    },
+    /// Fetch the next page of the active YouTube search.
+    YoutubeMore {
+        /// Monotonic request identifier.
+        request_id: u64,
+        /// Query the page continues.
+        query: String,
+        /// Opaque server continuation token.
+        page_token: String,
+    },
+    /// Cancel the in-flight YouTube search.
+    YoutubeCancel,
     /// Ask the owner to retry the current library load.
     Retry,
     /// Ask the controller to act on the active playback.
@@ -533,11 +551,34 @@ impl Default for PlayerView {
     }
 }
 
+/// Server-backed YouTube results, kept separate from the local Jellyfin list.
+#[derive(Debug, Clone)]
+struct YoutubeView {
+    items: Vec<MediaItem>,
+    load: LoadState,
+    next_page_token: Option<String>,
+    query: String,
+    pending: Option<u64>,
+}
+
+impl Default for YoutubeView {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            load: LoadState::Idle,
+            next_page_token: None,
+            query: String::new(),
+            pending: None,
+        }
+    }
+}
+
 /// Library-screen projection with stable selection across refreshes.
 #[derive(Debug, Clone)]
 struct LibraryView {
     filter: SourceFilter,
     items: Vec<MediaItem>,
+    youtube: YoutubeView,
     focus: usize,
     selected: Option<String>,
     load: LoadState,
@@ -550,6 +591,7 @@ impl Default for LibraryView {
         Self {
             filter: SourceFilter::All,
             items: Vec::new(),
+            youtube: YoutubeView::default(),
             focus: 0,
             selected: None,
             load: LoadState::Idle,
@@ -560,6 +602,30 @@ impl Default for LibraryView {
 }
 
 impl LibraryView {
+    fn active_items(&self) -> &[MediaItem] {
+        if self.filter == SourceFilter::YouTube {
+            &self.youtube.items
+        } else {
+            &self.items
+        }
+    }
+
+    fn active_load(&self) -> &LoadState {
+        if self.filter == SourceFilter::YouTube {
+            &self.youtube.load
+        } else {
+            &self.load
+        }
+    }
+
+    fn active_load_mut(&mut self) -> &mut LoadState {
+        if self.filter == SourceFilter::YouTube {
+            &mut self.youtube.load
+        } else {
+            &mut self.load
+        }
+    }
+
     fn matches_query(&self, item: &MediaItem) -> bool {
         let query = self.query.trim().to_lowercase();
         query.is_empty()
@@ -568,7 +634,7 @@ impl LibraryView {
     }
 
     fn visible_indices(&self) -> Vec<usize> {
-        self.items
+        self.active_items()
             .iter()
             .enumerate()
             .filter(|(_, item)| self.filter.matches(item.source) && self.matches_query(item))
@@ -577,9 +643,10 @@ impl LibraryView {
     }
 
     fn visible(&self) -> Vec<&MediaItem> {
+        let items = self.active_items();
         self.visible_indices()
             .into_iter()
-            .map(|index| &self.items[index])
+            .map(|index| &items[index])
             .collect()
     }
 
@@ -590,6 +657,15 @@ impl LibraryView {
         self.refresh_selection();
     }
 
+    fn set_youtube_page(&mut self, items: Vec<MediaItem>, next_page_token: Option<String>) {
+        let mut items = items;
+        items.truncate(MAX_LIBRARY_ITEMS);
+        self.youtube.items = items;
+        self.youtube.next_page_token = next_page_token;
+        self.youtube.load = LoadState::Ready;
+        self.refresh_selection();
+    }
+
     fn refresh_selection(&mut self) {
         let visible = self.visible_indices();
         if visible.is_empty() {
@@ -597,19 +673,24 @@ impl LibraryView {
             self.selected = None;
         } else {
             let previous = self.selected.take();
+            let items = if self.filter == SourceFilter::YouTube {
+                &self.youtube.items
+            } else {
+                &self.items
+            };
             let position = previous
                 .as_ref()
-                .and_then(|id| {
-                    visible
-                        .iter()
-                        .position(|index| &self.items[*index].id == id)
-                })
+                .and_then(|id| visible.iter().position(|index| &items[*index].id == id))
                 .unwrap_or_else(|| self.focus.min(visible.len() - 1));
             self.focus = position;
-            self.selected = Some(self.items[visible[position]].id.clone());
+            self.selected = Some(items[visible[position]].id.clone());
         }
-        if !matches!(self.load, LoadState::Loading | LoadState::Error { .. }) {
-            self.load = if visible.is_empty() {
+        let loading_or_error = matches!(
+            self.active_load(),
+            LoadState::Loading | LoadState::Error { .. }
+        );
+        if !loading_or_error {
+            *self.active_load_mut() = if visible.is_empty() {
                 LoadState::Empty
             } else {
                 LoadState::Ready
@@ -622,8 +703,13 @@ impl LibraryView {
         let Some(item) = visible.get(index) else {
             return false;
         };
+        let items = if self.filter == SourceFilter::YouTube {
+            &self.youtube.items
+        } else {
+            &self.items
+        };
         self.focus = index;
-        self.selected = Some(self.items[*item].id.clone());
+        self.selected = Some(items[*item].id.clone());
         true
     }
 
@@ -652,6 +738,7 @@ pub struct UiModel {
     throttle: RepeatThrottle,
     resume: Option<MediaItem>,
     continue_watching: Vec<MediaItem>,
+    youtube_request_id: u64,
 }
 
 impl Default for UiModel {
@@ -672,6 +759,7 @@ impl Default for UiModel {
             throttle: RepeatThrottle::default(),
             resume: None,
             continue_watching: Vec::new(),
+            youtube_request_id: 0,
         }
     }
 }
@@ -713,10 +801,10 @@ impl UiModel {
         &self.status
     }
 
-    /// Library load state.
+    /// Library load state for the current filter.
     #[must_use]
     pub fn library_load(&self) -> &LoadState {
-        &self.library.load
+        self.library.active_load()
     }
 
     /// Library source filter.
@@ -725,10 +813,10 @@ impl UiModel {
         self.library.filter
     }
 
-    /// Whether the library screen is waiting for a controller fetch.
+    /// Whether the library screen is waiting for a fetch.
     #[must_use]
     pub fn is_library_loading(&self) -> bool {
-        self.screen == Screen::Library && matches!(&self.library.load, LoadState::Loading)
+        self.screen == Screen::Library && matches!(self.library.active_load(), LoadState::Loading)
     }
 
     /// The filter to fetch when an input transitioned into Loading.
@@ -738,7 +826,8 @@ impl UiModel {
     /// load request per transition.
     #[must_use]
     pub fn pending_library_load(&self, was_loading: bool) -> Option<SourceFilter> {
-        if was_loading || !self.is_library_loading() {
+        if was_loading || !self.is_library_loading() || self.library.filter == SourceFilter::YouTube
+        {
             None
         } else {
             Some(self.library.filter)
@@ -766,7 +855,10 @@ impl UiModel {
     /// Error text for the library screen, if any.
     #[must_use]
     pub fn library_error_text(&self) -> &str {
-        self.library.load.error_message().unwrap_or_default()
+        self.library
+            .active_load()
+            .error_message()
+            .unwrap_or_default()
     }
 
     /// Items matching the current filter and search query.
@@ -1201,30 +1293,121 @@ impl UiModel {
         self.library.select(index)
     }
 
-    /// Open a library filter and mark it as loading.
+    /// Open a library filter.
+    ///
+    /// Jellyfin is fetched by the playback controller; YouTube is fetched only
+    /// after an explicit local search submit, so opening it shows the search
+    /// prompt instead of an indefinite loading state.
     pub fn open_library(&mut self, filter: SourceFilter) {
         self.screen = Screen::Library;
         self.library.filter = filter;
-        self.library.items.clear();
+        // The cached Jellyfin list survives a YouTube detour; only a
+        // Jellyfin-backed open resets it.
+        if filter != SourceFilter::YouTube {
+            self.library.items.clear();
+        }
         self.library.selected = None;
         self.library.focus = 0;
         self.library.query.clear();
         self.library.searching = false;
-        self.library.load = LoadState::Loading;
+        if filter == SourceFilter::YouTube {
+            self.library.youtube.load = if self.library.youtube.items.is_empty() {
+                LoadState::Empty
+            } else {
+                LoadState::Ready
+            };
+        } else {
+            self.library.load = LoadState::Loading;
+        }
         self.refresh_status();
     }
 
-    /// Replace the library contents, preserving focus by item identifier.
+    /// Replace the local Jellyfin library contents, preserving focus by
+    /// identifier.
     pub fn set_library_items(&mut self, items: Vec<MediaItem>) {
-        self.library.set_items(items);
+        if self.library.filter == SourceFilter::YouTube {
+            self.library.set_youtube_page(items, None);
+        } else {
+            self.library.set_items(items);
+        }
         if self.screen == Screen::Library {
             self.refresh_status();
         }
     }
 
+    /// Replace YouTube results for the current request.
+    ///
+    /// A result for a superseded request is ignored, so a slow page cannot
+    /// overwrite a newer query or a cancelled search.
+    pub fn set_youtube_page(
+        &mut self,
+        request_id: u64,
+        items: Vec<MediaItem>,
+        next_page_token: Option<String>,
+    ) -> bool {
+        if self.library.youtube.pending != Some(request_id) {
+            return false;
+        }
+        self.library.youtube.pending = None;
+        // A continuation page extends the existing list; a new query replaced
+        // it with an empty list when it was submitted.
+        let items = if matches!(self.library.youtube.load, LoadState::Loading)
+            && !self.library.youtube.items.is_empty()
+        {
+            let mut combined = std::mem::take(&mut self.library.youtube.items);
+            combined.extend(items);
+            combined
+        } else {
+            items
+        };
+        self.library.set_youtube_page(items, next_page_token);
+        if self.screen == Screen::Library {
+            self.refresh_status();
+        }
+        true
+    }
+
+    /// Mark the active YouTube request as loading.
+    pub fn set_youtube_loading(&mut self, request_id: u64) -> bool {
+        if self.library.youtube.pending != Some(request_id) {
+            return false;
+        }
+        self.library.youtube.load = LoadState::Loading;
+        if self.screen == Screen::Library {
+            self.refresh_status();
+        }
+        true
+    }
+
+    /// Report a bounded YouTube search failure for the current request.
+    pub fn set_youtube_error(&mut self, request_id: u64, message: &str) -> bool {
+        if self.library.youtube.pending != Some(request_id) {
+            return false;
+        }
+        self.library.youtube.pending = None;
+        let message = sanitize(message, MAX_ERROR_CHARS, "YouTube search failed");
+        self.library.youtube.load = LoadState::Error { message };
+        self.library.youtube.items.clear();
+        self.library.youtube.next_page_token = None;
+        self.library.refresh_selection();
+        self.library.searching = false;
+        if self.screen == Screen::Library {
+            self.refresh_status();
+        }
+        true
+    }
+
+    /// Whether a next YouTube page can be requested.
+    #[must_use]
+    pub fn youtube_next_page_available(&self) -> bool {
+        self.library.filter == SourceFilter::YouTube
+            && self.library.youtube.pending.is_none()
+            && self.library.youtube.next_page_token.is_some()
+    }
+
     /// Mark the library as loading without touching the retained items.
     pub fn set_library_loading(&mut self) {
-        self.library.load = LoadState::Loading;
+        *self.library.active_load_mut() = LoadState::Loading;
         if self.screen == Screen::Library {
             self.refresh_status();
         }
@@ -1233,8 +1416,13 @@ impl UiModel {
     /// Show a bounded library error message.
     pub fn set_library_error(&mut self, message: &str) {
         let message = sanitize(message, MAX_ERROR_CHARS, "unknown error");
-        self.library.load = LoadState::Error { message };
-        self.library.items.clear();
+        *self.library.active_load_mut() = LoadState::Error { message };
+        if self.library.filter == SourceFilter::YouTube {
+            self.library.youtube.items.clear();
+            self.library.youtube.next_page_token = None;
+        } else {
+            self.library.items.clear();
+        }
         self.library.selected = None;
         self.library.focus = 0;
         self.library.searching = false;
@@ -1272,6 +1460,79 @@ impl UiModel {
         if self.screen == Screen::Library {
             self.refresh_status();
         }
+    }
+
+    /// Submit one explicit YouTube search.
+    ///
+    /// Typing never calls this; only a local Enter or the on-screen search
+    /// action does. The returned outcome is the only place a network request
+    /// is requested.
+    pub fn submit_youtube_search(&mut self, query: &str) -> UiOutcome {
+        let query = query.trim();
+        if query.is_empty() || query.chars().count() > crate::youtube::search::MAX_QUERY_CHARS {
+            return UiOutcome::Ignored;
+        }
+        let request_id = self.next_youtube_request();
+        self.library.youtube.pending = Some(request_id);
+        self.library.youtube.load = LoadState::Loading;
+        self.library.youtube.query = query.to_owned();
+        self.library.youtube.items.clear();
+        self.library.youtube.next_page_token = None;
+        self.library.query.clear();
+        self.library.searching = false;
+        self.library.selected = None;
+        self.library.focus = 0;
+        self.refresh_status();
+        UiOutcome::YoutubeSearch {
+            request_id,
+            query: query.to_owned(),
+        }
+    }
+
+    /// Request the next page of the active YouTube search.
+    pub fn request_youtube_more(&mut self) -> UiOutcome {
+        if !self.youtube_next_page_available() {
+            return UiOutcome::Ignored;
+        }
+        let Some(page_token) = self.library.youtube.next_page_token.take() else {
+            return UiOutcome::Ignored;
+        };
+        let request_id = self.next_youtube_request();
+        self.library.youtube.pending = Some(request_id);
+        self.library.youtube.load = LoadState::Loading;
+        self.library.searching = false;
+        self.refresh_status();
+        UiOutcome::YoutubeMore {
+            request_id,
+            query: self.library.youtube.query.clone(),
+            page_token,
+        }
+    }
+
+    /// Cancel the in-flight YouTube search, if any.
+    pub fn cancel_youtube_search(&mut self) -> bool {
+        let cancelled = self.library.youtube.pending.take().is_some();
+        if cancelled {
+            self.library.youtube.load = if self.library.youtube.items.is_empty() {
+                LoadState::Empty
+            } else {
+                LoadState::Ready
+            };
+            if self.screen == Screen::Library {
+                self.refresh_status();
+            }
+        }
+        cancelled
+    }
+
+    /// Idempotent wrapper used by the Slint bridge for the "More" control.
+    pub fn youtube_more(&mut self) -> UiOutcome {
+        self.request_youtube_more()
+    }
+
+    fn next_youtube_request(&mut self) -> u64 {
+        self.youtube_request_id = self.youtube_request_id.wrapping_add(1).max(1);
+        self.youtube_request_id
     }
 
     /// Present a pairing request for local confirmation.
@@ -1559,6 +1820,122 @@ impl UiModel {
         }
     }
 
+    /// Project the start of local YouTube playback.
+    ///
+    /// The player stays in `loading` until [`Self::youtube_playing`] reports
+    /// the backend actually opened the media.
+    pub fn youtube_loading(&mut self, video_id: String, title: Option<String>) {
+        self.screen = Screen::Player;
+        self.player.title = title.unwrap_or_else(|| format!("YouTube {video_id}"));
+        self.player.source = Some(Source::YouTube);
+        self.player.item_id = Some(video_id);
+        self.player.method.clear();
+        self.player.position_ms = 0;
+        self.player.duration_ms = None;
+        self.player.paused = false;
+        self.player.loading = true;
+        self.player.error = None;
+        self.player.audio_tracks.clear();
+        self.player.subtitle_tracks.clear();
+        self.player.selected_audio = None;
+        self.player.selected_subtitle = None;
+        self.player.next_episode = None;
+        self.player.retry_available = false;
+        self.player.menu = None;
+        self.player.menu_focus = 0;
+        self.player_focus = 0;
+        self.refresh_status();
+    }
+
+    /// Project the first playing report from the local YouTube backend.
+    pub fn youtube_playing(
+        &mut self,
+        video_id: String,
+        title: Option<String>,
+        position_ms: u64,
+        duration_ms: Option<u64>,
+        method: String,
+    ) {
+        self.screen = Screen::Player;
+        self.player.source = Some(Source::YouTube);
+        self.player.item_id = Some(video_id);
+        if let Some(title) = title {
+            self.player.title = title;
+        }
+        self.player.loading = false;
+        self.player.error = None;
+        self.player.position_ms = position_ms;
+        if duration_ms.is_some() {
+            self.player.duration_ms = duration_ms;
+        }
+        self.player.paused = false;
+        if !method.is_empty() {
+            self.player.method = sanitize(&method, 80, "");
+        }
+        self.refresh_status();
+    }
+
+    /// Project a YouTube playback progress report.
+    pub fn youtube_progress(&mut self, position_ms: u64, duration_ms: Option<u64>, paused: bool) {
+        self.player.loading = false;
+        self.player.error = None;
+        self.player.position_ms = position_ms;
+        if duration_ms.is_some() {
+            self.player.duration_ms = duration_ms;
+        }
+        self.player.paused = paused;
+        self.refresh_status();
+    }
+
+    /// Project a YouTube pause change.
+    pub fn youtube_paused(&mut self, paused: bool) {
+        self.player.paused = paused;
+        self.refresh_status();
+    }
+
+    /// Restore the launcher after YouTube playback ends.
+    pub fn youtube_ended(&mut self) {
+        self.youtube_reset_player("YouTube playback finished");
+    }
+
+    /// Restore the launcher after a stop or Back.
+    pub fn youtube_stopped(&mut self) {
+        self.youtube_reset_player("Choose a source");
+    }
+
+    /// Project a bounded local YouTube failure.
+    pub fn youtube_failed(&mut self, code: &str, message: &str, retry_available: bool) {
+        self.screen = Screen::Player;
+        self.player.loading = false;
+        self.player.paused = false;
+        self.player.retry_available = retry_available;
+        let detail = if message.is_empty() { code } else { message };
+        self.player.error = Some(sanitize(detail, MAX_ERROR_CHARS, "YouTube playback failed"));
+        self.refresh_status();
+    }
+
+    fn youtube_reset_player(&mut self, status: &str) {
+        self.screen = Screen::Home;
+        self.player.title = "Nothing playing".to_owned();
+        self.player.source = None;
+        self.player.item_id = None;
+        self.player.method.clear();
+        self.player.position_ms = 0;
+        self.player.duration_ms = None;
+        self.player.paused = false;
+        self.player.loading = false;
+        self.player.error = None;
+        self.player.audio_tracks.clear();
+        self.player.subtitle_tracks.clear();
+        self.player.selected_audio = None;
+        self.player.selected_subtitle = None;
+        self.player.next_episode = None;
+        self.player.retry_available = false;
+        self.player.menu = None;
+        self.player.menu_focus = 0;
+        self.status = status.to_owned();
+    }
+
     /// Feed one input event at a monotonic timestamp.
     pub fn handle_input(&mut self, input: UiInput, now: Duration) -> UiOutcome {
         match input {
@@ -1828,7 +2205,34 @@ impl UiModel {
     }
 
     fn activate_library(&mut self) -> UiOutcome {
-        let load = self.library.load.clone();
+        let load = self.library.active_load().clone();
+        if self.library.filter == SourceFilter::YouTube {
+            return match load {
+                LoadState::Loading => {
+                    self.status = "Searching YouTube".to_owned();
+                    UiOutcome::Ignored
+                }
+                LoadState::Idle | LoadState::Empty => {
+                    self.begin_search();
+                    self.navigated()
+                }
+                LoadState::Error { .. } => {
+                    let query = self.library.youtube.query.clone();
+                    if query.is_empty() {
+                        self.begin_search();
+                        self.navigated()
+                    } else {
+                        self.submit_youtube_search(&query)
+                    }
+                }
+                LoadState::Ready => {
+                    let Some(item) = self.focused_item().cloned() else {
+                        return UiOutcome::Rejected(UiReject::NoSelection);
+                    };
+                    self.play_item(&item)
+                }
+            };
+        }
         match load {
             LoadState::Loading | LoadState::Idle => {
                 self.status = "Still loading".to_owned();
@@ -1901,6 +2305,13 @@ impl UiModel {
     fn handle_search_key(&mut self, key: Key) -> UiOutcome {
         match key {
             Key::Escape => {
+                if self.library.filter == SourceFilter::YouTube
+                    && self.library.youtube.pending.is_some()
+                {
+                    self.end_search();
+                    self.cancel_youtube_search();
+                    return UiOutcome::YoutubeCancel;
+                }
                 self.end_search();
                 UiOutcome::Dismissed
             }
@@ -1934,6 +2345,19 @@ impl UiModel {
             Key::Right => {
                 self.set_library_filter(self.library.filter.next());
                 self.navigated()
+            }
+            Key::Enter if self.library.filter == SourceFilter::YouTube => {
+                let query = self.library.query.trim().to_owned();
+                if !query.is_empty() {
+                    return self.submit_youtube_search(&query);
+                }
+                if matches!(self.library.youtube.load, LoadState::Error { .. }) {
+                    let last = self.library.youtube.query.clone();
+                    if !last.is_empty() {
+                        return self.submit_youtube_search(&last);
+                    }
+                }
+                UiOutcome::Ignored
             }
             Key::Enter => {
                 let outcome = self.activate_library();
@@ -2296,7 +2720,15 @@ impl UiModel {
 
     fn library_status(&self) -> String {
         let filter = self.library.filter.label();
-        match &self.library.load {
+        if self.library.filter == SourceFilter::YouTube
+            && matches!(
+                self.library.active_load(),
+                LoadState::Idle | LoadState::Empty
+            )
+        {
+            return "Search YouTube with Enter".to_owned();
+        }
+        match self.library.active_load() {
             LoadState::Idle => "Choose a source".to_owned(),
             LoadState::Loading => format!("Loading {filter}"),
             LoadState::Error { message } => format!("{filter} could not load: {message}"),
@@ -2407,6 +2839,16 @@ mod native {
         Retry,
         /// The operator opened a library source; the controller should fetch it.
         LoadLibrary { filter: super::SourceFilter },
+        /// Explicit YouTube search submit from local input.
+        YoutubeSearch { request_id: u64, query: String },
+        /// Fetch the next YouTube result page.
+        YoutubeMore {
+            request_id: u64,
+            query: String,
+            page_token: String,
+        },
+        /// Cancel the in-flight YouTube search.
+        YoutubeCancel,
         /// Act on the active playback without touching the network here.
         Playback(UiPlaybackCommand),
     }
@@ -2488,6 +2930,76 @@ mod native {
         /// Report a bounded library fetch error.
         pub fn set_library_error(&self, message: String) {
             self.post(move |model| model.set_library_error(&message));
+        }
+
+        /// Mark a YouTube request as loading.
+        pub fn set_youtube_loading(&self, request_id: u64) {
+            self.post(move |model| {
+                model.set_youtube_loading(request_id);
+            });
+        }
+
+        /// Replace YouTube results for a request, dropping late pages.
+        pub fn set_youtube_page(
+            &self,
+            request_id: u64,
+            items: Vec<MediaItem>,
+            next_page_token: Option<String>,
+        ) {
+            self.post(move |model| {
+                model.set_youtube_page(request_id, items, next_page_token);
+            });
+        }
+
+        /// Report a bounded YouTube search failure, dropping late errors.
+        pub fn set_youtube_error(&self, request_id: u64, message: String) {
+            self.post(move |model| {
+                model.set_youtube_error(request_id, &message);
+            });
+        }
+
+        /// Project the start of YouTube playback.
+        pub fn youtube_loading(&self, video_id: String, title: Option<String>) {
+            self.post(move |model| model.youtube_loading(video_id, title));
+        }
+
+        /// Project the first playing report.
+        pub fn youtube_playing(
+            &self,
+            video_id: String,
+            title: Option<String>,
+            position_ms: u64,
+            duration_ms: Option<u64>,
+            method: String,
+        ) {
+            self.post(move |model| {
+                model.youtube_playing(video_id, title, position_ms, duration_ms, method);
+            });
+        }
+
+        /// Project a progress report.
+        pub fn youtube_progress(&self, position_ms: u64, duration_ms: Option<u64>, paused: bool) {
+            self.post(move |model| model.youtube_progress(position_ms, duration_ms, paused));
+        }
+
+        /// Project a pause change.
+        pub fn youtube_paused(&self, paused: bool) {
+            self.post(move |model| model.youtube_paused(paused));
+        }
+
+        /// Restore the launcher after playback ends.
+        pub fn youtube_ended(&self) {
+            self.post(UiModel::youtube_ended);
+        }
+
+        /// Restore the launcher after a stop.
+        pub fn youtube_stopped(&self) {
+            self.post(UiModel::youtube_stopped);
+        }
+
+        /// Project a typed local playback failure.
+        pub fn youtube_failed(&self, code: String, message: String, retry_available: bool) {
+            self.post(move |model| model.youtube_failed(&code, &message, retry_available));
         }
 
         /// Replace the continue-watching row from the playback controller.
@@ -2747,6 +3259,18 @@ mod native {
             let weak = window.as_weak();
             let model = Arc::clone(model);
             let on_command = Arc::clone(on_command);
+            window.on_library_more_requested(move || {
+                with_window(&weak, &model, |window, model| {
+                    let outcome = model.youtube_more();
+                    dispatch(&on_command, outcome);
+                    refresh(window, model);
+                });
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let model = Arc::clone(model);
+            let on_command = Arc::clone(on_command);
             window.on_library_retry_requested(move || {
                 with_window(&weak, &model, |window, model| {
                     handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
@@ -2869,6 +3393,21 @@ mod native {
                 (**on_command)(UiCommand::DenyPairing { request_id });
             }
             UiOutcome::StartPairing => (**on_command)(UiCommand::StartPairing),
+            UiOutcome::YoutubeSearch { request_id, query } => {
+                (**on_command)(UiCommand::YoutubeSearch { request_id, query });
+            }
+            UiOutcome::YoutubeMore {
+                request_id,
+                query,
+                page_token,
+            } => {
+                (**on_command)(UiCommand::YoutubeMore {
+                    request_id,
+                    query,
+                    page_token,
+                });
+            }
+            UiOutcome::YoutubeCancel => (**on_command)(UiCommand::YoutubeCancel),
             UiOutcome::Retry => (**on_command)(UiCommand::Retry),
             UiOutcome::Playback(command) => (**on_command)(UiCommand::Playback(command)),
             UiOutcome::Rejected(UiReject::RemoteApprovalDenied) => {
@@ -2916,6 +3455,7 @@ mod native {
         window.set_library_empty(matches!(load, LoadState::Empty));
         window.set_library_error(matches!(load, LoadState::Error { .. }));
         window.set_library_error_text(model.library_error_text().into());
+        window.set_next_page_available(model.youtube_next_page_available());
 
         let cards: Vec<MediaCard> = model
             .visible_items()
