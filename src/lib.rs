@@ -1,12 +1,15 @@
-//! Headless core library for the `tv-client` package.
+//! Core library for the `tv-client` package.
 //!
-//! Platform backends are gated behind the package feature flags declared in
-//! `Cargo.toml` (`native-ui`, `gstreamer-player`, `cec`, `airplay`, `webrtc`);
-//! none of them carry an implementation in this baseline.
+//! The portable state, storage, Jellyfin and player-protocol layers are always
+//! compiled. The GStreamer child binary and its production factory are gated
+//! behind the `gstreamer-player` feature; the other platform feature flags
+//! (`native-ui`, `cec`, `airplay`, `webrtc`) remain seams without an
+//! implementation.
 
 pub mod config;
 pub mod jellyfin;
 pub mod model;
+pub mod player;
 pub mod state;
 pub mod storage;
 
@@ -16,6 +19,11 @@ pub use jellyfin::{
     cancellation,
 };
 pub use model::{Action, AppState, Effect, Event, InputOrigin, Mode, Source, StateError};
+pub use player::{
+    ChildFactory, CommandOutcome, LoadRequest, PlayerCommand, PlayerError, PlayerEvent,
+    PlayerFailure, PlayerMachine, PlayerNotification, PlayerRequest, PlayerSession, PlayerState,
+    ProgramChildFactory, SupervisorConfig, Tracks,
+};
 pub use state::{Reducer, event_channel, run_state_loop, shutdown_channel};
 pub use storage::{LastView, ProgressRecord, Storage, StorageError};
 

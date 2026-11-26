@@ -5,13 +5,21 @@
 The Rust toolchain is pinned in `rust-toolchain.toml` to **1.100.0** with the
 `minimal` profile plus the `rustfmt` and `clippy` components. A rustup
 installation honours that pin automatically, so no per-shell override is
-needed. `Cargo.toml` sets `rust-version = "1.89"` as the package's minimum
-supported Rust version, required by the locked dependency set. The pinned
-1.100.0 toolchain is the version the project builds and checks with.
+needed. `Cargo.toml` sets `rust-version = "1.92"` as the package's minimum
+supported Rust version, required by the locked dependency set and by the
+optional GStreamer bindings (`gstreamer`, `gstreamer-video`,
+`gstreamer-audio` 0.25.4). The pinned 1.100.0 toolchain is the version the
+project builds and checks with.
 
-Both the binary and the library target are produced from the single package
-`tv-client`: `src/main.rs` is the `tv-client` binary and `src/lib.rs` is the
-`tv_client` library.
+Both binaries and the library target are produced from the single package
+`tv-client`:
+
+- `src/main.rs` is the headless `tv-client` binary.
+- `src/bin/tv-native-player.rs` is the supervised GStreamer child. It declares
+  `required-features = ["gstreamer-player"]`, so a default or
+  `--no-default-features` build does not produce it and does not link
+  GStreamer.
+- `src/lib.rs` is the `tv_client` library.
 
 ## Headless gate
 
@@ -26,32 +34,50 @@ Because clippy and test use `--locked`, a committed `Cargo.lock` must exist and
 match `Cargo.toml`.
 
 The gate is executed on **x86_64 Linux** with no platform services present.
-That host is the only architecture this baseline validates.
+That host is the only architecture the headless gate validates.
 
 ## Architecture targets
 
 The deployment target is **aarch64 (Raspberry Pi 3B)**, while the repeatable
-gate above runs on **x86_64 headless**. No aarch64 cross-compilation, device
-testing, or hardware validation is part of this baseline. A green headless
-gate therefore says nothing about behaviour on the Pi; it only establishes
-that the package compiles, lints, and passes its tests on the host that runs
-CI.
+gate above runs on **x86_64 headless**. No aarch64 cross-compilation is part of
+the gate. The native player was built and smoke-tested on the Pi itself (see
+[`player.md`](player.md)); a green headless gate still says nothing about
+playback behaviour on the Pi, it only establishes that the portable protocol
+and state machine compile, lint and pass their tests on the CI host.
 
 ## Platform features
 
-`Cargo.toml` declares five features, each currently an empty array:
+`Cargo.toml` declares five features:
 
-- `native-ui`
-- `gstreamer-player`
-- `cec`
-- `airplay`
-- `webrtc`
+- `gstreamer-player` enables the optional `gstreamer`, `gstreamer-video` and
+  `gstreamer-audio` dependencies, the `tv-native-player` binary and the
+  production child factory. The parent-side protocol and supervision code in
+  `src/player/` is always compiled and does not need GStreamer.
+- The supervisor, protocol and `ProgramChildFactory` are always compiled and
+  backend neutral, so a future libmpv/yt-dlp child can be added without
+  touching the gated GStreamer code.
+- `native-ui`, `cec`, `airplay` and `webrtc` remain empty arrays that reserve
+  future seams. No default feature is set, so a plain build stays headless.
 
-No feature enables any code yet, no default feature is set, and none of the
-platform integrations has been implemented or validated. The features exist
-only to reserve the intended seams; enabling one changes nothing observable.
-The headless gate deliberately passes `--no-default-features`, and the
-bootstrap tests exercise only the headless library and CLI.
+The headless gate deliberately passes `--no-default-features`; it exercises
+the protocol, the state machine and the scripted fake-child tests without
+GStreamer. Build the native player explicitly:
+
+```sh
+cargo build --release --features gstreamer-player
+```
+
+On the Pi, install the GStreamer development headers first:
+`libgstreamer1.0-dev` and `libgstreamer-plugins-base1.0-dev`. The runtime needs
+`gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`,
+`gstreamer1.0-plugins-bad`/`ugly` for the chosen decoders, plus
+`gstreamer1.0-libav` only if software H.264 fallback is desired.
+
+Build on the Pi from a directory on the root filesystem (for example
+`~/tv-client-c006`), not from `/tmp`: `/tmp` is a 453 MiB tmpfs on the lab
+target, so a GStreamer build fills RAM, can kill the session, and is lost on
+reboot. Use one compiler job (`CARGO_BUILD_JOBS=1`) and no debug info
+(`CARGO_PROFILE_DEV_DEBUG=0`) on the 1 GiB Pi 3B.
 
 ## Dependencies
 
@@ -59,12 +85,17 @@ The direct dependencies are:
 
 - `clap` (with the `derive` feature) for CLI parsing.
 - `serde` (with the `derive` feature) and `toml` for strict TOML decoding.
-- `tokio` (with `macros`, `rt`, `sync` and `time`) for the bounded async state
-  loop and shutdown channel.
+- `serde_json` for the player protocol and Jellyfin responses.
+- `tokio` (with `io-util`, `macros`, `process`, `rt`, `sync` and `time`) for
+  the bounded async state loop, child pipes, timeouts and shutdown channel.
 - `rusqlite` with the `bundled` feature for the embedded SQLite database.
+- `reqwest` for the Jellyfin HTTP client.
+- `url` for strict URL parsing and redaction.
 - `thiserror` for typed error enums.
 - `tracing` for structured diagnostics.
 - `uuid` (with `serde` and `v4`) for request ids and artwork file names.
+- `gstreamer`, `gstreamer-video` and `gstreamer-audio` 0.25.4, optional and
+  enabled only by `gstreamer-player`, for native playback.
 - `tempfile`, dev-only, for isolated test state directories.
 
 Their transitive dependencies follow from these direct ones. The version
