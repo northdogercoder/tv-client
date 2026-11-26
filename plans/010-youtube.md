@@ -12,10 +12,10 @@
 - **Category**: direction
 - **Planned at**: UNBOUND (amended 2026-11-25 for native local playback)
 - **State**: TODO (index authoritative)
-- **Cross-repo contract**: `HANDOFF.md` (untracked live handoff; last seen hash `1dd3fffb08d9cc51ae460a252beda3c462d21e7106a202f3fcc8367f496a556b`; re-read before dispatch). Server S006 Phase A staging `ovh-1.minotaur-gacrux.ts.net`, release `0.1.0-ee4814880aca` (branch `advisor/s006-youtube`, commit `ee4814880aca8278ba6fd1f840d8db84e4157c3c`). Re-read the handoff before dispatch and integration.
+- **Cross-repo contract**: `HANDOFF.md` (untracked live handoff; last seen hash `6305ba625f60b882e728828d462dc15b9308f1069794679c916e7fd6aa70b6a5`; re-read before dispatch). Server S006 Phase A staging `ovh-1.minotaur-gacrux.ts.net`, release `0.1.0-ee4814880aca` (branch `advisor/s006-youtube`, commit `ee4814880aca8278ba6fd1f840d8db84e4157c3c`). Re-read the handoff before dispatch and integration.
 
 ## Why this matters
-The operator split YouTube work: the server owns YouTube Data API search/browse only, while the Pi resolves and plays locally with yt-dlp + libmpv + ffmpeg. No media URL, API key or player ticket crosses the wire. Playback bypasses the official embed/ads/branding path; yt-dlp is unofficial and may break. This is the accepted tradeoff.
+The operator split YouTube work: the server owns YouTube Data API search/browse only, while the Pi resolves and plays locally with yt-dlp + libmpv + ffmpeg. No media URL, API key or player ticket crosses the wire. Playback bypasses the official embed/ads/branding path; yt-dlp is unofficial and may break. This is the accepted tradeoff. Server-side download/relay was considered and **rejected**: OVH's datacenter IP fails YouTube's bot check without cookies, and adding cookies or a media relay would violate the no-credentials/least-privilege contract and create ToS/egress exposure. Do not implement or expect a server media endpoint.
 
 ## Baseline evidence (advisor, 2026-11-25)
 - Server contract: `GET https://<server>/v1/youtube/search?q=<query>&page_token=<opaque>` with exactly one of device bearer or paired remote session; device bearer is the C009/C010 credential. Feature-off `404`, key/upstream `503`, bad auth `401`, bad query/token `400`, rate/quota `429`. Response `{items:[{video_id,title,channel_title,thumbnail_url}],next_page_token}`; at most 10 items; no stream URL/ticket/player endpoints.
@@ -53,7 +53,7 @@ C002/C003/C005 are merged. C006 is in progress and must expose a backend-agnosti
 - `tests/youtube.rs`
 - `docs/youtube.md`
 
-**Out of scope**: sibling repository, protocol contract edits, plans index edits by executor, Chromium/IFrame/ticket/player-bridge code, media relay/proxy, arbitrary URL playback, cookies/account credentials, DRM/age-restriction bypass, ad blocking, persistent media, destructive infrastructure changes. If a required file is missing from scope, STOP and request a scope amendment.
+**Out of scope**: sibling repository, protocol contract edits, plans index edits by executor, Chromium/IFrame/ticket/player-bridge code, server-side download/relay or media proxy, arbitrary URL playback, cookies/account credentials, DRM/age-restriction bypass, ad blocking, persistent media, destructive infrastructure changes. If a required file is missing from scope, STOP and request a scope amendment.
 
 ## Git workflow
 Branch `advisor/c010-youtube` from the reviewed baseline; commit logical steps using conventional commits; no automatic merge or push. Reviewer checks `git diff <BOUND_SHA>..HEAD`, untracked files, assertions, and reruns gates. Review verdict APPROVE/REVISE/BLOCK, max two revisions.
