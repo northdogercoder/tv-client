@@ -287,6 +287,7 @@ impl JellyfinClient {
             let mut path = url
                 .path_segments_mut()
                 .map_err(|_| JellyfinError::InvalidUrl)?;
+            path.pop_if_empty();
             for segment in segments {
                 path.push(segment);
             }

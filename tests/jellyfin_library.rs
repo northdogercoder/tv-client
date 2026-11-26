@@ -398,6 +398,39 @@ async fn authorization_header_is_mediabrowser_with_stable_device_id() {
 }
 
 #[tokio::test]
+async fn base_path_prefix_joins_without_duplicate_slash() {
+    let server = MockServer::start(|request| match request.path() {
+        "/jellyfin/Users/AuthenticateByName" => auth_response(),
+        "/jellyfin/Users/user-1/Views" => {
+            MockResponse::json(200, json!({"Items": [], "TotalRecordCount": 0}))
+        }
+        _ => MockResponse::empty(404),
+    });
+    let directory = temp_dir();
+    let mut storage = open_storage(&directory);
+    let (_cancel, cancel) = cancellation();
+    let url = format!("{}/jellyfin", server.url);
+    let mut client = make_client(&url, &mut storage);
+
+    login(&mut client, &mut storage, &cancel).await;
+    client.views(&cancel).await.expect("views");
+
+    let paths: Vec<String> = server
+        .requests()
+        .into_iter()
+        .map(|request| request.path().to_owned())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "/jellyfin/Users/AuthenticateByName".to_owned(),
+            "/jellyfin/Users/user-1/Views".to_owned(),
+        ]
+    );
+    assert!(paths.iter().all(|path| !path.contains("//")), "{paths:?}");
+}
+
+#[tokio::test]
 async fn quick_connect_lifecycle_polls_then_authenticates() {
     let polls = Arc::new(AtomicUsize::new(0));
     let poll_counter = Arc::clone(&polls);
