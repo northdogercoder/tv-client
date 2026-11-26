@@ -30,6 +30,18 @@ export component LibraryScreen inherits Rectangle {
     callback retry-requested();
     callback search-requested();
 
+    changed items => {
+        if root.items.length > 0 {
+            list.ensure-row-visible(root.focus-index, ScrollBehavior.instant);
+        }
+    }
+
+    changed focus-index => {
+        if root.items.length > 0 {
+            list.ensure-row-visible(root.focus-index, ScrollBehavior.instant);
+        }
+    }
+
     VerticalLayout {
         padding: root.base / 20;
         spacing: root.base / 48;
@@ -148,47 +160,49 @@ export component LibraryScreen inherits Rectangle {
             vertical-alignment: center;
         }
 
-        ListView {
+        list := ListView {
             vertical-stretch: 1;
             for card in root.items : Rectangle {
-                height: root.base / 8;
+                height: root.base / 7;
                 border-radius: root.base / 140;
                 background: card.focused ? #1f6feb : #151c25;
                 border-width: card.focused ? 4px : 1px;
                 border-color: card.focused ? #a8c7ff : #2c3642;
 
-                HorizontalLayout {
+                VerticalLayout {
+                    alignment: start;
                     padding-left: root.base / 36;
                     padding-right: root.base / 36;
-                    spacing: root.base / 30;
+                    padding-top: root.base / 80;
+                    padding-bottom: root.base / 80;
+                    spacing: root.base / 150;
+
+                    HorizontalLayout {
+                        Text {
+                            horizontal-stretch: 1;
+                            text: card.title;
+                            font-size: root.base / 20;
+                            font-weight: card.focused ? 700 : 400;
+                            color: #f4f7fb;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: card.source;
+                            font-size: root.base / 28;
+                            font-weight: 700;
+                            color: card.focused ? #ffffff : #9fc2ff;
+                            vertical-alignment: center;
+                        }
+                    }
 
                     Text {
-                        horizontal-stretch: 1;
-                        text: card.title;
-                        font-size: root.base / 18;
-                        font-weight: card.focused ? 700 : 400;
-                        color: #f4f7fb;
-                        vertical-alignment: center;
+                        text: card.subtitle;
+                        font-size: root.base / 34;
+                        color: #c6d2e1;
                         overflow: elide;
                     }
-
-                    Text {
-                        text: card.source;
-                        font-size: root.base / 26;
-                        font-weight: 700;
-                        color: card.focused ? #ffffff : #9fc2ff;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Text {
-                    x: root.base / 36;
-                    y: root.base / 17;
-                    width: parent.width - root.base / 12;
-                    text: card.subtitle;
-                    font-size: root.base / 30;
-                    color: #c6d2e1;
-                    overflow: elide;
                 }
 
                 TouchArea {

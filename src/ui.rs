@@ -579,6 +579,26 @@ impl UiModel {
         self.library.filter
     }
 
+    /// Whether the library screen is waiting for a controller fetch.
+    #[must_use]
+    pub fn is_library_loading(&self) -> bool {
+        self.screen == Screen::Library && matches!(&self.library.load, LoadState::Loading)
+    }
+
+    /// The filter to fetch when an input transitioned into Loading.
+    ///
+    /// `was_loading` is sampled before the input is applied. Every local input
+    /// path (keyboard, pointer activation, retry) uses this to emit exactly one
+    /// load request per transition.
+    #[must_use]
+    pub fn pending_library_load(&self, was_loading: bool) -> Option<SourceFilter> {
+        if was_loading || !self.is_library_loading() {
+            None
+        } else {
+            Some(self.library.filter)
+        }
+    }
+
     /// Focused index within the visible library list.
     #[must_use]
     pub const fn library_focus(&self) -> usize {
@@ -1514,6 +1534,36 @@ pub const SETTINGS_ROWS: [&str; 4] = [
 /// Package version rendered on the settings screen.
 pub const VERSION_LABEL: &str = concat!("tv-client ", env!("CARGO_PKG_VERSION"));
 
+/// Translate the text field of a Slint `KeyEvent` into a launcher key.
+///
+/// Slint uses private-use code points (`U+F700..=U+F7FF`) for named keys.
+/// Named keys without a launcher action are rejected here so they can never
+/// become search text; only printable characters produce [`Key::Char`].
+#[must_use]
+pub fn key_from_text(text: &str) -> Option<Key> {
+    Some(match text {
+        "\u{000a}" | "\r" => Key::Enter,
+        "\u{001b}" => Key::Escape,
+        "\u{0008}" | "\u{007f}" => Key::Backspace,
+        "\u{F700}" => Key::Up,
+        "\u{F701}" => Key::Down,
+        "\u{F702}" => Key::Left,
+        "\u{F703}" => Key::Right,
+        "\u{F729}" => Key::Home,
+        _ => {
+            let mut characters = text.chars();
+            let character = characters.next()?;
+            if characters.next().is_some()
+                || character.is_control()
+                || ('\u{F700}'..='\u{F7FF}').contains(&character)
+            {
+                return None;
+            }
+            Key::Char(character)
+        }
+    })
+}
+
 fn format_time(milliseconds: u64) -> String {
     let seconds = milliseconds / 1_000;
     format!("{}:{:02}", seconds / 60, seconds % 60)
@@ -1545,7 +1595,7 @@ pub use native::{NativeUi, NativeUiError, UiCommand, UiHandle};
 #[cfg(feature = "native-ui")]
 mod native {
     use std::sync::{Arc, Mutex, MutexGuard};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use slint::{ComponentHandle, ModelRc, VecModel};
     use thiserror::Error;
@@ -1553,7 +1603,7 @@ mod native {
 
     use super::{
         Key, LoadState, MediaItem, PairChoice, Screen, UiInput, UiModel, UiOutcome, UiReject,
-        VERSION_LABEL, source_label,
+        VERSION_LABEL, key_from_text, source_label,
     };
     use crate::model::Action;
 
@@ -1667,18 +1717,7 @@ mod native {
                         return;
                     };
                     with_window(&weak, &model, |window, model| {
-                        let was_loading = model.screen() == Screen::Library
-                            && matches!(model.library_load(), LoadState::Loading);
-                        let outcome = model.handle_key(key, start.elapsed());
-                        dispatch(&on_command, outcome);
-                        let loading = model.screen() == Screen::Library
-                            && matches!(model.library_load(), LoadState::Loading);
-                        if loading && !was_loading {
-                            (*on_command)(UiCommand::LoadLibrary {
-                                filter: model.library_filter(),
-                            });
-                        }
-                        refresh(window, model);
+                        handle_local_input(window, model, key, start.elapsed(), &on_command);
                     });
                 });
             }
@@ -1732,9 +1771,7 @@ mod native {
             window.on_home_activated(move |index| {
                 with_window(&weak, &model, |window, model| {
                     model.set_home_focus(index.max(0) as usize);
-                    let outcome = model.handle_key(Key::Enter, start.elapsed());
-                    dispatch(&on_command, outcome);
-                    refresh(window, model);
+                    handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
                 });
             });
         }
@@ -1745,10 +1782,8 @@ mod native {
             window.on_library_activated(move |index| {
                 with_window(&weak, &model, |window, model| {
                     if model.select_library(index.max(0) as usize) {
-                        let outcome = model.handle_key(Key::Enter, start.elapsed());
-                        dispatch(&on_command, outcome);
+                        handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
                     }
-                    refresh(window, model);
                 });
             });
         }
@@ -1758,9 +1793,7 @@ mod native {
             let on_command = Arc::clone(on_command);
             window.on_library_retry_requested(move || {
                 with_window(&weak, &model, |window, model| {
-                    let outcome = model.handle_key(Key::Enter, start.elapsed());
-                    dispatch(&on_command, outcome);
-                    refresh(window, model);
+                    handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
                 });
             });
         }
@@ -1781,9 +1814,7 @@ mod native {
             window.on_player_control_activated(move |index| {
                 with_window(&weak, &model, |window, model| {
                     model.set_player_focus(index.max(0) as usize);
-                    let outcome = model.handle_key(Key::Enter, start.elapsed());
-                    dispatch(&on_command, outcome);
-                    refresh(window, model);
+                    handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
                 });
             });
         }
@@ -1794,9 +1825,7 @@ mod native {
             window.on_settings_activated(move |index| {
                 with_window(&weak, &model, |window, model| {
                     model.set_settings_focus(index.max(0) as usize);
-                    let outcome = model.handle_key(Key::Enter, start.elapsed());
-                    dispatch(&on_command, outcome);
-                    refresh(window, model);
+                    handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
                 });
             });
         }
@@ -1807,9 +1836,7 @@ mod native {
             window.on_pair_choice_activated(move |index| {
                 with_window(&weak, &model, |window, model| {
                     model.focus_pair_choice(index.max(0) as usize);
-                    let outcome = model.handle_key(Key::Enter, start.elapsed());
-                    dispatch(&on_command, outcome);
-                    refresh(window, model);
+                    handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
                 });
             });
         }
@@ -1819,12 +1846,28 @@ mod native {
             let on_command = Arc::clone(on_command);
             window.on_back_requested(move || {
                 with_window(&weak, &model, |window, model| {
-                    let outcome = model.handle_key(Key::Escape, start.elapsed());
-                    dispatch(&on_command, outcome);
-                    refresh(window, model);
+                    handle_local_input(window, model, Key::Escape, start.elapsed(), &on_command);
                 });
             });
         }
+    }
+
+    fn handle_local_input<F>(
+        window: &AppWindow,
+        model: &mut UiModel,
+        key: Key,
+        now: Duration,
+        on_command: &Arc<F>,
+    ) where
+        F: Fn(UiCommand) + Send + Sync + 'static,
+    {
+        let was_loading = model.is_library_loading();
+        let outcome = model.handle_key(key, now);
+        dispatch(on_command, outcome);
+        if let Some(filter) = model.pending_library_load(was_loading) {
+            (**on_command)(UiCommand::LoadLibrary { filter });
+        }
+        refresh(window, model);
     }
 
     fn dispatch<F>(on_command: &Arc<F>, outcome: UiOutcome)
@@ -1864,30 +1907,6 @@ mod native {
         };
         let mut model = lock_model(model);
         action(&window, &mut model);
-    }
-
-    fn key_from_text(text: &str) -> Option<Key> {
-        Some(match text {
-            "\u{000a}" | "\r" => Key::Enter,
-            "\u{001b}" => Key::Escape,
-            "\u{0008}" | "\u{007f}" => Key::Backspace,
-            "\u{F700}" => Key::Up,
-            "\u{F701}" => Key::Down,
-            "\u{F702}" => Key::Left,
-            "\u{F703}" => Key::Right,
-            _ => {
-                let mut characters = text.chars();
-                let character = characters.next()?;
-                if characters.next().is_some() {
-                    return None;
-                }
-                if character == ' ' || !character.is_control() {
-                    Key::Char(character)
-                } else {
-                    return None;
-                }
-            }
-        })
     }
 
     fn refresh(window: &AppWindow, model: &UiModel) {

@@ -90,8 +90,9 @@ kept at large sizes. No blur, translucency, video surface or animation is used.
 
 Focus is never colour-only: the focused row changes both its background
 (`#1f6feb`) and gains a 4px light border (`#a8c7ff`), and its text weight goes
-to 700. The same treatment is used on every screen, including the pairing
-buttons. Deny is the default pairing choice and is the left-hand button.
+to 700. Unfocused pairing buttons use a 2px border and weight 400, so their
+focus is visible without relying on colour. Deny is the default pairing choice
+and is the left-hand button.
 
 ## Navigation model
 
@@ -110,6 +111,11 @@ Key mapping:
 | Home | `Action::Navigate { Home }` and return to the home screen |
 | printable character | Start search on the library screen, or append to the query while searching |
 
+Slint encodes named keys as private-use code points (`U+F700..=U+F7FF`). The
+launcher maps the arrows, Enter, Escape, Backspace and Home, and rejects every
+other named key (End, Page Up/Down, Insert, function keys) before it can become
+`Key::Char`. Such keys therefore never enter the library search query.
+
 Held arrows and Backspace pass through a 120ms per-key repeat gate
 (`REPEAT_INTERVAL`). Enter, Escape and typing are never throttled. This keeps a
 held remote from flooding the reducer with navigation commands.
@@ -117,7 +123,11 @@ held remote from flooding the reducer with navigation commands.
 Library focus is stored as an item identifier, not a slot. Refreshing the list
 re-selects the same identifier even when its position changes; if it vanished,
 the old index is clamped into the new list. This is covered by
-`focus_follows_the_item_identifier_across_a_refresh`.
+`focus_follows_the_item_identifier_across_a_refresh`. Each row is a two-band
+vertical layout (title and source, then subtitle), so the two text lines cannot
+overlap. The `ListView` calls `ensure-row-visible(focus-index,
+ScrollBehavior.instant)` whenever the model or focused index changes, keeping
+the focused row on screen.
 
 The library shows a source filter (All sources / Jellyfin / YouTube) and a
 search field. Left/Right cycles the filter; `/` or any printable character
@@ -140,7 +150,9 @@ Local and remote input are different Rust types in the view model:
 
 The confirmation prompt is the only way to approve a pairing request. It
 defaults to Deny, a wire pairing request may present it, and every interaction
-and the approval itself require a local key. Any remote action while the prompt
+and the approval itself require a local key. The modal consumes presses across
+its whole area; only its two buttons forward a choice, so an outside press
+cannot reach or mutate the hidden screen. Any remote action while the prompt
 is visible is rejected with `UiReject::RemoteApprovalDenied`; a remote-origin
 key event is rejected the same way. Remote input cannot dismiss the prompt
 either. The prompt text is a fixed string and never interpolates a
@@ -201,7 +213,7 @@ Wayland session) on 2026-11-26.
 - Toolchain: Rust 1.100.0, `CARGO_BUILD_JOBS=1`, `CARGO_INCREMENTAL=0`,
   `CARGO_PROFILE_DEV_DEBUG=0`.
 - Build: `cargo build --features native-ui` **completed** on the Pi. The first
-  compile took roughly an hour; the cached final rebuild took ~5m15s and
+  compile took roughly an hour; the cached final rebuild took ~5m51s and
   produced `~/tv-client-c004/target/debug/tv-client` (~70 MB debug). No OOM.
 - Launch: started from the active labwc session with
   `XDG_RUNTIME_DIR=/run/user/1000` and `WAYLAND_DISPLAY=wayland-0`. The window
@@ -210,17 +222,18 @@ Wayland session) on 2026-11-26.
 - Fullscreen: the `.slint` window is 1920×1080 and `NativeUi::run` sets an
   explicit physical size plus a queued fullscreen request **after** `show()`.
   A pre-show fullscreen request was ignored by labwc in testing.
-- Screenshot: `/tmp/c004-1080.png` on the Pi (1920×1080). It is not committed;
+- Screenshot: `/tmp/c004-final.png` on the Pi (1920×1080). It is not committed;
   it contains no pairing code, token, credential or library secret.
 - 720p: **NOT RUN**. The TV output is 1080p and the layout scales from the
   1280×720 design base; no 720p capture is claimed.
 - Input: physical arrows/Enter/Back were not injected (`/dev/uinput` is
-  root-only and `wtype`/`ydotool` are absent); the 15 deterministic navigation
+  root-only and `wtype`/`ydotool` are absent); the 18 deterministic navigation
   tests pass, and the operator can exercise the physical keys on the running
   window.
-- Tests: `cargo test --no-default-features --test ui_navigation` passes 15/15
+- Tests: `cargo test --no-default-features --test ui_navigation` passes 18/18
   on the host; Docker `cargo check`/`clippy --features native-ui` pass. The Pi
-  pure view-model suite also passed 15/15.
+  pure view-model suite passed 15/15 before the three review regression tests;
+  the native Pi build and launch were rerun after the fixes.
 
 This is a basic launch/fullscreen proof, not a soak or a physical-input
 acceptance run.

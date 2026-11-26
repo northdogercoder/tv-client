@@ -13,6 +13,16 @@ export component PairDialog inherits Rectangle {
 
     background: #05070a;
 
+    // Consume presses outside the two buttons. The layout below is declared
+    // later and therefore stays on top, so its buttons keep their clicks.
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => {
+            // Deliberately inert: outside-button presses must not reach the screen.
+        }
+    }
+
     VerticalLayout {
         alignment: center;
         padding: root.base / 12;
@@ -53,15 +63,15 @@ export component PairDialog inherits Rectangle {
                         horizontal-stretch: 1;
                         border-radius: root.base / 120;
                         background: root.choice == 0 ? #7d1f28 : #10161e;
-                        border-width: 4px;
-                        border-color: root.choice == 0 ? #ff9a9a : #38485c;
+                        border-width: root.choice == 0 ? 4px : 2px;
+                        border-color: root.choice == 0 ? #ff9a9a : #4a5a6e;
 
                         Text {
                             width: parent.width;
                             height: parent.height;
                             text: "Deny";
                             font-size: root.base / 18;
-                            font-weight: 700;
+                            font-weight: root.choice == 0 ? 700 : 400;
                             color: #ffffff;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -80,15 +90,15 @@ export component PairDialog inherits Rectangle {
                         horizontal-stretch: 1;
                         border-radius: root.base / 120;
                         background: root.choice == 1 ? #1f6feb : #10161e;
-                        border-width: 4px;
-                        border-color: root.choice == 1 ? #a8c7ff : #38485c;
+                        border-width: root.choice == 1 ? 4px : 2px;
+                        border-color: root.choice == 1 ? #a8c7ff : #4a5a6e;
 
                         Text {
                             width: parent.width;
                             height: parent.height;
                             text: "Allow on this TV";
                             font-size: root.base / 18;
-                            font-weight: 700;
+                            font-weight: root.choice == 1 ? 700 : 400;
                             color: #ffffff;
                             horizontal-alignment: center;
                             vertical-alignment: center;

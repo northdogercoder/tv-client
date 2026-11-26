@@ -8,7 +8,7 @@ use std::time::Duration;
 use tv_client::model::{Action, AppState, Direction, InputOrigin, Mode, Source};
 use tv_client::ui::{
     HOME_ROW_COUNT, HomeRow, Key, LoadState, MediaItem, REPEAT_INTERVAL, Screen, SourceFilter,
-    UiInput, UiModel, UiOutcome, UiReject, source_label,
+    UiInput, UiModel, UiOutcome, UiReject, key_from_text, source_label,
 };
 use uuid::Uuid;
 
@@ -496,4 +496,75 @@ fn reducer_state_projects_onto_the_player_and_screens() {
     model.apply_state(&failed);
     assert_eq!(model.screen(), Screen::Player);
     assert!(model.status_text().contains("player_exit_1"));
+}
+
+#[test]
+fn slint_special_keys_never_become_search_text() {
+    assert_eq!(key_from_text("\u{000a}"), Some(Key::Enter));
+    assert_eq!(key_from_text("\u{0008}"), Some(Key::Backspace));
+    assert_eq!(key_from_text("\u{F700}"), Some(Key::Up));
+    assert_eq!(key_from_text("\u{F729}"), Some(Key::Home));
+
+    for special in [
+        "\u{F704}", "\u{F727}", "\u{F72B}", "\u{F72C}", "\u{F72D}", "\u{F7FF}",
+    ] {
+        assert_eq!(
+            key_from_text(special),
+            None,
+            "{special:?} must not become text input"
+        );
+    }
+
+    assert_eq!(key_from_text("a"), Some(Key::Char('a')));
+    assert_eq!(key_from_text(" "), Some(Key::Char(' ')));
+    assert_eq!(key_from_text("\u{0009}"), None);
+}
+
+#[test]
+fn home_key_ends_search_instead_of_typing() {
+    let mut model = UiModel::new();
+    model.open_library(SourceFilter::Jellyfin);
+    model.set_library_items(vec![item(Source::Jellyfin, "item-a", "Alpha")]);
+    model.begin_search();
+
+    assert_eq!(
+        press(&mut model, Key::Home, 0),
+        UiOutcome::Action(Action::Navigate {
+            direction: Direction::Home
+        })
+    );
+    assert_eq!(model.screen(), Screen::Home);
+    assert_eq!(model.library_query(), "");
+    assert!(!model.searching());
+}
+
+#[test]
+fn library_load_requests_follow_loading_transitions() {
+    let mut model = UiModel::new();
+    assert!(!model.is_library_loading());
+    assert_eq!(model.pending_library_load(false), None);
+
+    model.set_home_focus(HomeRow::Jellyfin.index());
+    assert_eq!(
+        press(&mut model, Key::Enter, 0),
+        UiOutcome::Action(Action::Navigate {
+            direction: Direction::Select
+        })
+    );
+    assert!(model.is_library_loading());
+    assert_eq!(
+        model.pending_library_load(false),
+        Some(SourceFilter::Jellyfin)
+    );
+    assert_eq!(model.pending_library_load(true), None);
+
+    model.set_library_error("timeout");
+    assert!(!model.is_library_loading());
+    assert_eq!(model.pending_library_load(false), None);
+    assert_eq!(press(&mut model, Key::Enter, 200), UiOutcome::Retry);
+    assert!(model.is_library_loading());
+    assert_eq!(
+        model.pending_library_load(false),
+        Some(SourceFilter::Jellyfin)
+    );
 }
