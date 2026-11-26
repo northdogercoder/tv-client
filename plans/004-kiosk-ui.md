@@ -12,6 +12,7 @@
 - **Category**: direction
 - **Planned at**: UNBOUND (greenfield), 2026-11-25
 - **State**: TODO (index authoritative)
+- **License decision**: GPL-3.0-only (advisor, 2026-11-25; private project, no commercial distribution planned)
 
 ## Why this matters
 Native 10-foot launcher with no persistent browser. All I/O stays off Slint event loop.
@@ -50,7 +51,7 @@ Branch `advisor/c004-kiosk-ui` from reviewed baseline; commit logical steps usin
 
 ### Step 1: Build UI skeleton
 
-Use Slint winit Wayland software or FemtoVG based on C002; record license choice. Create ui/app.slint, home.slint, library.slint, player.slint, settings.slint, pair.slint, cast.slint; 16:9 layout scaled at 720/1080, large type, contrast, visible focus, no unbounded image models. Home rows: resume, Jellyfin, YouTube, Cast, settings. Add local physical confirmation modal only from local input.
+Use Slint winit Wayland software or FemtoVG based on C002; use the GPL-3.0-only option and record that choice plus its distribution obligations in `docs/design.md`. Create ui/app.slint, home.slint, library.slint, player.slint, settings.slint, pair.slint, cast.slint; 16:9 layout scaled at 720/1080, large type, contrast, visible focus, no unbounded image models. Home rows: resume, Jellyfin, YouTube, Cast, settings. Add local physical confirmation modal only from local input.
 
 **Verify:** `cargo check --locked --features native-ui` → exit 0; all named checks pass; inspect actual assertions/output.
 

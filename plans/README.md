@@ -4,7 +4,7 @@ Greenfield backlog, 2026-11-25. All rows begin TODO; no application code exists 
 
 | Plan | Title | Priority | Effort | Risk | Depends on | Status |
 |---|---|---|---|---|---|---|
-| [C001](001-bootstrap.md) | Establish a reproducible Rust client baseline | P1 | M | LOW | none | TODO |
+| [C001](001-bootstrap.md) | Establish a reproducible Rust client baseline | P1 | M | LOW | none | DONE |
 | [C002](002-hardware-spike.md) | Prove Pi graphics, H.264, audio and networking before UI work | P1 | L | HIGH | C001 | TODO |
 | [C003](003-core-state.md) | Implement typed application state, configuration and bounded persistence | P1 | M | MED | C001 | TODO |
 | [C004](004-kiosk-ui.md) | Build a native remote-first Slint launcher | P1 | L | HIGH | C002, C003 | TODO |
@@ -25,6 +25,9 @@ Independent plans can run in parallel only when their write scopes do not overla
 Cross-repository gates: C009 integration requires S002–S004; C010 real playback requires S006; C013 packaging/staging may proceed with C010 BLOCKED only after operator explicitly authorizes a reduced-scope build and advisor amends dependency; requested-scope release requires C010 PASS and S007; S008 final acceptance requires C013 evidence (C013 packaging/staging happens before S008 signoff, no cyclic dependency); C012/S009 may implement independently after local dependencies, but final DONE on both requires joint optional negotiated tests; stage code approved-awaiting-integration before final DONE. C011 AirPlay independent of OVH.
 
 Status: TODO / IN PROGRESS / DONE / BLOCKED (reason) / REJECTED (rationale). Mark DONE only after review and merge; pending hardware is BLOCKED, not DONE. Record commit, commands, hardware evidence and reviewer verdict in a notes column or below.
+
+## Execution notes
+- **C001 DONE 2026-11-25**: commit `14c3186fae4065209eb65d7a76e9c98399f778c3` merged to `main`; `bash scripts/check.sh` exit 0; bootstrap tests 3/3. C002 and C003 are the next dependency-ready plans.
 
 ## Considered and deferred
 - Full Chromecast receiver: proprietary compatibility not guaranteed; no clone in core.

@@ -12,6 +12,7 @@
 - **Category**: direction
 - **Planned at**: UNBOUND (greenfield), 2026-11-25
 - **State**: TODO (index authoritative)
+- **Test server**: Jellyfin 12.4.0 at `http://jellyfin:8096` (verified 2026-11-25); limited non-admin user `test`; credentials are in `~/.config/tv-client/jellyfin-test.env` (0600, outside the repo) and must never be committed or logged. Send the `Authorization: MediaBrowser ...` header; this server returned HTTP 400 for `X-Emby-Authorization`.
 
 ## Why this matters
 Jellyfin is authoritative for identity and library. Pi contacts it directly, independent of cloud.
@@ -47,7 +48,7 @@ Branch `advisor/c005-jellyfin-library` from reviewed baseline; commit logical st
 
 ### Step 1: Implement typed API and Quick Connect
 
-Use Reqwest with timeouts, TLS validation, configured origin incl base path, no cross-origin redirects. Verify installed Jellyfin OpenAPI/version. Implement QuickConnect Initiate/Connect and Users/AuthenticateWithQuickConnect using server documented methods, cancellation and expiry; stable device id and MediaBrowser authorization header; manual username/password fallback only over HTTPS or approved encrypted tailnet HTTP, never persist password. Logout revoke session and erase local cache/secret.
+Use Reqwest with timeouts, TLS validation, configured origin incl base path, no cross-origin redirects. Verify installed Jellyfin OpenAPI/version (server reports 12.4.0; Quick Connect is enabled). Implement QuickConnect Initiate/Connect and Users/AuthenticateWithQuickConnect using server documented methods, cancellation and expiry; stable device id and MediaBrowser authorization header; manual username/password fallback only over HTTPS or approved encrypted tailnet HTTP, never persist password. Logout revoke session and erase local cache/secret.
 
 **Verify:** `cargo test --locked --no-default-features --test jellyfin_library` → exit 0; all named checks pass; inspect actual assertions/output.
 
