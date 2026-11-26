@@ -2,7 +2,7 @@
 
 > Executor: C003. Work in an isolated worktree, follow steps in order, run each gate, and stop on mismatch. Read the full plan before acting. The reviewer (not executor) owns the index. No push, merge, deployment, or production credentials without separate operator approval.
 >
-> Drift check: planned-at is UNBOUND because this is a new repo. Advisor records actual baseline SHA with `git rev-parse HEAD` and live file excerpts (or explicitly absent) before dispatch. Then run `git diff --stat <BOUND_SHA>..HEAD -- Cargo.toml Cargo.lock src/lib.rs src/main.rs src/config.rs src/state.rs src/storage.rs src/model.rs tests/core_state.rs tests/storage.rs docs/config.md`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
+> Drift check: planned-at is bound to `7fb3da2f5ae59c98dc63e0236b24610307e00a66` (post-C001 merge and plan updates, 2026-11-25). Advisor verified the baseline and the absent target files below. Then run `git diff --stat 7fb3da2f5ae59c98dc63e0236b24610307e00a66..HEAD -- Cargo.toml Cargo.lock src/lib.rs src/main.rs src/config.rs src/state.rs src/storage.rs src/model.rs tests/core_state.rs tests/storage.rs docs/config.md`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
 
 ## Status
 - **Priority**: P1
@@ -10,14 +10,21 @@
 - **Risk**: MED
 - **Depends on**: C001
 - **Category**: direction
-- **Planned at**: UNBOUND (greenfield), 2026-11-25
+- **Planned at**: 7fb3da2f5ae59c98dc63e0236b24610307e00a66, 2026-11-25
 - **State**: TODO (index authoritative)
+
+## Baseline evidence (advisor, 2026-11-25)
+
+- Baseline `7fb3da2`; C001 merged at `14c3186`; `bash scripts/check.sh` exit 0; bootstrap tests 3/3.
+- Existing: `Cargo.toml` (clap only, edition 2024, empty platform features), `src/lib.rs` (`version()`), `src/main.rs` (clap CLI), `tests/bootstrap.rs`.
+- Absent: `src/config.rs`, `src/state.rs`, `src/storage.rs`, `src/model.rs`, `tests/core_state.rs`, `tests/storage.rs`, `docs/config.md`.
+- Host: x86_64, Rust 1.100.0 pinned. `rusqlite` must use `bundled`; the gate host has no system SQLite dev headers.
 
 ## Why this matters
 Core logic must run without OVH or any graphics stack. UI and player will communicate via typed events rather than shared mutable UI objects.
 
 ## Current state
-No repository source was provided. Expected state: prerequisite plans merged, with their tested interfaces available. Before dispatch, advisor confirms actual tree and adds excerpts if needed. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
+C001 is merged at `14c3186`; `bash scripts/check.sh` exits 0 and the bootstrap CLI/library/tests are present. C003 target files are absent; extend `src/lib.rs` and `src/main.rs` without breaking existing `--version`/`--help` behavior. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
 
 ## Commands you will need
 | Purpose | Command | Expected |
