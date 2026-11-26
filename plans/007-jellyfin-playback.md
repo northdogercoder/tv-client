@@ -2,7 +2,7 @@
 
 > Executor: C007. Work in an isolated worktree, follow steps in order, run each gate, and stop on mismatch. Read the full plan before acting. The reviewer (not executor) owns the index. No push, merge, deployment, or production credentials without separate operator approval.
 >
-> Drift check: planned-at is UNBOUND because this is a new repo. Advisor records actual baseline SHA with `git rev-parse HEAD` and live file excerpts (or explicitly absent) before dispatch. Then run `git diff --stat <BOUND_SHA>..HEAD -- Cargo.toml Cargo.lock src/lib.rs src/main.rs src/jellyfin/ src/playback.rs src/ui.rs ui/ tests/jellyfin_playback.rs docs/jellyfin.md`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
+> Drift check: planned-at is bound to `7ab8998a937519d03fba2fa4a6193f1fdd1ab943` (post-C004 merge, 2026-11-26). Advisor verified the baseline and the absent target files below. Then run `git diff --stat 7ab8998a937519d03fba2fa4a6193f1fdd1ab943..HEAD -- Cargo.toml Cargo.lock src/lib.rs src/main.rs src/jellyfin/ src/playback.rs src/ui.rs ui/ tests/jellyfin_playback.rs docs/jellyfin.md`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
 
 ## Status
 - **Priority**: P1
@@ -10,24 +10,32 @@
 - **Risk**: HIGH
 - **Depends on**: C004, C005, C006
 - **Category**: direction
-- **Planned at**: UNBOUND (greenfield), 2026-11-25
+- **Planned at**: 7ab8998a937519d03fba2fa4a6193f1fdd1ab943, 2026-11-26
 - **State**: TODO (index authoritative)
+
+## Baseline evidence (advisor, 2026-11-26)
+
+- Baseline `7ab8998`; C004, C005 and C006 are merged; host `bash scripts/check.sh` exit 0 (90 tests, 1 live ignored) and the gated GStreamer feature build/clippy pass.
+- Existing interfaces: `JellyfinClient` (auth, library, artwork, `playback_info`), `ClientConfig`/`Storage`, `PlayerSession`/supervisor, `UiModel`/`UiCommand`; fullscreen Slint launcher verified on the Pi.
+- Jellyfin test server: 12.4.0 at `http://jellyfin:8096`, limited non-admin user `test`; credentials in `~/.config/tv-client/jellyfin-test.env` (0600, outside the repo). Use `Authorization: MediaBrowser ..., Token="..."`; `X-Emby-Token` returns 401 on this server.
+- Pi: labwc 0.20.2, 1080p HDMI, GStreamer 1.26.2 `v4l2h264dec`/`waylandsink`, C006 short-run playback evidence. C002's 30-min soak was waived.
+- Absent: `src/playback.rs`, `tests/jellyfin_playback.rs`. `docs/jellyfin.md` exists from C005 and is extended here.
 
 ## Why this matters
 Do not force unsupported codecs onto the Pi or proxy through OVH; use PlaybackInfo device profiles and server-selected streams.
 
 ## Current state
-No repository source was provided. Expected state: prerequisite plans merged, with their tested interfaces available. Before dispatch, advisor confirms actual tree and adds excerpts if needed. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
+C004, C005 and C006 are merged; `bash scripts/check.sh` exits 0 and the Jellyfin/player/UI interfaces above are available. C007 target files are absent; extend the existing modules without breaking the headless or native-ui gates. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
 
 ## Commands you will need
 | Purpose | Command | Expected |
 |---|---|---|
 | Baseline | `git status --short` | clean before execution |
-| Standard check | `bash scripts/check.sh` | exit 0 (created in 001) |
+| Standard check | `bash scripts/check.sh` | exit 0 (verified on bound baseline) |
 | Format | `cargo fmt --all -- --check` | exit 0 |
 | Diff | `git diff --stat <BOUND_SHA>..HEAD` | only approved paths |
 
-Commands are proposed greenfield gates, not previously executed on this repo. The bootstrap establishes them; advisor updates this table if actual conventions differ. Real hardware checks need an operator report with command output, not simulated success.
+`bash scripts/check.sh` is verified on the bound baseline; Jellyfin playback and hardware commands have not. Real hardware checks need an operator report with command output, not simulated success.
 
 ## Scope
 **In scope** (only these files/directories; trailing slash includes descendants):
@@ -63,7 +71,7 @@ Orchestrate native player from reducer; request resume and choose compatible med
 
 ### Step 3: Real playback matrix
 
-Use limited test user and own media: H264 direct/remux, HEVC transcode, subtitles, episode resume, network interruption. Confirm dashboard play method and progress, OVH down still works. Record in docs/jellyfin.md.
+Use limited test user and own media: H264 direct/remux, HEVC transcode, subtitles, episode resume, network interruption. Confirm dashboard play method and progress, OVH down still works. Keep runs short unless the operator asks for a soak; record actual durations. Record in docs/jellyfin.md.
 
 **Verify:** `test -s docs/jellyfin.md` → exit 0; documented real measurements must meet the stated gate, file existence alone is not acceptance.
 
