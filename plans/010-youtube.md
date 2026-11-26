@@ -2,7 +2,7 @@
 
 > Executor: C010. Work in an isolated worktree, follow steps in order, run each gate, and stop on mismatch. Read the full plan and the current `HANDOFF.md` before acting. The reviewer (not executor) owns the index. No push, merge, deployment, or production credentials without separate operator approval.
 >
-> Drift check: planned-at is UNBOUND until dispatch. Before dispatch the advisor binds the actual `git rev-parse HEAD` and the current `HANDOFF.md` hash, then re-reads the handoff. Then run `git diff --stat <BOUND_SHA>..HEAD -- Cargo.toml Cargo.lock src/lib.rs src/main.rs src/youtube/ src/player/ src/ui.rs ui/ tests/youtube.rs docs/youtube.md`. If paths changed, reconcile against live code first. Do not replace placeholders with invented SHA.
+> Drift check: planned-at is bound to `6af17e4ebb65136d5fd5ae0efbd01b192e9f2543` (post-C009 merge, 2026-11-26) and the current `HANDOFF.md` hash is `6305ba625f60b882e728828d462dc15b9308f1069794679c916e7fd6aa70b6a5`; re-read the handoff before acting. Then run `git diff --stat 6af17e4ebb65136d5fd5ae0efbd01b192e9f2543..HEAD -- Cargo.toml Cargo.lock src/lib.rs src/main.rs src/youtube/ src/player/ src/cloud/action.rs src/config.rs src/ui.rs ui/ tests/youtube.rs docs/youtube.md docs/build.md`. If paths changed, reconcile against live code first. Do not replace placeholders with invented SHA.
 
 ## Status
 - **Priority**: P1
@@ -10,7 +10,7 @@
 - **Risk**: HIGH
 - **Depends on**: C006, C008, C009
 - **Category**: direction
-- **Planned at**: UNBOUND (amended 2026-11-25 for native local playback)
+- **Planned at**: 6af17e4ebb65136d5fd5ae0efbd01b192e9f2543 (amended 2026-11-25; bound 2026-11-26)
 - **State**: TODO (index authoritative)
 - **Cross-repo contract**: `HANDOFF.md` (untracked live handoff; last seen hash `6305ba625f60b882e728828d462dc15b9308f1069794679c916e7fd6aa70b6a5`; re-read before dispatch). Server S006 Phase A staging `ovh-1.minotaur-gacrux.ts.net`, release `0.1.0-ee4814880aca` (branch `advisor/s006-youtube`, commit `ee4814880aca8278ba6fd1f840d8db84e4157c3c`). Re-read the handoff before dispatch and integration.
 
@@ -24,10 +24,11 @@ The operator split YouTube work: the server owns YouTube Data API search/browse 
 - `yt-dlp` policy: the distro `2025.04.30` failed a public metadata test with `The page needs to be reloaded` (a later retry succeeded, so treat it as unreliable); current PyPI `2026.11.23` in `/tmp/ytdlp-venv` resolves metadata and selected H.264 720p. The `/tmp` venv is a probe, not an install path. C010 must use a managed supported release/update policy and a kill switch; do not pin the distro binary as the playback dependency.
 - Pi playback context: the TV is **1080p**. mpv with current yt-dlp exited 0; explicit `--hwdec=v4l2m2m` was confirmed for H.264 720p60 and 1080p60. The 1080p60 run reported **A/V desynchronization**; the 1080p30 selector fell back to 480p30 on that 60 fps test video, so no 1080p30 source has been measured. Renderer caveat: `vo=gpu`/libplacebo could not initialize Vulkan and fell back to dumb mode. Do not claim 1080p60 or a working renderer until a longer run is clean.
 - Target H.264 **1080p30**; 1080p60 hardware-decodes but currently desyncs, so fall back to 720p60/30 or fix the renderer before offering it. Record the actual selected codec/resolution, renderer and whether hardware decode is used. C002 proved 720p30 and 1080p30 H.264 via GStreamer with ~2.8%/2.7% drops under labwc `WLR_RENDERER=pixman`.
-- Repo baseline: C002, C003 and C005 merged; C006 provides the exclusive player supervisor; C008 input and C009 device/auth are prerequisites.
+- Repo baseline: C002–C009 are merged (C004 UI, C005 Jellyfin, C006 player, C007 playback, C008 input, C009 cloud); host gate exit 0 (188 tests, 2 live ignored) and combined `native-ui,gstreamer-player` clippy pass. C010 is the remaining feature.
+- Server S006 Phase A search is deployed on staging; no one-use enrollment token is available, so live search integration is pending. Local playback can still be tested with a public video via the current PyPI yt-dlp probe.
 
 ## Current state
-C002/C003/C005 are merged. C006 is in progress and must expose a backend-agnostic exclusive-owner seam; C008 and C009 are TODO. New files below are target paths; existing code must not be overwritten. Rust package is `tv-client`; typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. Never log tokens, media URLs, cookies, or full child output.
+C002–C009 are merged; the C010 target files are absent. Add `src/youtube/`, the managed yt-dlp path/kill switch in `src/config.rs`, and the `play_youtube` cloud-action route in `src/cloud/action.rs`, without breaking the headless/native-ui gates. New files below are target paths; existing code must not be overwritten. Rust package is `tv-client`; typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. Never log tokens, media URLs, cookies, or full child output.
 
 ## Commands you will need
 | Purpose | Command | Expected |
@@ -38,7 +39,7 @@ C002/C003/C005 are merged. C006 is in progress and must expose a backend-agnosti
 | Diff | `git diff --stat <BOUND_SHA>..HEAD` | only approved paths |
 | Pi tools | `ssh raspberry 'mpv --version; yt-dlp --version; pkg-config --modversion mpv'` | versions present |
 
-`bash scripts/check.sh` is verified on the bound baseline only after C006/C008/C009 are merged; playback commands are not run until the Pi tools are installed.
+`bash scripts/check.sh` is verified on the bound baseline; C010 search/playback commands are not. Pi tools are installed; use the current PyPI yt-dlp probe for a short test, not the distro binary as a production pin.
 
 ## Scope
 **In scope** (only these files/directories; trailing slash includes descendants):
@@ -48,10 +49,13 @@ C002/C003/C005 are merged. C006 is in progress and must expose a backend-agnosti
 - `src/main.rs`
 - `src/youtube/`
 - `src/player/`
+- `src/cloud/action.rs`
+- `src/config.rs`
 - `src/ui.rs`
 - `ui/`
 - `tests/youtube.rs`
 - `docs/youtube.md`
+- `docs/build.md`
 
 **Out of scope**: sibling repository, protocol contract edits, plans index edits by executor, Chromium/IFrame/ticket/player-bridge code, server-side download/relay or media proxy, arbitrary URL playback, cookies/account credentials, DRM/age-restriction bypass, ad blocking, persistent media, destructive infrastructure changes. If a required file is missing from scope, STOP and request a scope amendment.
 
@@ -68,7 +72,7 @@ Use the C009 device bearer; call `GET /v1/youtube/search` with query and opaque 
 
 ### Step 2: Resolve and play locally
 
-Accept only the existing `play_youtube` action with a validated 11-character `video_id`; reject arbitrary URLs and any server-supplied media URL. Resolve locally with a managed, current yt-dlp using an explicit argument vector and no shell: fixed `https://www.youtube.com/watch?v=<id>` constructed from the validated ID, `--no-playlist`, bounded timeout, no persistent cache/cookies, fixed H.264 **1080p30** selection with **720p30** fallback (prefer `avc1` + `mp4a`; do not prefer VP9/AV1). Do not offer 1080p60 until the A/V desync is fixed; if a 1080p60 format is selected, fall back to 720p60/30. Detect stale/blocked extractors and surface a typed `ExtractorUnavailable`; honour a client kill switch and do not retry unboundedly. Feed libmpv directly or through its private IPC socket; use ffmpeg only for local mux/remux. Never place tokens in argv or logs; never persist media or resolved URLs.
+Accept only the existing `play_youtube` action with a validated 11-character `video_id`; reject arbitrary URLs and any server-supplied media URL. Route it through `src/cloud/action.rs` instead of the C009 unsupported rejection. Resolve locally with a managed, current yt-dlp path from `src/config.rs` using an explicit argument vector and no shell: fixed `https://www.youtube.com/watch?v=<id>` constructed from the validated ID, `--no-playlist`, bounded timeout, no persistent cache/cookies, fixed H.264 **1080p30** selection with **720p30** fallback (prefer `avc1` + `mp4a`; do not prefer VP9/AV1). Do not offer 1080p60 until the A/V desync is fixed; if a 1080p60 format is selected, fall back to 720p60/30. Detect stale/blocked extractors and surface a typed `ExtractorUnavailable`; honour a client kill switch and do not retry unboundedly. Feed libmpv directly or through its private IPC socket; use ffmpeg only for local mux/remux. Never place tokens in argv or logs; never persist media or resolved URLs.
 
 **Verify:** `cargo test --locked --no-default-features --test youtube` → exit 0; mock yt-dlp/mpv lifecycle, invalid ID, missing binary, non-zero exit, timeout, cancellation, late events, duplicate actions.
 
@@ -80,7 +84,7 @@ Integrate with the C006 exclusive player supervisor; never run a Jellyfin GStrea
 
 ### Step 4: Real Pi playback
 
-Verify the managed yt-dlp, `mpv` and `libmpv-dev`; use a public video and measure H.264 1080p30, then 720p30 fallback. Explicitly test `--hwdec=v4l2m2m` and record whether it is actually used. Select and measure a working Pi renderer (Wayland/OpenGL/wlshm); do not assume libplacebo/Vulkan. Try 1080p60 only to confirm the known A/V desync and fall back to 720p60/30; do not offer it. Run short load/seek/pause/stop cycles (not a long soak unless the operator asks), report actual codec/resolution/renderer/decoder, CPU, memory, temperature, FD count, and clean teardown. Do not run at the same time as C006/Jellyfin playback.
+Verify the managed yt-dlp path from config, `mpv` and `libmpv-dev`; the current PyPI `2026.11.23` in `/tmp/ytdlp-venv` is a short-test probe, not a production pin. Use a public video and measure H.264 1080p30, then 720p30 fallback. Explicitly test `--hwdec=v4l2m2m` and record whether it is actually used. Select and measure a working Pi renderer (Wayland/OpenGL/wlshm); do not assume libplacebo/Vulkan. Try 1080p60 only to confirm the known A/V desync and fall back to 720p60/30; do not offer it. Run short load/seek/pause/stop cycles (not a long soak unless the operator asks), report actual codec/resolution/renderer/decoder, CPU, memory, temperature, FD count, and clean teardown. Do not run at the same time as C006/Jellyfin playback. Live server search needs a C009 enrollment token; use mock search until the operator mints one.
 
 **Verify:** `test -s docs/youtube.md` → exit 0; documented real measurements must meet the stated gate, file existence alone is not acceptance.
 
