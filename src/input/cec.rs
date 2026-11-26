@@ -29,7 +29,7 @@ use crate::model::InputOrigin;
 /// Largest accepted CEC monitor line in bytes.
 ///
 /// Longer lines are discarded without allocating; a truncated message is
-/// never parsed because its `ui_cmd` field may be incomplete.
+/// never parsed because its `ui-cmd` field may be incomplete.
 pub const MAX_CEC_LINE: usize = 512;
 /// How long a same-key press is treated as a held repeat rather than a new
 /// press when the TV does not send a release between repeats.
@@ -191,9 +191,11 @@ pub enum CecParse {
 
 /// Bounded parser for `cec-ctl` follow-mode output.
 ///
-/// Only `CEC_MSG_USER_CONTROL_PRESSED` messages with a supported `ui_cmd`
-/// produce events. Releases clear the held-key state. Unknown commands and
-/// other CEC traffic are ignored.
+/// Only `USER_CONTROL_PRESSED` frames (or legacy
+/// `CEC_MSG_USER_CONTROL_PRESSED`) with a supported `ui-cmd` produce events.
+/// Releases clear the held-key state, and any other received/transmitted
+/// message header cancels a stale press frame. Unknown commands and other CEC
+/// traffic are ignored.
 #[derive(Debug)]
 pub struct CecParser {
     pressed: bool,
@@ -229,31 +231,33 @@ impl CecParser {
         if line.is_empty() {
             return CecParse::Ignored;
         }
-        if line.contains("CEC_MSG_USER_CONTROL_RELEASED") {
+        if line.contains("USER_CONTROL_RELEASED") {
             self.pressed = false;
             self.held = None;
             return CecParse::Ignored;
         }
-        if line.contains("CEC_MSG_USER_CONTROL_PRESSED") {
+        if line.contains("USER_CONTROL_PRESSED") {
             self.pressed = true;
-        } else if line.contains("CEC_MSG_") {
-            // A different message starts; a stale press context cannot apply.
+        } else if line.contains("Received from")
+            || line.contains("Transmitted by")
+            || line.contains("CEC_MSG_")
+        {
+            // A different CEC message starts; a stale press context cannot
+            // apply. cec-ctl 1.30.1 prints bare names such as
+            // `ACTIVE_SOURCE (0x82):`, while older logs may use `CEC_MSG_*`.
             self.pressed = false;
         }
-        let Some(token) = line
-            .split_whitespace()
-            .find(|token| token.contains("UI_CMD_"))
-        else {
+        if !line.contains("ui-cmd:") && !line.contains("ui_cmd:") && !line.contains("UI_CMD_") {
             return CecParse::Ignored;
-        };
+        }
         if !self.pressed {
             return CecParse::Ignored;
         }
-        // A user-control message carries at most one ui_cmd; leave the press
+        // A user-control message carries at most one ui-cmd; leave the press
         // frame as soon as it is consumed so later unrelated lines cannot be
         // mistaken for another key.
         self.pressed = false;
-        let Some(key) = key_from_cec_ui_command(token) else {
+        let Some(key) = key_from_cec_ui_command(line) else {
             return CecParse::Ignored;
         };
         let repeat = self.held.is_some_and(|(held, last)| {

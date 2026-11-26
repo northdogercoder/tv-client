@@ -477,30 +477,82 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Translate one `UI_CMD_*` token from `cec-ctl` into an input key.
+/// Translate a `cec-ctl` `ui-cmd` line or legacy `UI_CMD_*` token into an
+/// input key.
 ///
-/// Unknown or unsupported commands return `None`; they never become a guess
-/// at a local key. Both `UI_CMD_BACK` and the older `UI_CMD_EXIT` map to Back,
-/// and the root/media-top menu buttons map to Home.
+/// `cec-ctl` 1.30.1 prints the real CEC names, for example
+/// `ui-cmd: up (0x01)`, `ui-cmd: pause (0x46)` and
+/// `ui-cmd: device-root-menu (0x09)`. Older fixtures and logs may print
+/// `ui_cmd: UI_CMD_UP (0x01)`; both spellings are accepted. A known command
+/// maps by name; otherwise the parenthesized `ui-cmd` opcode is used. Unknown
+/// commands return `None` and never become a guess at a local key.
 #[must_use]
-pub fn key_from_cec_ui_command(token: &str) -> Option<Key> {
-    let token = token.split_whitespace().next().unwrap_or(token);
-    let name = token
-        .trim_matches(|character: char| !(character.is_ascii_alphanumeric() || character == '_'));
+pub fn key_from_cec_ui_command(text: &str) -> Option<Key> {
+    let (value, has_ui_command) = if let Some((_, value)) = text.split_once("ui-cmd:") {
+        (value, true)
+    } else if let Some((_, value)) = text.split_once("ui_cmd:") {
+        (value, true)
+    } else {
+        (text, text.contains("UI_CMD_"))
+    };
+    let value = value.trim();
+    let token = value.split_whitespace().next()?;
+    let name = token.trim_matches(|character: char| {
+        !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+    });
+    let name = name.strip_prefix("UI_CMD_").unwrap_or(name);
+    let normalized = name.to_ascii_lowercase().replace('_', "-");
+    if let Some(key) = key_from_ui_command_name(normalized.as_str()) {
+        return Some(key);
+    }
+    if !has_ui_command {
+        return None;
+    }
+    key_from_ui_command_opcode(parse_ui_command_opcode(value)?)
+}
+
+fn key_from_ui_command_name(name: &str) -> Option<Key> {
     Some(match name {
-        "UI_CMD_UP" => Key::Up,
-        "UI_CMD_DOWN" => Key::Down,
-        "UI_CMD_LEFT" => Key::Left,
-        "UI_CMD_RIGHT" => Key::Right,
-        "UI_CMD_SELECT" | "UI_CMD_ENTER" => Key::Select,
-        "UI_CMD_BACK" | "UI_CMD_EXIT" => Key::Back,
-        "UI_CMD_DEVICE_ROOT_MENU" | "UI_CMD_MEDIA_TOP_MENU" | "UI_CMD_CONTENTS_MENU" => Key::Home,
-        "UI_CMD_PLAY" | "UI_CMD_PAUSE" | "UI_CMD_PLAY_FUNCTION" | "UI_CMD_PAUSE_PLAY_FUNCTION" => {
-            Key::PlayPause
-        }
-        "UI_CMD_VOLUME_UP" => Key::VolumeUp,
-        "UI_CMD_VOLUME_DOWN" => Key::VolumeDown,
-        "UI_CMD_MUTE" | "UI_CMD_MUTE_FUNCTION" => Key::Mute,
+        "up" => Key::Up,
+        "down" => Key::Down,
+        "left" => Key::Left,
+        "right" => Key::Right,
+        "select" | "enter" => Key::Select,
+        "back" | "exit" => Key::Back,
+        "device-root-menu" | "media-top-menu" | "contents-menu" => Key::Home,
+        "play" | "pause" | "play-function" | "pause-play-function" => Key::PlayPause,
+        "volume-up" => Key::VolumeUp,
+        "volume-down" => Key::VolumeDown,
+        "mute" | "mute-function" => Key::Mute,
+        _ => return None,
+    })
+}
+
+fn parse_ui_command_opcode(value: &str) -> Option<u8> {
+    let start = value.find("(0x")? + 3;
+    let rest = &value[start..];
+    let end = rest.find(')')?;
+    let digits = &rest[..end];
+    if digits.len() != 2 {
+        return None;
+    }
+    u8::from_str_radix(digits, 16).ok()
+}
+
+fn key_from_ui_command_opcode(opcode: u8) -> Option<Key> {
+    Some(match opcode {
+        0x00 => Key::Select,
+        0x01 => Key::Up,
+        0x02 => Key::Down,
+        0x03 => Key::Left,
+        0x04 => Key::Right,
+        0x09 | 0x0b | 0x10 => Key::Home,
+        0x0d => Key::Back,
+        0x2b => Key::Select,
+        0x41 => Key::VolumeUp,
+        0x42 => Key::VolumeDown,
+        0x43 => Key::Mute,
+        0x44 | 0x46 | 0x60 | 0x61 => Key::PlayPause,
         _ => return None,
     })
 }

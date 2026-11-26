@@ -15,17 +15,25 @@ approval.
 `InputEvent` carries the origin (`LocalKeyboard`, `LocalCec` or `Remote`), a
 logical key and the source's repeat flag:
 
-| Logical key | Keyboard source | CEC `ui_cmd` | UI effect |
+| Logical key | Keyboard source | CEC `ui-cmd` | UI effect |
 |---|---|---|---|
-| `Up` / `Down` / `Left` / `Right` | arrows | `UI_CMD_UP` / `DOWN` / `LEFT` / `RIGHT` | navigation |
-| `Select` | Enter/Return | `UI_CMD_SELECT`, `UI_CMD_ENTER` | activate / approve a local prompt |
-| `Back` | Escape | `UI_CMD_BACK`, `UI_CMD_EXIT` | back; Stop while the player owns the surface |
-| `Home` | Home | `UI_CMD_DEVICE_ROOT_MENU`, `UI_CMD_MEDIA_TOP_MENU`, `UI_CMD_CONTENTS_MENU` | home; Stop while the player owns the surface |
-| `PlayPause` | — (keyboard Space arrives as `Char(' ')` and is handled by the player screen) | `UI_CMD_PLAY`, `UI_CMD_PAUSE`, `UI_CMD_PLAY_FUNCTION`, `UI_CMD_PAUSE_PLAY_FUNCTION` | toggle pause |
-| `VolumeUp` / `VolumeDown` / `Mute` | — | `UI_CMD_VOLUME_UP` / `DOWN` / `MUTE` | local volume group; no audio sink is wired in this build |
-| `Char` / `Backspace` | printable text, Space, Backspace | never | search text; Space toggles pause on the player screen |
+| `Up` / `Down` / `Left` / `Right` | arrows | `up` / `down` / `left` / `right` (`0x01`–`0x04`) | navigation |
+| `Select` | Enter/Return | `select` (`0x00`), `enter` (`0x2b`) | activate / approve a local prompt |
+| `Back` | Escape | `back` (`0x0d`), legacy `exit` | back; Stop while the player owns the surface |
+| `Home` | Home | `device-root-menu` (`0x09`), `media-top-menu` (`0x10`), `contents-menu` (`0x0b`) | home; Stop while the player owns the surface |
+| `PlayPause` | — (keyboard Space is handled by the player screen) | `play` (`0x44`), `pause` (`0x46`), `play-function` (`0x60`), `pause-play-function` (`0x61`) | toggle pause only on the player; ignored elsewhere |
+| `VolumeUp` / `VolumeDown` / `Mute` | — | `volume-up` (`0x41`) / `volume-down` (`0x42`), `mute` (`0x43`), `mute-function` (`0x65`) | local volume group; no audio sink is wired in this build |
+| `Char` / `Backspace` | printable text, Space, Backspace | never | search text; keyboard Space toggles pause on the player screen |
 
-Unknown CEC commands are ignored. They are never guessed into a nearby key.
+The CEC column is the value printed after `ui-cmd:` by `cec-ctl` 1.30.1,
+with the opcode in parentheses. Unknown names can still map by that opcode.
+Legacy logs that print `ui_cmd: UI_CMD_UP (0x01)` are also accepted. Unknown
+CEC commands are ignored and never guessed into a nearby key.
+
+`PlayPause` is routed by `UiModel::handle_event` itself, not through
+`ui::Key`. It toggles pause only while the player screen owns the surface; on
+home, library, settings, cast or library search it is ignored and never
+becomes a printable character or search text.
 
 ### Provenance rules
 
@@ -65,7 +73,8 @@ most once per held key and re-arms on release. This build does not bind a long
 press yet.
 
 The CEC parser treats a same-key press within two seconds (without a release)
-as `repeat = true`. A `CEC_MSG_USER_CONTROL_RELEASED` message ends the hold.
+as `repeat = true`. A `USER_CONTROL_RELEASED` message (legacy
+`CEC_MSG_USER_CONTROL_RELEASED`) ends the hold.
 Presses faster than 120 ms are dropped.
 
 ## Bounded queues
@@ -79,7 +88,7 @@ memory.
 
 The CEC reader caps a helper line at `MAX_CEC_LINE` (512 bytes) and discards
 bytes beyond that until the newline. A truncated line is never parsed because
-its `ui_cmd` field may be incomplete.
+its `ui-cmd` field may be incomplete.
 
 ## Kernel CEC path on the Pi
 
@@ -133,6 +142,30 @@ $ timeout 4 cec-ctl --device /dev/cec0 --playback --no-rc-passthrough --wait-for
 ```
 
 `LA mask: 0x0010` is logical address 4, the Playback Device address.
+
+### Message framing
+
+`cec-ctl` 1.30.1 prints the message name *without* a `CEC_MSG_` prefix and the
+user-control argument as `ui-cmd:` (hyphen, lowercase, dash-separated names).
+The parser handles this exact shape:
+
+```text
+Received from TV to Playback Device 1 (0 to 4): ACTIVE_SOURCE (0x82):
+	phys-addr: 1.0.0.0
+Received from TV to Playback Device 1 (0 to 4): USER_CONTROL_PRESSED (0x44):
+	ui-cmd: up (0x01)
+Received from TV to Playback Device 1 (0 to 4): USER_CONTROL_RELEASED (0x45)
+```
+
+- A `USER_CONTROL_PRESSED` frame arms one `ui-cmd`; the next `ui-cmd:` line is
+  mapped by its lowercase name or, if the name is unknown, by the `(0xNN)`
+  opcode.
+- `USER_CONTROL_RELEASED` clears the held key.
+- Any other `Received from …`/`Transmitted by …` message header (for example
+  `ACTIVE_SOURCE`) cancels a stale press frame, so a non-key message cannot be
+  turned into the next key.
+- Legacy `CEC_MSG_*`/`UI_CMD_*` spellings are accepted for older fixtures and
+  logs, but the production parser is driven by the 1.30.1 format above.
 
 ### Supervision and failure behavior
 
@@ -226,7 +259,7 @@ Event: State Change: PA: 1.0.0.0, LA mask: 0x0010, Conn Info: yes
 Received from TV to all (0 to 15): ACTIVE_SOURCE (0x82)
 ```
 
-No `User Control Pressed`/`ui_cmd` messages arrived. The TV is a Fire TV
+No `USER_CONTROL_PRESSED`/`ui-cmd` messages arrived. The TV is a Fire TV
 (Fire OS) and its Fire remote appears to use Bluetooth/IR to the TV, not CEC
 user-control to the Pi. This is a hardware/model limitation, not parser
 evidence. The parser follows the `cec-ctl` format and remains covered by

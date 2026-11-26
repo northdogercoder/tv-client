@@ -56,7 +56,9 @@ impl Key {
 
     /// Convert a physical input key into a launcher key.
     ///
-    /// Volume keys have no launcher representation and return `None`.
+    /// `PlayPause` is handled by [`UiModel::handle_event`] only on the player
+    /// screen and volume keys have no launcher representation; both return
+    /// `None` so neither can become a printable character.
     #[must_use]
     pub fn from_input(key: crate::input::Key) -> Option<Self> {
         Some(match key {
@@ -67,10 +69,10 @@ impl Key {
             crate::input::Key::Select => Self::Enter,
             crate::input::Key::Back => Self::Escape,
             crate::input::Key::Home => Self::Home,
-            crate::input::Key::PlayPause => Self::Char(' '),
             crate::input::Key::Char(character) => Self::Char(character),
             crate::input::Key::Backspace => Self::Backspace,
-            crate::input::Key::VolumeUp
+            crate::input::Key::PlayPause
+            | crate::input::Key::VolumeUp
             | crate::input::Key::VolumeDown
             | crate::input::Key::Mute => return None,
         })
@@ -1401,6 +1403,10 @@ impl UiModel {
     /// gate applies the interval to both keyboard and CEC presses.
     pub fn handle_event(&mut self, event: crate::input::InputEvent, now: Duration) -> UiOutcome {
         match crate::input::Router::route(event) {
+            crate::input::Route::Ui {
+                key: crate::input::Key::PlayPause,
+                ..
+            } => self.handle_play_pause(),
             crate::input::Route::Ui { key, origin, .. } => {
                 let Some(key) = Key::from_input(key) else {
                     return UiOutcome::Ignored;
@@ -1422,6 +1428,18 @@ impl UiModel {
                 }
             }
         }
+    }
+
+    /// Toggle pause for a routed PlayPause key, only while the player owns the
+    /// surface. On every other screen (and while a pairing prompt is open) the
+    /// key is ignored and never becomes search text.
+    fn handle_play_pause(&self) -> UiOutcome {
+        if self.screen != Screen::Player || self.modal.is_some() {
+            return UiOutcome::Ignored;
+        }
+        UiOutcome::Action(Action::SetPaused {
+            paused: !self.player.paused,
+        })
     }
 
     fn handle_local_key(&mut self, key: Key, now: Duration) -> UiOutcome {

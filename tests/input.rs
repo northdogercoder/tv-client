@@ -16,8 +16,20 @@ use tv_client::input::{
 };
 use tv_client::model::{Action, AppState, Direction, Event, InputOrigin, Mode, StateError};
 use tv_client::state::Reducer;
-use tv_client::ui::{Key as UiKey, Screen, UiInput, UiModel, UiOutcome, UiReject};
+use tv_client::ui::{Key as UiKey, Screen, SourceFilter, UiInput, UiModel, UiOutcome, UiReject};
 use uuid::Uuid;
+
+/// Exact cec-ctl 1.30.1 follow-mode framing: the `show_msg` prefix is on the
+/// same line as the bare message name, and the `ui-cmd` argument follows on
+/// its own indented line.
+const ACTIVE_SOURCE: &str = "Received from TV to Playback Device 1 (0 to 4): ACTIVE_SOURCE (0x82):";
+const ACTIVE_SOURCE_BROADCAST: &str = "Received from TV to all (0 to 15): ACTIVE_SOURCE (0x82)";
+const ACTIVE_SOURCE_ADDR: &str = "\tphys-addr: 1.0.0.0";
+const USER_CONTROL_PRESSED: &str =
+    "Received from TV to Playback Device 1 (0 to 4): USER_CONTROL_PRESSED (0x44):";
+const USER_CONTROL_RELEASED: &str =
+    "Received from TV to Playback Device 1 (0 to 4): USER_CONTROL_RELEASED (0x45)";
+const UI_CMD_UP: &str = "\tui-cmd: up (0x01)";
 
 fn event(origin: InputOrigin, key: tv_client::input::Key) -> InputEvent {
     InputEvent {
@@ -70,6 +82,82 @@ fn keyboard_text_maps_named_keys_and_keeps_search_characters() {
 fn cec_ui_commands_map_without_creating_keyboard_characters() {
     use tv_client::input::Key;
 
+    // Real cec-ctl 1.30.1 output: lowercase, dash-separated names with the
+    // parenthesized ui-cmd opcode.
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: up (0x01)"),
+        Some(Key::Up)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: down (0x02)"),
+        Some(Key::Down)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: left (0x03)"),
+        Some(Key::Left)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: right (0x04)"),
+        Some(Key::Right)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: select (0x00)"),
+        Some(Key::Select)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: enter (0x2b)"),
+        Some(Key::Select)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: back (0x0d)"),
+        Some(Key::Back)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: device-root-menu (0x09)"),
+        Some(Key::Home)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: media-top-menu (0x10)"),
+        Some(Key::Home)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: contents-menu (0x0b)"),
+        Some(Key::Home)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: play (0x44)"),
+        Some(Key::PlayPause)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: pause (0x46)"),
+        Some(Key::PlayPause)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: play-function (0x60)"),
+        Some(Key::PlayPause)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: pause-play-function (0x61)"),
+        Some(Key::PlayPause)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: volume-up (0x41)"),
+        Some(Key::VolumeUp)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: volume-down (0x42)"),
+        Some(Key::VolumeDown)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: mute (0x43)"),
+        Some(Key::Mute)
+    );
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: mute-function (0x65)"),
+        Some(Key::Mute)
+    );
+
+    // Legacy logs and fixtures that use the enum spelling are still accepted.
     assert_eq!(key_from_cec_ui_command("UI_CMD_UP"), Some(Key::Up));
     assert_eq!(key_from_cec_ui_command("\tui_cmd:"), None);
     assert_eq!(key_from_cec_ui_command("UI_CMD_UP (0x01)"), Some(Key::Up));
@@ -100,10 +188,25 @@ fn cec_ui_commands_map_without_creating_keyboard_characters() {
     );
     assert_eq!(key_from_cec_ui_command("UI_CMD_MUTE"), Some(Key::Mute));
 
+    // Unknown names fall back to the ui-cmd opcode; unknown opcodes and
+    // non-ui message headers never become keys.
+    assert_eq!(
+        key_from_cec_ui_command("\tui-cmd: unrecognized (0x46)"),
+        Some(Key::PlayPause)
+    );
+    assert_eq!(key_from_cec_ui_command("\tui-cmd: record (0x47)"), None);
+    assert_eq!(key_from_cec_ui_command("\tui-cmd: stop (0x45)"), None);
     assert_eq!(key_from_cec_ui_command("UI_CMD_NUMBER_1"), None);
     assert_eq!(key_from_cec_ui_command("UI_CMD_STOP"), None);
     assert_eq!(key_from_cec_ui_command("UI_CMD_"), None);
     assert_eq!(key_from_cec_ui_command("not-a-command"), None);
+    assert_eq!(
+        key_from_cec_ui_command(
+            "Received from TV to Playback Device 1 (0 to 4): USER_CONTROL_PRESSED (0x44):"
+        ),
+        None,
+        "a message header is not a ui-cmd"
+    );
 }
 
 #[test]
@@ -258,10 +361,20 @@ fn input_queue_is_bounded_and_fifo() {
 #[test]
 fn cec_parser_ignores_releases_unknown_commands_and_unframed_ui_commands() {
     let mut parser = CecParser::new();
-    let press = "Received from TV to Playback Device 1 (0 to 4): CEC_MSG_USER_CONTROL_PRESSED:";
-    assert_eq!(parser.feed_line(press, Duration::ZERO), CecParse::Ignored);
     assert_eq!(
-        parser.feed_line("\tui_cmd: UI_CMD_UP (0x01)", Duration::ZERO),
+        parser.feed_line(ACTIVE_SOURCE, Duration::ZERO),
+        CecParse::Ignored
+    );
+    assert_eq!(
+        parser.feed_line(ACTIVE_SOURCE_ADDR, Duration::ZERO),
+        CecParse::Ignored
+    );
+    assert_eq!(
+        parser.feed_line(USER_CONTROL_PRESSED, Duration::ZERO),
+        CecParse::Ignored
+    );
+    assert_eq!(
+        parser.feed_line(UI_CMD_UP, Duration::ZERO),
         CecParse::Event(InputEvent {
             origin: InputOrigin::LocalCec,
             key: tv_client::input::Key::Up,
@@ -270,39 +383,83 @@ fn cec_parser_ignores_releases_unknown_commands_and_unframed_ui_commands() {
     );
 
     assert_eq!(
-        parser.feed_line("CEC_MSG_USER_CONTROL_RELEASED", Duration::from_millis(200)),
+        parser.feed_line(USER_CONTROL_RELEASED, Duration::from_millis(200)),
         CecParse::Ignored
     );
     assert_eq!(
-        parser.feed_line("\tui_cmd: UI_CMD_UP (0x01)", Duration::from_millis(250)),
+        parser.feed_line(UI_CMD_UP, Duration::from_millis(250)),
         CecParse::Ignored,
-        "a ui_cmd without a press frame is not a key"
+        "a ui-cmd without a press frame is not a key"
     );
 
-    parser.feed_line(press, Duration::from_millis(300));
+    parser.feed_line(USER_CONTROL_PRESSED, Duration::from_millis(300));
     assert_eq!(
-        parser.feed_line(
-            "\tui_cmd: UI_CMD_NUMBER_1 (0x21)",
-            Duration::from_millis(300)
-        ),
+        parser.feed_line("\tui-cmd: record (0x47)", Duration::from_millis(300)),
         CecParse::Ignored,
         "unsupported commands never become a guessed key"
     );
     assert_eq!(
-        parser.feed_line("CEC_MSG_USER_CONTROL_RELEASED", Duration::from_millis(350)),
+        parser.feed_line(USER_CONTROL_RELEASED, Duration::from_millis(350)),
         CecParse::Ignored
+    );
+}
+
+#[test]
+fn cec_parser_drops_a_stale_press_frame_when_another_message_starts() {
+    let mut parser = CecParser::new();
+    assert_eq!(
+        parser.feed_line(USER_CONTROL_PRESSED, Duration::ZERO),
+        CecParse::Ignored
+    );
+    assert_eq!(
+        parser.feed_line(ACTIVE_SOURCE_BROADCAST, Duration::ZERO),
+        CecParse::Ignored
+    );
+    assert_eq!(
+        parser.feed_line(ACTIVE_SOURCE_ADDR, Duration::ZERO),
+        CecParse::Ignored
+    );
+    assert_eq!(
+        parser.feed_line(UI_CMD_UP, Duration::ZERO),
+        CecParse::Ignored,
+        "an ACTIVE_SOURCE header cancels the pending press frame"
+    );
+}
+
+#[test]
+fn cec_parser_maps_real_pause_and_home_lines() {
+    let mut parser = CecParser::new();
+    parser.feed_line(USER_CONTROL_PRESSED, Duration::ZERO);
+    assert_eq!(
+        parser.feed_line("\tui-cmd: pause (0x46)", Duration::ZERO),
+        CecParse::Event(InputEvent {
+            origin: InputOrigin::LocalCec,
+            key: tv_client::input::Key::PlayPause,
+            repeat: false,
+        })
+    );
+
+    parser.feed_line(USER_CONTROL_PRESSED, Duration::from_millis(200));
+    assert_eq!(
+        parser.feed_line(
+            "\tui-cmd: device-root-menu (0x09)",
+            Duration::from_millis(200)
+        ),
+        CecParse::Event(InputEvent {
+            origin: InputOrigin::LocalCec,
+            key: tv_client::input::Key::Home,
+            repeat: false,
+        })
     );
 }
 
 #[test]
 fn cec_parser_marks_held_repeats_and_debounces_bursts() {
     let mut parser = CecParser::new();
-    let press = "Received from TV to Playback Device 1 (0 to 4): CEC_MSG_USER_CONTROL_PRESSED:";
-    let up = "\tui_cmd: UI_CMD_UP (0x01)";
 
-    parser.feed_line(press, Duration::ZERO);
+    parser.feed_line(USER_CONTROL_PRESSED, Duration::ZERO);
     assert_eq!(
-        parser.feed_line(up, Duration::ZERO),
+        parser.feed_line(UI_CMD_UP, Duration::ZERO),
         CecParse::Event(InputEvent {
             origin: InputOrigin::LocalCec,
             key: tv_client::input::Key::Up,
@@ -311,16 +468,16 @@ fn cec_parser_marks_held_repeats_and_debounces_bursts() {
     );
 
     // A burst inside the 120 ms interval is debounced.
-    parser.feed_line(press, Duration::from_millis(40));
+    parser.feed_line(USER_CONTROL_PRESSED, Duration::from_millis(40));
     assert_eq!(
-        parser.feed_line(up, Duration::from_millis(40)),
+        parser.feed_line(UI_CMD_UP, Duration::from_millis(40)),
         CecParse::Ignored
     );
 
     // Outside the interval the same held key is marked as a repeat.
-    parser.feed_line(press, Duration::from_millis(200));
+    parser.feed_line(USER_CONTROL_PRESSED, Duration::from_millis(200));
     assert_eq!(
-        parser.feed_line(up, Duration::from_millis(200)),
+        parser.feed_line(UI_CMD_UP, Duration::from_millis(200)),
         CecParse::Event(InputEvent {
             origin: InputOrigin::LocalCec,
             key: tv_client::input::Key::Up,
@@ -329,10 +486,10 @@ fn cec_parser_marks_held_repeats_and_debounces_bursts() {
     );
 
     // A release ends the hold; a later press is not a repeat.
-    parser.feed_line("CEC_MSG_USER_CONTROL_RELEASED", Duration::from_millis(250));
-    parser.feed_line(press, Duration::from_millis(500));
+    parser.feed_line(USER_CONTROL_RELEASED, Duration::from_millis(250));
+    parser.feed_line(USER_CONTROL_PRESSED, Duration::from_millis(500));
     assert_eq!(
-        parser.feed_line(up, Duration::from_millis(500)),
+        parser.feed_line(UI_CMD_UP, Duration::from_millis(500)),
         CecParse::Event(InputEvent {
             origin: InputOrigin::LocalCec,
             key: tv_client::input::Key::Up,
@@ -344,24 +501,23 @@ fn cec_parser_marks_held_repeats_and_debounces_bursts() {
 #[test]
 fn cec_parser_enforces_the_line_bound() {
     let mut parser = CecParser::new();
-    let press = "CEC_MSG_USER_CONTROL_PRESSED:";
-    parser.feed_line(press, Duration::ZERO);
+    parser.feed_line(USER_CONTROL_PRESSED, Duration::ZERO);
 
-    let oversized = format!("ui_cmd: UI_CMD_UP {}", "x".repeat(MAX_CEC_LINE));
+    let oversized = format!("ui-cmd: up {}", "x".repeat(MAX_CEC_LINE));
     assert_eq!(
         parser.feed_line(oversized.as_str(), Duration::ZERO),
         CecParse::Truncated
     );
     assert_eq!(
-        parser.feed_line("\tui_cmd: UI_CMD_UP (0x01)", Duration::ZERO),
+        parser.feed_line(UI_CMD_UP, Duration::ZERO),
         CecParse::Ignored,
         "a truncated line resets the press frame"
     );
 
     // Exactly the maximum length is still accepted.
-    let mut exact = String::from("\tui_cmd: UI_CMD_UP (0x01)");
+    let mut exact = String::from(UI_CMD_UP);
     exact.push_str(&" ".repeat(MAX_CEC_LINE - exact.len()));
-    parser.feed_line(press, Duration::ZERO);
+    parser.feed_line(USER_CONTROL_PRESSED, Duration::ZERO);
     assert!(matches!(
         parser.feed_line(&exact, Duration::ZERO),
         CecParse::Event(_)
@@ -414,6 +570,45 @@ fn cec_back_while_the_player_owns_the_surface_stops_and_returns_home() {
         "the parent controller maps Back to Stop"
     );
     assert_eq!(model.screen(), Screen::Home);
+}
+
+#[test]
+fn cec_play_pause_only_acts_on_the_player_screen() {
+    let mut player = playing_model();
+    assert_eq!(
+        player.handle_event(
+            event(InputOrigin::LocalCec, tv_client::input::Key::PlayPause),
+            Duration::ZERO,
+        ),
+        UiOutcome::Action(Action::SetPaused { paused: true })
+    );
+
+    let mut library = UiModel::new();
+    library.open_library(SourceFilter::All);
+    library.begin_search();
+    assert_eq!(
+        library.handle_event(
+            event(InputOrigin::LocalCec, tv_client::input::Key::PlayPause),
+            Duration::ZERO,
+        ),
+        UiOutcome::Ignored
+    );
+    assert!(library.searching());
+    assert_eq!(
+        library.library_query(),
+        "",
+        "PlayPause must not type a space"
+    );
+
+    let mut home = UiModel::new();
+    assert_eq!(
+        home.handle_event(
+            event(InputOrigin::LocalCec, tv_client::input::Key::PlayPause),
+            Duration::ZERO,
+        ),
+        UiOutcome::Ignored
+    );
+    assert_eq!(home.screen(), Screen::Home);
 }
 
 #[test]
@@ -564,6 +759,11 @@ fn ui_key_names_match_the_input_mapping() {
         Some(UiKey::Enter)
     );
     assert_eq!(UiKey::from_input(tv_client::input::Key::Mute), None);
+    assert_eq!(
+        UiKey::from_input(tv_client::input::Key::PlayPause),
+        None,
+        "PlayPause is routed by UiModel::handle_event, never as Char(' ')"
+    );
 }
 
 #[test]
@@ -650,9 +850,11 @@ fn cec_helper_exit_reports_disconnect_and_events_keep_local_origin() {
     std::fs::write(
         &script,
         "#!/bin/sh\n\
-         printf 'Received from TV to Playback Device 1 (0 to 4): CEC_MSG_USER_CONTROL_PRESSED:\\n'\n\
-         printf '\\tui_cmd: UI_CMD_UP (0x01)\\n'\n\
-         printf 'CEC_MSG_USER_CONTROL_RELEASED\\n'\n\
+         printf 'Received from TV to Playback Device 1 (0 to 4): ACTIVE_SOURCE (0x82):\\n'\n\
+         printf '\\tphys-addr: 1.0.0.0\\n'\n\
+         printf 'Received from TV to Playback Device 1 (0 to 4): USER_CONTROL_PRESSED (0x44):\\n'\n\
+         printf '\\tui-cmd: up (0x01)\\n'\n\
+         printf 'Received from TV to Playback Device 1 (0 to 4): USER_CONTROL_RELEASED (0x45)\\n'\n\
          exit 3\n",
     )
     .expect("fixture helper");
