@@ -2,7 +2,7 @@
 
 > Executor: C005. Work in an isolated worktree, follow steps in order, run each gate, and stop on mismatch. Read the full plan before acting. The reviewer (not executor) owns the index. No push, merge, deployment, or production credentials without separate operator approval.
 >
-> Drift check: planned-at is UNBOUND because this is a new repo. Advisor records actual baseline SHA with `git rev-parse HEAD` and live file excerpts (or explicitly absent) before dispatch. Then run `git diff --stat <BOUND_SHA>..HEAD -- Cargo.toml Cargo.lock src/lib.rs src/jellyfin/ tests/jellyfin_library.rs docs/jellyfin.md`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
+> Drift check: planned-at is bound to `56ac3a66d5798e8970db4f98670b846e8ccefdce` (post-C002/C003 merge, 2026-11-25). Advisor verified the baseline and the absent target files below. Then run `git diff --stat 56ac3a66d5798e8970db4f98670b846e8ccefdce..HEAD -- Cargo.toml Cargo.lock src/lib.rs src/jellyfin/ tests/jellyfin_library.rs docs/jellyfin.md`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
 
 ## Status
 - **Priority**: P1
@@ -10,25 +10,34 @@
 - **Risk**: MED
 - **Depends on**: C003
 - **Category**: direction
-- **Planned at**: UNBOUND (greenfield), 2026-11-25
+- **Planned at**: 56ac3a66d5798e8970db4f98670b846e8ccefdce, 2026-11-25
 - **State**: TODO (index authoritative)
 - **Test server**: Jellyfin 12.4.0 at `http://jellyfin:8096` (verified 2026-11-25); limited non-admin user `test`; credentials are in `~/.config/tv-client/jellyfin-test.env` (0600, outside the repo) and must never be committed or logged. Send the `Authorization: MediaBrowser ...` header with `Token="..."`; this server returned HTTP 400 for `X-Emby-Authorization` and HTTP 401 for `X-Emby-Token`.
 
 ## Why this matters
 Jellyfin is authoritative for identity and library. Pi contacts it directly, independent of cloud.
 
+## Baseline evidence (advisor, 2026-11-25)
+
+- Baseline `56ac3a6`; C003 merged at `0bf089c`; `bash scripts/check.sh` exit 0 (33 tests).
+- Existing interfaces: `ClientConfig`/`ConfigError`; `Storage` (`store_artwork`, `artwork_path`, `write_credential`, `read_credential`, `save_last_view`, `record_progress`); `AppState`/`Action`/`Effect`; all re-exported from `src/lib.rs`.
+- Existing direct dependencies: clap, serde, toml, tokio, rusqlite (bundled), thiserror, tracing, uuid; `tempfile` dev-only. MSRV 1.89.
+- Absent: `src/jellyfin/`, `tests/jellyfin_library.rs`, `docs/jellyfin.md`.
+- Server: Jellyfin 12.4.0, Quick Connect enabled, views include Movies, TV Shows, Music, Books, Audiobooks, Music Videos.
+- Host: x86_64, Rust 1.100.0 pinned. `reqwest 0.13.5`'s `default-tls` feature maps to rustls, so no OpenSSL headers are required.
+
 ## Current state
-No repository source was provided. Expected state: prerequisite plans merged, with their tested interfaces available. Before dispatch, advisor confirms actual tree and adds excerpts if needed. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
+C003 is merged at `0bf089c`; `bash scripts/check.sh` exits 0 (33 tests) and the config/storage/reducer interfaces above are available. C005 target files are absent; add `pub mod jellyfin;` to `src/lib.rs` and new dependencies without breaking existing behavior. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
 
 ## Commands you will need
 | Purpose | Command | Expected |
 |---|---|---|
 | Baseline | `git status --short` | clean before execution |
-| Standard check | `bash scripts/check.sh` | exit 0 (created in 001) |
+| Standard check | `bash scripts/check.sh` | exit 0 (verified on bound baseline) |
 | Format | `cargo fmt --all -- --check` | exit 0 |
 | Diff | `git diff --stat <BOUND_SHA>..HEAD` | only approved paths |
 
-Commands are proposed greenfield gates, not previously executed on this repo. The bootstrap establishes them; advisor updates this table if actual conventions differ. Real hardware checks need an operator report with command output, not simulated success.
+`bash scripts/check.sh` has been executed on the bound baseline; C005 network and live-server checks have not. Live checks need the test environment below and must not be simulated.
 
 ## Scope
 **In scope** (only these files/directories; trailing slash includes descendants):
