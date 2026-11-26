@@ -1,0 +1,218 @@
+// Copyright (C) 2026 the tv-client authors.
+// SPDX-License-Identifier: GPL-3.0-only
+
+// Text-only library list. Items are bounded by the Rust view model; the UI
+// never loads artwork models or unbounded image data.
+
+import { ListView } from "std-widgets.slint";
+
+export struct MediaCard {
+    title: string,
+    subtitle: string,
+    source: string,
+    index: int,
+    focused: bool,
+}
+
+export component LibraryScreen inherits Rectangle {
+    in property <length> base: 720px;
+    in property <int> focus-index: 0;
+    in property <[MediaCard]> items;
+    in property <string> filter-label: "All sources";
+    in property <string> query;
+    in property <bool> search-active: false;
+    in property <bool> loading: false;
+    in property <bool> empty: false;
+    in property <bool> error: false;
+    in property <string> error-text;
+
+    callback activated(int);
+    callback retry-requested();
+    callback search-requested();
+
+    changed items => {
+        if root.items.length > 0 {
+            list.ensure-row-visible(root.focus-index, ScrollBehavior.instant);
+        }
+    }
+
+    changed focus-index => {
+        if root.items.length > 0 {
+            list.ensure-row-visible(root.focus-index, ScrollBehavior.instant);
+        }
+    }
+
+    VerticalLayout {
+        padding: root.base / 20;
+        spacing: root.base / 48;
+
+        HorizontalLayout {
+            height: root.base / 14;
+            spacing: root.base / 30;
+
+            Text {
+                text: root.filter-label;
+                font-size: root.base / 18;
+                font-weight: 700;
+                color: #f4f7fb;
+                vertical-alignment: center;
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.search-active ? "Search: " + root.query : "Left/Right changes source";
+                font-size: root.base / 24;
+                color: #a9b7c8;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            Rectangle {
+                width: root.base / 5;
+                height: root.base / 14;
+                border-radius: root.base / 120;
+                background: root.search-active ? #1f6feb : #151c25;
+                border-width: 2px;
+                border-color: #38485c;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Search";
+                    font-size: root.base / 28;
+                    color: #f4f7fb;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.search-requested();
+                    }
+                }
+            }
+        }
+
+        if root.loading : Text {
+            height: root.base / 10;
+            text: "Loading...";
+            font-size: root.base / 18;
+            color: #a9b7c8;
+            vertical-alignment: center;
+        }
+
+        if root.error : Rectangle {
+            height: root.base / 7;
+            border-radius: root.base / 120;
+            background: #2a1519;
+            border-width: 2px;
+            border-color: #ff7b72;
+
+            HorizontalLayout {
+                padding: root.base / 40;
+                spacing: root.base / 30;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.error-text;
+                    font-size: root.base / 24;
+                    color: #ffd7d5;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Rectangle {
+                    width: root.base / 5;
+                    height: root.base / 12;
+                    border-radius: root.base / 120;
+                    background: #1f6feb;
+                    border-width: 3px;
+                    border-color: #a8c7ff;
+
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "Retry";
+                        font-size: root.base / 26;
+                        color: #ffffff;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            root.retry-requested();
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.empty : Text {
+            height: root.base / 8;
+            text: "Nothing here yet.";
+            font-size: root.base / 18;
+            color: #a9b7c8;
+            vertical-alignment: center;
+        }
+
+        list := ListView {
+            vertical-stretch: 1;
+            for card in root.items : Rectangle {
+                height: root.base / 7;
+                border-radius: root.base / 140;
+                background: card.focused ? #1f6feb : #151c25;
+                border-width: card.focused ? 4px : 1px;
+                border-color: card.focused ? #a8c7ff : #2c3642;
+
+                VerticalLayout {
+                    alignment: start;
+                    padding-left: root.base / 36;
+                    padding-right: root.base / 36;
+                    padding-top: root.base / 80;
+                    padding-bottom: root.base / 80;
+                    spacing: root.base / 150;
+
+                    HorizontalLayout {
+                        Text {
+                            horizontal-stretch: 1;
+                            text: card.title;
+                            font-size: root.base / 20;
+                            font-weight: card.focused ? 700 : 400;
+                            color: #f4f7fb;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: card.source;
+                            font-size: root.base / 28;
+                            font-weight: 700;
+                            color: card.focused ? #ffffff : #9fc2ff;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: card.subtitle;
+                        font-size: root.base / 34;
+                        color: #c6d2e1;
+                        overflow: elide;
+                    }
+                }
+
+                TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.activated(card.index);
+                    }
+                }
+            }
+        }
+    }
+}

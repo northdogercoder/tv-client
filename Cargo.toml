@@ -2,10 +2,11 @@
 name = "tv-client"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
+license = "GPL-3.0-only"
 
 [features]
-native-ui = []
+native-ui = ["dep:slint"]
 gstreamer-player = ["dep:gstreamer", "dep:gstreamer-video", "dep:gstreamer-audio"]
 cec = []
 airplay = []
@@ -20,12 +21,21 @@ reqwest = "0.13.5"
 rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+slint = { version = "1.19.1", optional = true, default-features = false, features = [
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+    "std",
+] }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 toml = "1"
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[build-dependencies]
+slint-build = { version = "1.19.1", default-features = false, features = ["compat-1-18"] }
 
 [dev-dependencies]
 tempfile = "3"
