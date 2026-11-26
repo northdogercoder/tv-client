@@ -196,22 +196,153 @@ fn artwork_cache_evicts_least_recently_used_and_respects_the_cap() {
 }
 
 #[test]
-fn long_artwork_keys_use_bounded_filenames() {
+fn artwork_filenames_are_generated_uuids_independent_of_the_key() {
     let dir = temp_dir();
     let mut storage = open(&dir, 1_024);
-    let cache_key = "k".repeat(128);
+    let first_key = "k".repeat(128);
+    let second_key = "m".repeat(128);
+    for key in [&first_key, &second_key] {
+        storage.store_artwork(key, b"data").expect("store long key");
+    }
+
+    let first_path = storage
+        .artwork_path(&first_key)
+        .expect("lookup first")
+        .expect("first artwork");
+    let second_path = storage
+        .artwork_path(&second_key)
+        .expect("lookup second")
+        .expect("second artwork");
+    assert!(first_path.is_file());
+    assert!(second_path.is_file());
+
+    let first_name = first_path
+        .file_name()
+        .expect("first file name")
+        .to_string_lossy()
+        .into_owned();
+    let second_name = second_path
+        .file_name()
+        .expect("second file name")
+        .to_string_lossy()
+        .into_owned();
+    assert_ne!(
+        first_name, second_name,
+        "different long keys need different files"
+    );
+    for name in [&first_name, &second_name] {
+        assert!(
+            name.len() <= 40,
+            "generated artwork file name must stay compact: {name}"
+        );
+        assert!(
+            !name.contains(first_key.as_str()) && !name.contains(second_key.as_str()),
+            "generated artwork file name must not embed the cache key: {name}"
+        );
+        let Some(stem) = name.strip_suffix(".bin") else {
+            panic!("artwork file name should keep the .bin suffix: {name}");
+        };
+        assert!(
+            uuid::Uuid::parse_str(stem).is_ok(),
+            "artwork file name should be a generated UUID, not the cache key: {name}"
+        );
+    }
+}
+
+#[test]
+fn failed_artwork_index_write_leaves_no_temp_file() {
+    let dir = temp_dir();
+    let mut storage = open(&dir, HARD_ARTWORK_CACHE_BYTES);
+    {
+        let connection =
+            rusqlite::Connection::open(dir.path().join("client.db")).expect("second connection");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_artwork_insert BEFORE INSERT ON artwork_index
+                 BEGIN SELECT RAISE(ABORT, 'forced failure'); END;",
+            )
+            .expect("install failure trigger");
+    }
+
+    let error = storage
+        .store_artwork("cache-key", b"payload")
+        .expect_err("index failure should fail the store");
+    assert!(matches!(error, StorageError::Database));
+    assert_eq!(storage.artwork_total_bytes().expect("total"), 0);
+    assert_eq!(
+        fs::read_dir(dir.path().join("artwork"))
+            .expect("artwork directory")
+            .count(),
+        0,
+        "a failed store must not leave a temporary or final artwork file"
+    );
+}
+
+#[test]
+fn open_reconciles_artwork_orphans_and_missing_index_rows() {
+    let dir = temp_dir();
+    let mut storage = open(&dir, HARD_ARTWORK_CACHE_BYTES);
     storage
-        .store_artwork(&cache_key, b"data")
-        .expect("store long key");
-    let path = storage
-        .artwork_path(&cache_key)
-        .expect("lookup")
-        .expect("stored artwork");
-    assert!(path.is_file());
-    let file_name = path.file_name().expect("file name");
+        .store_artwork("kept", b"kept-bytes")
+        .expect("store kept");
+    storage
+        .store_artwork("lost", b"lost-bytes")
+        .expect("store lost");
+    let lost_path = storage
+        .artwork_path("lost")
+        .expect("lookup lost")
+        .expect("lost artwork");
+    drop(storage);
+    fs::remove_file(&lost_path).expect("remove indexed file");
+
+    let artwork = dir.path().join("artwork");
+    fs::write(artwork.join("orphan.bin"), b"orphan").expect("plant orphan file");
+    fs::write(artwork.join(".tmp-stale"), b"stale").expect("plant stale temporary file");
+
+    let mut storage = open(&dir, HARD_ARTWORK_CACHE_BYTES);
+    assert_eq!(
+        storage.artwork_total_bytes().expect("total"),
+        "kept-bytes".len() as u64,
+        "the missing file's index row must be dropped"
+    );
     assert!(
-        file_name.to_string_lossy().len() <= 255,
-        "artwork file name must fit common filesystems"
+        !artwork.join("orphan.bin").exists(),
+        "unindexed files must be removed on open"
+    );
+    assert!(
+        !artwork.join(".tmp-stale").exists(),
+        "stale temporary files must be removed on open"
+    );
+    assert!(storage.artwork_path("kept").expect("lookup kept").is_some());
+    assert!(storage.artwork_path("lost").expect("lookup lost").is_none());
+    assert_eq!(
+        fs::read_dir(&artwork).expect("artwork directory").count(),
+        1,
+        "only the reconciled, indexed file should remain"
+    );
+}
+
+#[test]
+fn open_evicts_indexed_artwork_over_the_configured_cap() {
+    let dir = temp_dir();
+    let mut storage = open(&dir, 1_024);
+    storage.store_artwork("a", b"aaaa").expect("store a");
+    storage.store_artwork("b", b"bbbb").expect("store b");
+    drop(storage);
+
+    let mut storage = open(&dir, 4);
+    assert_eq!(storage.artwork_total_bytes().expect("total"), 4);
+    assert!(
+        storage.artwork_path("a").expect("lookup a").is_none(),
+        "the least recently used entry must be evicted on open"
+    );
+    assert!(storage.artwork_path("b").expect("lookup b").is_some());
+    assert_eq!(
+        fs::read_dir(dir.path().join("artwork"))
+            .expect("artwork directory")
+            .count(),
+        1,
+        "on-disk artwork must respect the cap after reconciliation"
     );
 }
 

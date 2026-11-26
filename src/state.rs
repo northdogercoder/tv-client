@@ -78,15 +78,15 @@ impl Reducer {
                         to: Mode::Playing,
                     });
                 }
-                match duration_ms {
-                    Some(duration) if position_ms > duration => {
-                        return Err(StateError::InvalidValue {
-                            field: "position_ms",
-                            reason: "must not exceed duration_ms",
-                        });
-                    }
-                    Some(duration) => self.state.duration_ms = Some(duration),
-                    None => {}
+                let limit = duration_ms.or(self.state.duration_ms);
+                if limit.is_some_and(|duration| position_ms > duration) {
+                    return Err(StateError::InvalidValue {
+                        field: "position_ms",
+                        reason: "must not exceed duration_ms",
+                    });
+                }
+                if let Some(duration) = duration_ms {
+                    self.state.duration_ms = Some(duration);
                 }
                 self.state.position_ms = Some(position_ms);
                 Ok(vec![Effect::Progress {

@@ -6,6 +6,7 @@
 //! database returns [`StorageError::CorruptDatabase`] without moving it;
 //! [`Storage::recover_corrupt`] is the only operation that renames files aside.
 
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -139,14 +140,16 @@ impl Storage {
             }
         }
 
-        Ok(Self {
+        let mut storage = Self {
             connection,
             state_directory: state_directory.to_path_buf(),
             database,
             artwork_directory,
             credentials_directory,
             artwork_cap: artwork_cache_bytes.min(HARD_ARTWORK_CACHE_BYTES),
-        })
+        };
+        storage.reconcile_artwork()?;
+        Ok(storage)
     }
 
     /// Root state directory.
@@ -278,6 +281,12 @@ impl Storage {
     }
 
     /// Store artwork bytes and evict least-recently-used entries to fit the cap.
+    ///
+    /// Bytes are staged in a private temporary file, the index row is committed,
+    /// and only then is the temporary renamed into place. Failures before the
+    /// rename remove the temporary file and, for a new key, the index row, so a
+    /// failed store never leaves an unindexed file behind. Opening the store
+    /// repairs the remaining crash windows (see `reconcile_artwork`).
     pub fn store_artwork(&mut self, cache_key: &str, bytes: &[u8]) -> Result<(), StorageError> {
         validate_cache_key(cache_key)?;
         let byte_len = u64::try_from(bytes.len()).map_err(|_| StorageError::ArtworkTooLarge)?;
@@ -292,6 +301,7 @@ impl Storage {
                 |row| row.get(0),
             )
             .optional()?;
+        let replacing = existing.is_some();
         let file_name = match existing {
             Some(file_name) => {
                 safe_artwork_path(&self.artwork_directory, &file_name)?;
@@ -300,11 +310,49 @@ impl Storage {
             None => format!("{}.bin", Uuid::new_v4()),
         };
         let path = safe_artwork_path(&self.artwork_directory, &file_name)?;
-        write_private_atomic(&path, bytes)?;
+        let temporary = write_private_temporary(&self.artwork_directory, bytes)?;
+        let byte_len = i64::try_from(byte_len).map_err(|_| StorageError::ArtworkTooLarge)?;
 
+        let victims = match self.index_artwork(cache_key, &file_name, byte_len) {
+            Ok(victims) => victims,
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(error);
+            }
+        };
+
+        if let Err(error) = fs::rename(&temporary, &path) {
+            let _ = fs::remove_file(&temporary);
+            if !replacing {
+                let _ = self.connection.execute(
+                    "DELETE FROM artwork_index WHERE cache_key = ?1",
+                    params![cache_key],
+                );
+            }
+            return Err(StorageError::Io(error));
+        }
+        if let Ok(directory) = File::open(&self.artwork_directory) {
+            let _ = directory.sync_all();
+        }
+        for victim in victims {
+            remove_artwork_file(&victim)?;
+        }
+        Ok(())
+    }
+
+    /// Commit the index row and select eviction victims in one transaction.
+    ///
+    /// The returned paths are no longer indexed and are removed after the new
+    /// file is renamed into place. The payload file itself is never selected as
+    /// a victim.
+    fn index_artwork(
+        &mut self,
+        cache_key: &str,
+        file_name: &str,
+        byte_len: i64,
+    ) -> Result<Vec<PathBuf>, StorageError> {
         let artwork_directory = self.artwork_directory.clone();
         let cap = i64::try_from(self.artwork_cap).unwrap_or(i64::MAX);
-        let byte_len = i64::try_from(byte_len).map_err(|_| StorageError::ArtworkTooLarge)?;
         let transaction = self.connection.transaction()?;
         let maximum: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(last_used_seq), 0) FROM artwork_index",
@@ -342,13 +390,123 @@ impl Storage {
             };
             transaction.execute("DELETE FROM artwork_index WHERE id = ?1", params![id])?;
             total = total.saturating_sub(victim_bytes);
-            victims.push(safe_artwork_path(&artwork_directory, &victim_name)?);
+            if victim_name != file_name {
+                victims.push(safe_artwork_path(&artwork_directory, &victim_name)?);
+            }
         }
         transaction.commit()?;
-        for victim in victims {
-            remove_file_if_present(&victim)?;
-        }
+        Ok(victims)
+    }
+
+    /// Remove one artwork index row by id.
+    fn delete_artwork_row(&self, id: i64) -> Result<(), StorageError> {
+        self.connection
+            .execute("DELETE FROM artwork_index WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    /// Repair the artwork cache after a crash or failed eviction.
+    ///
+    /// Index rows whose file is missing are dropped, file sizes are re-read from
+    /// disk so the cap accounts for actual bytes, and temporary or unindexed
+    /// files are removed. If an indexed entry pushes the cache over the cap,
+    /// least-recently-used entries are evicted. A failed unlink is reported as
+    /// [`StorageError::ArtworkEviction`]; the affected row is already gone, so
+    /// the next open retries the orphan removal.
+    fn reconcile_artwork(&mut self) -> Result<(), StorageError> {
+        let rows: Vec<(i64, String, i64)> = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT id, file_name, bytes FROM artwork_index")?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            let mut collected = Vec::new();
+            for row in rows {
+                collected.push(row?);
+            }
+            collected
+        };
+
+        let mut indexed = Vec::new();
+        for (id, file_name, indexed_bytes) in rows {
+            if file_name.starts_with(".tmp-") {
+                self.delete_artwork_row(id)?;
+                continue;
+            }
+            let path = match safe_artwork_path(&self.artwork_directory, &file_name) {
+                Ok(path) => path,
+                Err(_) => {
+                    self.delete_artwork_row(id)?;
+                    continue;
+                }
+            };
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => {
+                    self.delete_artwork_row(id)?;
+                    continue;
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    self.delete_artwork_row(id)?;
+                    continue;
+                }
+                Err(error) => return Err(StorageError::Io(error)),
+            };
+            let actual = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+            if actual != indexed_bytes {
+                self.connection.execute(
+                    "UPDATE artwork_index SET bytes = ?1 WHERE id = ?2",
+                    params![actual, id],
+                )?;
+            }
+            indexed.push(file_name);
+        }
+
+        let known: HashSet<&str> = indexed.iter().map(String::as_str).collect();
+        for entry in fs::read_dir(&self.artwork_directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_name = entry.file_name();
+            let unindexed = match file_name.to_str() {
+                Some(name) => !known.contains(name),
+                None => true,
+            };
+            if unindexed {
+                remove_artwork_file(&path)?;
+            }
+        }
+
+        let cap = i64::try_from(self.artwork_cap).unwrap_or(i64::MAX);
+        loop {
+            let total: i64 = self.connection.query_row(
+                "SELECT COALESCE(SUM(bytes), 0) FROM artwork_index",
+                [],
+                |row| row.get(0),
+            )?;
+            if total <= cap {
+                return Ok(());
+            }
+            let victim: Option<(i64, String)> = self
+                .connection
+                .query_row(
+                    "SELECT id, file_name FROM artwork_index
+                     ORDER BY last_used_seq ASC, id ASC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((id, victim_name)) = victim else {
+                return Ok(());
+            };
+            self.delete_artwork_row(id)?;
+            let path = safe_artwork_path(&self.artwork_directory, &victim_name)?;
+            remove_artwork_file(&path)?;
+        }
     }
 
     /// Resolve a cache key to a file, updating its LRU position.
@@ -625,6 +783,8 @@ pub enum StorageError {
     InvalidArtwork,
     #[error("artwork is larger than the configured cache")]
     ArtworkTooLarge,
+    #[error("could not remove an evicted artwork cache file")]
+    ArtworkEviction(#[source] std::io::Error),
     #[error("invalid credential name or secret")]
     InvalidCredential,
     #[error("credential file not found")]
@@ -738,8 +898,7 @@ fn create_private_file(path: &Path) -> Result<(), StorageError> {
     set_mode(path, 0o600)
 }
 
-fn write_private_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
-    let parent = path.parent().ok_or(StorageError::StateDir)?;
+fn write_private_temporary(parent: &Path, data: &[u8]) -> Result<PathBuf, StorageError> {
     let temporary = parent.join(format!(".tmp-{}", Uuid::new_v4()));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -756,6 +915,12 @@ fn write_private_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
         let _ = fs::remove_file(&temporary);
         return Err(StorageError::Io(error));
     }
+    Ok(temporary)
+}
+
+fn write_private_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
+    let parent = path.parent().ok_or(StorageError::StateDir)?;
+    let temporary = write_private_temporary(parent, data)?;
     if let Err(error) = fs::rename(&temporary, path) {
         let _ = fs::remove_file(&temporary);
         return Err(StorageError::Io(error));
@@ -773,11 +938,11 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn remove_file_if_present(path: &Path) -> Result<(), StorageError> {
+fn remove_artwork_file(path: &Path) -> Result<(), StorageError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(StorageError::Io(error)),
+        Err(error) => Err(StorageError::ArtworkEviction(error)),
     }
 }
 

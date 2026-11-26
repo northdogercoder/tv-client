@@ -5,6 +5,7 @@
 //! an explicitly local Jellyfin host.
 
 use std::env;
+use std::fmt;
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -84,8 +85,13 @@ impl ClientConfig {
         if document.len() > MAX_CONFIG_BYTES as usize {
             return Err(ConfigError::TooLarge);
         }
-        let config: Self = toml::from_str(document).map_err(|error| ConfigError::InvalidToml {
-            message: error.message().to_owned(),
+        // Never format the TOML error itself: its message quotes the offending
+        // value, which may contain a credential-bearing URL. Only the parser
+        // position is retained.
+        let config: Self = toml::from_str(document).map_err(|error| {
+            let span = error.span();
+            let position = span.map(|span| toml_position(document, span.start));
+            ConfigError::InvalidToml { position }
         })?;
         config.validate()?;
         Ok(config)
@@ -174,8 +180,11 @@ impl ClientConfig {
 /// URL, so a token pasted into a URL is not copied into logs.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("invalid TOML: {message}")]
-    InvalidToml { message: String },
+    #[error("invalid TOML configuration{}", position_suffix(.position))]
+    InvalidToml {
+        /// One-based position reported by the parser, when it reports one.
+        position: Option<TomlPosition>,
+    },
     #[error("invalid value for {field}: {reason}")]
     InvalidValue {
         field: &'static str,
@@ -190,6 +199,35 @@ pub enum ConfigError {
     TooLarge,
     #[error("could not read configuration file")]
     Io(#[from] std::io::Error),
+}
+
+/// One-based position in a configuration document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TomlPosition {
+    /// One-based line number.
+    pub line: usize,
+    /// One-based column number, counted in characters.
+    pub column: usize,
+}
+
+impl fmt::Display for TomlPosition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "line {}, column {}", self.line, self.column)
+    }
+}
+
+fn position_suffix(position: &Option<TomlPosition>) -> String {
+    (*position).map_or_else(String::new, |position| format!(" at {position}"))
+}
+
+fn toml_position(document: &str, offset: usize) -> TomlPosition {
+    let prefix = document.get(..offset).unwrap_or(document);
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = prefix
+        .rsplit('\n')
+        .next()
+        .map_or(1, |line| line.chars().count() + 1);
+    TomlPosition { line, column }
 }
 
 /// Default configuration path: `$XDG_CONFIG_HOME/tv-client/client.toml` or

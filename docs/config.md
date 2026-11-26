@@ -50,7 +50,10 @@ share_titles = false
 | `share_titles` | boolean | `false` | Metadata-sharing consent; never enables credentials or media upload |
 
 Every key is optional and missing keys take the defaults above. A present but
-invalid value, an unknown key or a duplicate key fails startup.
+invalid value, an unknown key or a duplicate key fails startup. TOML syntax and
+schema errors report only the parser position (line and column, when the parser
+provides one), never the supplied value, so a URL pasted into the wrong field
+is not copied into logs.
 
 ### URL rules
 
@@ -114,8 +117,12 @@ SQLite migrations create four bounded stores:
   metadata only. `LastView::is_playable_offline()` is always `false`; no media
   path or offline-playable claim is stored.
 - `artwork_index` — cache key, file name, byte count and LRU sequence. The
-  effective cap is `min(artwork_cache_bytes, 128 MiB)`. New writes evict the
-  least recently used entries and delete their files.
+  effective cap is `min(artwork_cache_bytes, 128 MiB)`. A new write stages its
+  bytes in a 0600 temporary file, commits the index row, then renames the
+  temporary into place; least-recently-used entries are evicted and their files
+  deleted. Opening the store removes stale temporary and unindexed files,
+  drops index rows whose file is missing, re-reads file sizes from disk and
+  evicts again if the actual bytes exceed the cap.
 - `progress_journal` — at most the newest 256 progress records. Every insert
   trims older rows in the same transaction.
 

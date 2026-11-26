@@ -128,6 +128,58 @@ fn playback_lifecycle_produces_typed_effects() {
 }
 
 #[test]
+fn progress_without_a_duration_is_bounded_by_the_stored_duration() {
+    let mut reducer = Reducer::new();
+    let (generation, playback_id) = begin_playing(&mut reducer);
+    reducer
+        .apply(Event::PlaybackProgress {
+            generation,
+            playback_id,
+            position_ms: 1_000,
+            duration_ms: Some(5_000),
+        })
+        .expect("initial progress should store the duration");
+    assert_eq!(reducer.state().duration_ms, Some(5_000));
+
+    let error = reducer
+        .apply(Event::PlaybackProgress {
+            generation,
+            playback_id,
+            position_ms: 6_000,
+            duration_ms: None,
+        })
+        .expect_err("position beyond the stored duration must be rejected");
+    assert!(matches!(
+        error,
+        StateError::InvalidValue {
+            field: "position_ms",
+            ..
+        }
+    ));
+    assert_eq!(reducer.state().position_ms, Some(1_000));
+    assert_eq!(reducer.state().duration_ms, Some(5_000));
+
+    let effects = reducer
+        .apply(Event::PlaybackProgress {
+            generation,
+            playback_id,
+            position_ms: 4_000,
+            duration_ms: None,
+        })
+        .expect("position within the stored duration should be accepted");
+    assert_eq!(reducer.state().position_ms, Some(4_000));
+    assert_eq!(reducer.state().duration_ms, Some(5_000));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Progress {
+            position_ms: 4_000,
+            duration_ms: Some(5_000),
+            ..
+        }]
+    ));
+}
+
+#[test]
 fn replacement_playback_uses_a_new_generation_and_stops_the_old_one() {
     let mut reducer = Reducer::new();
     let (first_generation, first_id) = begin_playing(&mut reducer);
@@ -625,6 +677,24 @@ fn unknown_config_keys_and_bad_values_are_rejected() {
             ..
         }
     ));
+}
+
+#[test]
+fn toml_type_errors_do_not_echo_the_supplied_value() {
+    let error =
+        ClientConfig::from_toml_str("max_width = \"https://user:supersecrettoken@example.test\"")
+            .expect_err("a string value for an integer field must be rejected");
+    assert!(matches!(&error, ConfigError::InvalidToml { .. }));
+    for rendered in [error.to_string(), format!("{error:?}")] {
+        assert!(
+            !rendered.contains("supersecrettoken"),
+            "configuration errors must not echo values: {rendered}"
+        );
+        assert!(
+            !rendered.contains("https://"),
+            "configuration errors must not echo URLs: {rendered}"
+        );
+    }
 }
 
 #[test]

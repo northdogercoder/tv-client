@@ -5,9 +5,9 @@
 The Rust toolchain is pinned in `rust-toolchain.toml` to **1.100.0** with the
 `minimal` profile plus the `rustfmt` and `clippy` components. A rustup
 installation honours that pin automatically, so no per-shell override is
-needed. `Cargo.toml` keeps `rust-version = "1.85"` as the minimum language
-version the package itself relies on (edition 2024); the pinned 1.100.0
-toolchain is the version the project builds and checks with.
+needed. `Cargo.toml` sets `rust-version = "1.89"` as the package's minimum
+supported Rust version, required by the locked dependency set. The pinned
+1.100.0 toolchain is the version the project builds and checks with.
 
 Both the binary and the library target are produced from the single package
 `tv-client`: `src/main.rs` is the `tv-client` binary and `src/lib.rs` is the
@@ -55,10 +55,21 @@ bootstrap tests exercise only the headless library and CLI.
 
 ## Dependencies
 
-The only direct dependency is `clap` (with the `derive` feature), used for
-the CLI; its transitive dependencies follow from it. The version requirement
-lives in `Cargo.toml`; exact resolved versions live in the committed
-`Cargo.lock`.
+The direct dependencies are:
+
+- `clap` (with the `derive` feature) for CLI parsing.
+- `serde` (with the `derive` feature) and `toml` for strict TOML decoding.
+- `tokio` (with `macros`, `rt`, `sync` and `time`) for the bounded async state
+  loop and shutdown channel.
+- `rusqlite` with the `bundled` feature for the embedded SQLite database.
+- `thiserror` for typed error enums.
+- `tracing` for structured diagnostics.
+- `uuid` (with `serde` and `v4`) for request ids and artwork file names.
+- `tempfile`, dev-only, for isolated test state directories.
+
+Their transitive dependencies follow from these direct ones. The version
+requirements live in `Cargo.toml`; exact resolved versions live in the
+committed `Cargo.lock`.
 
 To update dependencies:
 
