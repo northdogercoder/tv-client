@@ -5,8 +5,8 @@ Greenfield backlog, 2026-11-25. All rows begin TODO; no application code exists 
 | Plan | Title | Priority | Effort | Risk | Depends on | Status |
 |---|---|---|---|---|---|---|
 | [C001](001-bootstrap.md) | Establish a reproducible Rust client baseline | P1 | M | LOW | none | DONE |
-| [C002](002-hardware-spike.md) | Prove Pi graphics, H.264, audio and networking before UI work | P1 | L | HIGH | C001 | IN PROGRESS (approved awaiting merge) |
-| [C003](003-core-state.md) | Implement typed application state, configuration and bounded persistence | P1 | M | MED | C001 | IN PROGRESS (approved awaiting merge) |
+| [C002](002-hardware-spike.md) | Prove Pi graphics, H.264, audio and networking before UI work | P1 | L | HIGH | C001 | DONE |
+| [C003](003-core-state.md) | Implement typed application state, configuration and bounded persistence | P1 | M | MED | C001 | DONE |
 | [C004](004-kiosk-ui.md) | Build a native remote-first Slint launcher | P1 | L | HIGH | C002, C003 | TODO |
 | [C005](005-jellyfin-library.md) | Authenticate and browse the existing Jellyfin server | P1 | L | MED | C003 | TODO |
 | [C006](006-native-player.md) | Implement exclusive native GStreamer playback | P1 | L | HIGH | C002, C003 | TODO |
@@ -28,8 +28,8 @@ Status: TODO / IN PROGRESS / DONE / BLOCKED (reason) / REJECTED (rationale). Mar
 
 ## Execution notes
 - **C001 DONE 2026-11-25**: commit `14c3186fae4065209eb65d7a76e9c98399f778c3` merged to `main`; `bash scripts/check.sh` exit 0; bootstrap tests 3/3. C002 and C003 are the next dependency-ready plans.
-- **C002 IN PROGRESS (approved awaiting merge)**: branch `advisor/c002-hardware-spike` @ `97f12f9`; reviewer APPROVE; `bash scripts/check.sh` exit 0; core gate `PASS (basic)` with 17/16 QoS drop warnings (~2.8%/2.7%); 30-min soak and Slint placeholder NOT RUN per operator waiver.
-- **C003 IN PROGRESS (approved awaiting merge)**: branch `advisor/c003-core-state` @ `943ebe9`; reviewer APPROVE after one revision; `bash scripts/check.sh` exit 0 (3 bootstrap + 15 reducer + 15 storage tests); TOML error redaction, artwork reconciliation and MSRV 1.89.
+- **C002 DONE 2026-11-25**: merged in `66d5657` from `advisor/c002-hardware-spike` @ `97f12f9`; reviewer APPROVE; `bash scripts/check.sh` exit 0; core gate `PASS (basic)` with 17/16 QoS drop warnings (~2.8%/2.7%); 30-min soak and Slint placeholder NOT RUN per operator waiver.
+- **C003 DONE 2026-11-25**: merged in `0bf089c` from `advisor/c003-core-state` @ `943ebe9`; reviewer APPROVE after one revision; `bash scripts/check.sh` exit 0 (3 bootstrap + 15 reducer + 15 storage tests); TOML error redaction, artwork reconciliation and MSRV 1.89.
 
 ## Considered and deferred
 - Full Chromecast receiver: proprietary compatibility not guaranteed; no clone in core.
