@@ -114,8 +114,9 @@ Authorization: Bearer <device token>
 `youtube_ytdlp_path` must be absolute and must not contain `..`; a relative
 or structurally invalid path is rejected by strict configuration validation
 and fails startup. An absolute path that does not exist or is not executable
-does not fail startup, but it leaves local playback effectively disabled. A
-Play attempt then reports the typed `extractor_unavailable` failure. Unknown
+does not fail startup, but it leaves local playback disabled: a Play attempt
+reports `youtube_disabled`. `extractor_unavailable` is reserved for a configured
+extractor that passed readiness but cannot be spawned or used at play time. Unknown
 keys still fail strict TOML parsing, and the cloud policy advertises the
 `youtube` capability only when the effective switch is on.
 
@@ -125,7 +126,7 @@ keys still fail strict TOML parsing, and the cloud policy advertises the
 |---|---|
 | Invalid/missing identifier | `invalid_action` before any process |
 | Kill switch off | `youtube_disabled` (ack rejected) |
-| Extractor missing/unusable | `extractor_unavailable` (`missing_binary`, …) |
+| Extractor missing/unusable | `youtube_disabled` when readiness fails; `extractor_unavailable` (`missing_binary`, …) when configured but spawn/use fails |
 | YouTube blocks or challenges | `extractor_failed` (`blocked`) |
 | Stale extractor | `extractor_failed` (`stale_extractor`) |
 | Rate limited | `extractor_failed` (`rate_limited`) |
