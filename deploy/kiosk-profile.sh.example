@@ -1,0 +1,18 @@
+# Install as /home/tvkiosk/.profile, root-owned and readable by tvkiosk.
+# Only auto-start on physical tty1. Never use this for admin login.
+if [ "$(tty)" = /dev/tty1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
+  export SLINT_BACKEND=winit-software
+  export XDG_SESSION_TYPE=wayland
+  # Login PAM must supply XDG_RUNTIME_DIR and an active seat. Verify before enabling.
+  if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    logger -t tv-kiosk 'PAM runtime directory missing; use admin recovery tty2'
+    sleep 10
+    exit 1
+  fi
+  # getty restarts after this login session ends. A small delay avoids tight crash loops.
+  cage -- /opt/tv-client/current/tv-client --config /etc/tv-client/client.toml --state-dir /var/lib/tv-client
+  rc=$?
+  logger -t tv-kiosk "kiosk exited ($rc)"
+  sleep 5
+  exit "$rc"
+fi

@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "command": {
+    "v": 1,
+    "type": "command",
+    "id": "123e4567-e89b-42d3-a456-426614174000",
+    "payload": {
+      "command_id": "123e4567-e89b-42d3-a456-426614174001",
+      "action": {
+        "kind": "play_youtube",
+        "video_id": "M7lc1UVf-VE"
+      }
+    }
+  },
+  "ack": {
+    "v": 1,
+    "type": "ack",
+    "id": "123e4567-e89b-42d3-a456-426614174002",
+    "payload": {
+      "command_id": "123e4567-e89b-42d3-a456-426614174001",
+      "status": "applied",
+      "reason": null
+    }
+  },
+  "state": {
+    "device_id": "123e4567-e89b-42d3-a456-426614174003",
+    "seq": 1,
+    "mode": "home",
+    "source": null,
+    "item_id": null,
+    "title": null,
+    "position_ms": null,
+    "duration_ms": null,
+    "volume": 50,
+    "paused": false,
+    "error_code": null
+  },
+  "invalid_actions": [
+    {
+      "kind": "shell",
+      "command": "noop"
+    },
+    {
+      "kind": "set_volume",
+      "volume": 101
+    },
+    {
+      "kind": "play_youtube",
+      "video_id": "not-a-video"
+    },
+    {
+      "kind": "seek",
+      "position_ms": -1
+    },
+    {
+      "kind": "pair_accept"
+    }
+  ]
+}

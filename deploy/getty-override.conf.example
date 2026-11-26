@@ -1,0 +1,6 @@
+# /etc/systemd/system/getty@tty1.service.d/override.conf
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin tvkiosk --noclear %I $TERM
+Restart=always
+RestartSec=3s

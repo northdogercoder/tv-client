@@ -1,0 +1,15 @@
+# Proposed configuration contract; C003 must implement these exact keys.
+# Replace values; set cloud_enabled=false until server is available.
+jellyfin_url = "https://jellyfin.YOUR-TAILNET.ts.net"
+server_url = "https://tv-control.YOUR-TAILNET.ts.net"
+cloud_enabled = false
+youtube_enabled = false
+airplay_enabled = false
+webrtc_enabled = false
+max_width = 1280
+max_height = 720
+max_fps = 30
+bitrate_bps = 6000000
+max_bitrate_bps = 10000000
+artwork_cache_bytes = 134217728
+share_titles = false
