@@ -28,6 +28,9 @@ UI / reducer ──PlayerCommand──▶ supervisor task ──JSON line──�
   backend-specific type.
 - The supervisor uses bounded Tokio channels for commands, child lines and
   notifications.
+- After a successful `load`, the supervisor also sends the machine's retained
+  volume to the fresh child, so a later load does not silently reset to the
+  child default.
 - The media URL and optional headers travel only over the child's stdin pipe.
   They are never placed in argv, environment variables, filenames or logs.
 - The child writes protocol events to stdout and no diagnostic data to stdout.
@@ -48,7 +51,7 @@ Requests from the parent and events from the child are separate tagged unions.
 | `load` | `url`, optional `headers`, optional `start_position_ms` | Open an absolute `file:`, `http:` or `https:` URL. |
 | `pause` | — | Set the pipeline to `PAUSED`. |
 | `resume` | — | Set the pipeline back to `PLAYING`. |
-| `seek` | `position_ms` | Flush-accurate absolute seek. |
+| `seek` | `position_ms` | Flush-accurate absolute seek, at most 24 hours. |
 | `set_volume` | `volume` (0–100) | Linear volume scaled to GStreamer's 0.0–1.0 property. |
 | `stop` | — | Tear down the pipeline and exit the child. |
 
@@ -93,8 +96,9 @@ Rules enforced by `PlayerMachine::apply_command`:
   or modify a newer playback.
 - `pause` is accepted only while `Playing`; pausing while already `Paused` is a
   no-op. `resume` mirrors this.
-- `seek` requires `Playing` or `Paused`, and a known duration bounds
-  `position_ms` (0 through duration inclusive).
+- `seek` requires `Playing` or `Paused`; a known duration bounds
+  `position_ms` (0 through duration inclusive), and every position is capped
+  at 24 hours so it cannot overflow the child's GStreamer clock.
 - `set_volume` accepts 0 through 100 only.
 - `stop` is idempotent. Stopping `Idle` produces neither I/O nor a notification.
 - `error` from the child is accepted only for an active generation and moves
@@ -190,8 +194,10 @@ cargo test --locked --no-default-features --test player_state
 `PlayerSession` is the intended parent API: start it with a
 `GStreamerChildFactory` (or a test factory), send `PlayerCommand` values and
 consume `PlayerNotification` values. Unit tests in `tests/player_state.rs` use a
-scripted fake child and cover normal transitions, hangs, late events, child
-errors, seek and volume bounds, teardown/restart, bounded lines and redaction.
+scripted fake child and cover normal transitions, ready-deadline expiry,
+hangs, retained failure codes, late events, child errors, seek and volume
+bounds, volume restoration after load, teardown/restart, bounded lines, huge
+positions and redaction.
 
 ### Backend seam (C010 and future backends)
 
@@ -262,7 +268,7 @@ Limitations and honest non-claims:
   compiling the GStreamer bindings there filled RAM and rebooted the Pi. The
   worktree was moved to `~/tv-client-c006` and rebuilt with one job and no
   debug info. This was a build-environment failure, not a playback result.
-- The headless `--no-default-features` suite (including the 13 player tests),
+- The headless `--no-default-features` suite (including the 17 player tests),
   `cargo fmt --all -- --check`, `cargo clippy --all-targets
   --no-default-features -- -D warnings`, `cargo check --features
   gstreamer-player` and `cargo build --features gstreamer-player --bin

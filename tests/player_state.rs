@@ -11,9 +11,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tv_client::player::{
     ChildCommand, ChildExit, ChildFactory, ChildMessage, CommandOutcome, LoadRequest,
-    MAX_LINE_BYTES, PlayerCommand, PlayerError, PlayerEvent, PlayerMachine, PlayerNotification,
-    PlayerRequest, PlayerSession, PlayerState, SupervisedChild, SupervisorConfig,
-    decode_event_line, decode_request_line, encode_event, encode_request, read_bounded_line,
+    MAX_LINE_BYTES, MAX_POSITION_MS, PlayerCommand, PlayerError, PlayerEvent, PlayerMachine,
+    PlayerNotification, PlayerRequest, PlayerSession, PlayerState, SupervisedChild,
+    SupervisorConfig, decode_event_line, decode_request_line, encode_event, encode_request,
+    read_bounded_line,
 };
 
 #[derive(Clone)]
@@ -29,6 +30,8 @@ enum Behavior {
     },
     ExitOnLoad,
     EndAfterReady,
+    MalformedOnLoad,
+    RequireVolume,
 }
 
 struct FakeFactory {
@@ -70,6 +73,7 @@ fn fake_child(behavior: Behavior, exits: Arc<AtomicUsize>) -> SupervisedChild {
     let (control_tx, mut control_rx) = mpsc::channel::<ChildCommand>(8);
     let (message_tx, message_rx) = mpsc::channel::<ChildMessage>(32);
     tokio::spawn(async move {
+        let mut loaded = false;
         loop {
             match control_rx.recv().await {
                 Some(ChildCommand::Line(line)) => {
@@ -139,6 +143,14 @@ fn fake_child(behavior: Behavior, exits: Arc<AtomicUsize>) -> SupervisedChild {
                                 send_event(&message_tx, PlayerEvent::Ended).await;
                             }
                             Behavior::Silent => {}
+                            Behavior::MalformedOnLoad => {
+                                let _ = message_tx
+                                    .send(ChildMessage::Line("{\"type\":\"position\"".to_string()))
+                                    .await;
+                            }
+                            Behavior::RequireVolume => {
+                                loaded = true;
+                            }
                         },
                         PlayerRequest::Seek { position_ms } => {
                             if matches!(&behavior, Behavior::Happy { .. }) {
@@ -156,9 +168,37 @@ fn fake_child(behavior: Behavior, exits: Arc<AtomicUsize>) -> SupervisedChild {
                             send_exit(&message_tx, &exits).await;
                             return;
                         }
-                        PlayerRequest::Pause
-                        | PlayerRequest::Resume
-                        | PlayerRequest::SetVolume { .. } => {}
+                        PlayerRequest::SetVolume { volume } => {
+                            if matches!(&behavior, Behavior::RequireVolume) && loaded {
+                                loaded = false;
+                                send_event(
+                                    &message_tx,
+                                    PlayerEvent::Tracks {
+                                        video: None,
+                                        audio: Some(format!("volume:{volume}")),
+                                        subtitle: None,
+                                    },
+                                )
+                                .await;
+                                send_event(
+                                    &message_tx,
+                                    PlayerEvent::Ready {
+                                        decoder: None,
+                                        sink: None,
+                                    },
+                                )
+                                .await;
+                                send_event(
+                                    &message_tx,
+                                    PlayerEvent::Position {
+                                        position_ms: 0,
+                                        duration_ms: Some(60_000),
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+                        PlayerRequest::Pause | PlayerRequest::Resume => {}
                     }
                 }
                 Some(ChildCommand::Kill) | None => {
@@ -265,6 +305,20 @@ fn protocol_rejects_malformed_unknown_and_out_of_range_values() {
     );
     assert!(decode_event_line("{\"type\":\"nope\"}").is_err());
     assert!(decode_event_line("{\"type\":\"error\",\"code\":\"bad code\"}").is_err());
+    assert!(
+        decode_request_line(&format!(
+            "{{\"type\":\"seek\",\"position_ms\":{}}}",
+            MAX_POSITION_MS + 1
+        ))
+        .is_err()
+    );
+    assert!(
+        decode_request_line(&format!(
+            "{{\"type\":\"load\",\"url\":\"file:///tmp/a.mp4\",\"start_position_ms\":{}}}",
+            u64::MAX
+        ))
+        .is_err()
+    );
 
     let oversized = format!(
         "{{\"type\":\"load\",\"url\":\"file:///{}\"}}",
@@ -417,6 +471,41 @@ fn seek_and_volume_bounds_are_enforced_before_io() {
     assert!(stop_again.notifications.is_empty());
 }
 
+#[test]
+fn huge_positions_are_rejected_before_any_child_can_overflow() {
+    let mut machine = PlayerMachine::new();
+    let outcome = machine
+        .apply_command(load("file:///tmp/huge.mp4"))
+        .expect("load");
+    machine
+        .apply_event(
+            outcome.generation,
+            PlayerEvent::Ready {
+                decoder: None,
+                sink: None,
+            },
+        )
+        .expect("ready");
+    assert_eq!(machine.state(), PlayerState::Playing);
+
+    assert!(matches!(
+        machine.apply_command(PlayerCommand::Seek {
+            position_ms: MAX_POSITION_MS + 1,
+        }),
+        Err(PlayerError::InvalidRequest { .. })
+    ));
+    assert!(matches!(
+        machine.apply_command(PlayerCommand::Seek {
+            position_ms: u64::MAX,
+        }),
+        Err(PlayerError::InvalidRequest { .. })
+    ));
+
+    let mut huge = LoadRequest::new("file:///tmp/huge-start.mp4");
+    huge.start_position_ms = Some(MAX_POSITION_MS + 1);
+    assert!(machine.apply_command(PlayerCommand::Load(huge)).is_err());
+}
+
 #[tokio::test]
 async fn normal_transitions_positions_and_clean_stop() {
     let mut factory = FakeFactory::new([Behavior::Happy {
@@ -491,6 +580,112 @@ fn factory_proxy(factory: &mut FakeFactory) -> FakeFactory {
         spawns: Arc::clone(&factory.spawns),
         exits: Arc::clone(&factory.exits),
     }
+}
+
+#[tokio::test]
+async fn ready_deadline_is_cleared_once_the_child_is_ready() {
+    let mut factory = FakeFactory::new([Behavior::Happy {
+        decoder: Some("v4l2h264dec".to_string()),
+        sink: Some("waylandsink".to_string()),
+    }]);
+    let mut fast = config();
+    fast.ready_timeout = Duration::from_millis(100);
+    fast.event_timeout = Duration::from_secs(1);
+    let mut session =
+        PlayerSession::start(factory_proxy(&mut factory), fast, 8, 64).expect("session starts");
+    session
+        .send(load("file:///tmp/ready.mp4"))
+        .await
+        .expect("send");
+
+    expect_state(&mut session, PlayerState::Loading).await;
+    expect_state(&mut session, PlayerState::Playing).await;
+    recv_until(&mut session, |notification| {
+        matches!(notification, PlayerNotification::Position { .. })
+    })
+    .await;
+
+    // The child is deliberately silent for longer than ready_timeout. A healthy
+    // session must not turn that into child_hung after it already became ready.
+    let quiet = tokio::time::timeout(Duration::from_millis(300), session.next()).await;
+    assert!(
+        quiet.is_err(),
+        "healthy session produced a late failure: {quiet:?}"
+    );
+
+    // Pause is only accepted from Playing, which also proves no hidden Error.
+    session.send(PlayerCommand::Pause).await.expect("pause");
+    expect_state(&mut session, PlayerState::Paused).await;
+    let machine = session.shutdown().await.expect("clean shutdown");
+    assert_eq!(machine.state(), PlayerState::Paused);
+}
+
+#[tokio::test]
+async fn protocol_failure_is_not_overwritten_by_a_later_hung_deadline() {
+    let mut factory = FakeFactory::new([Behavior::MalformedOnLoad]);
+    let mut fast = config();
+    fast.ready_timeout = Duration::from_millis(100);
+    fast.event_timeout = Duration::from_secs(1);
+    let mut session =
+        PlayerSession::start(factory_proxy(&mut factory), fast, 8, 64).expect("session starts");
+    session
+        .send(load("file:///tmp/bad-protocol.mp4"))
+        .await
+        .expect("send");
+
+    let failed = recv_until(&mut session, |notification| {
+        matches!(notification, PlayerNotification::Failed { .. })
+    })
+    .await;
+    match failed {
+        PlayerNotification::Failed { code, .. } => assert_eq!(code, "protocol"),
+        other => panic!("unexpected notification: {other:?}"),
+    }
+    expect_state(&mut session, PlayerState::Error).await;
+
+    let quiet = tokio::time::timeout(Duration::from_millis(300), session.next()).await;
+    assert!(
+        quiet.is_err(),
+        "failure was overwritten by a deadline: {quiet:?}"
+    );
+
+    let machine = session.shutdown().await.expect("clean shutdown");
+    assert_eq!(
+        machine.failure().expect("failure retained").code,
+        "protocol"
+    );
+}
+
+#[tokio::test]
+async fn new_child_receives_the_current_volume_after_load() {
+    let mut factory = FakeFactory::new([Behavior::RequireVolume]);
+    let mut session =
+        PlayerSession::start(factory_proxy(&mut factory), config(), 8, 64).expect("session starts");
+
+    // Set the volume while no child exists, then load. The supervisor must
+    // apply the retained volume to the fresh child.
+    session
+        .send(PlayerCommand::SetVolume { volume: 25 })
+        .await
+        .expect("volume");
+    session
+        .send(load("file:///tmp/volume.mp4"))
+        .await
+        .expect("load");
+
+    expect_state(&mut session, PlayerState::Loading).await;
+    let tracks = recv_until(&mut session, |notification| {
+        matches!(notification, PlayerNotification::Tracks { .. })
+    })
+    .await;
+    match tracks {
+        PlayerNotification::Tracks { audio, .. } => {
+            assert_eq!(audio.as_deref(), Some("volume:25"));
+        }
+        other => panic!("unexpected notification: {other:?}"),
+    }
+    expect_state(&mut session, PlayerState::Playing).await;
+    session.shutdown().await.expect("clean shutdown");
 }
 
 #[tokio::test]

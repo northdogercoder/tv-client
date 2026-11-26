@@ -284,10 +284,26 @@ impl Player {
                                     if change.current() == gst::State::Playing {
                                         let pending_seek = lock(&bus_state).pending_seek_ms.take();
                                         if let Some(position_ms) = pending_seek {
-                                            let _ = bus_pipeline.seek_simple(
-                                                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-                                                gst::ClockTime::from_mseconds(position_ms),
-                                            );
+                                            match gst::ClockTime::try_from(Duration::from_millis(
+                                                position_ms,
+                                            )) {
+                                                Ok(position) => {
+                                                    let _ = bus_pipeline.seek_simple(
+                                                        gst::SeekFlags::FLUSH
+                                                            | gst::SeekFlags::ACCURATE,
+                                                        position,
+                                                    );
+                                                }
+                                                Err(_) => {
+                                                    emit(&PlayerEvent::Error {
+                                                        code: "invalid_request".to_string(),
+                                                        message: Some(
+                                                            "seek position out of range"
+                                                                .to_string(),
+                                                        ),
+                                                    });
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -393,10 +409,16 @@ impl Player {
     }
 
     fn seek(&self, position_ms: u64) {
-        let result = self.pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-            gst::ClockTime::from_mseconds(position_ms),
-        );
+        let Ok(position) = gst::ClockTime::try_from(Duration::from_millis(position_ms)) else {
+            emit(&PlayerEvent::Error {
+                code: "invalid_request".to_string(),
+                message: Some("seek position out of range".to_string()),
+            });
+            return;
+        };
+        let result = self
+            .pipeline
+            .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, position);
         if result.is_ok() {
             let mut state = lock(&self.state);
             state.last_position_ms = position_ms;

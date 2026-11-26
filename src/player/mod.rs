@@ -41,6 +41,11 @@ pub const MAX_ERROR_MESSAGE_BYTES: usize = 512;
 const MAX_NAME_BYTES: usize = 128;
 /// Highest accepted volume value.
 pub const MAX_VOLUME: u8 = 100;
+/// Highest accepted absolute playback position (24 hours).
+///
+/// This keeps positions well inside GStreamer's `ClockTime` range and rejects
+/// obviously hostile values before they reach a child.
+pub const MAX_POSITION_MS: u64 = 24 * 60 * 60 * 1_000;
 /// Initial volume when the parent has not set one yet.
 pub const DEFAULT_VOLUME: u8 = 50;
 /// Default time allowed between starting the child and its `ready` event.
@@ -84,6 +89,14 @@ impl LoadRequest {
     /// Validate the URL and headers.
     pub fn validate(&self) -> Result<(), PlayerError> {
         validate_media_url(&self.url)?;
+        if self
+            .start_position_ms
+            .is_some_and(|position| position > MAX_POSITION_MS)
+        {
+            return Err(PlayerError::InvalidRequest {
+                field: "start_position_ms exceeds 24 hours",
+            });
+        }
         validate_headers(self.headers.as_ref())
     }
 }
@@ -128,7 +141,15 @@ impl PlayerRequest {
     pub fn validate(&self) -> Result<(), PlayerError> {
         match self {
             Self::Load(load) => load.validate(),
-            Self::Seek { .. } | Self::Pause | Self::Resume | Self::Stop => Ok(()),
+            Self::Seek { position_ms } => {
+                if *position_ms > MAX_POSITION_MS {
+                    return Err(PlayerError::InvalidRequest {
+                        field: "position_ms exceeds 24 hours",
+                    });
+                }
+                Ok(())
+            }
+            Self::Pause | Self::Resume | Self::Stop => Ok(()),
             Self::SetVolume { volume } => {
                 if *volume > MAX_VOLUME {
                     return Err(PlayerError::InvalidRequest {
@@ -894,6 +915,11 @@ impl PlayerMachine {
             },
             PlayerCommand::Seek { position_ms } => match self.state {
                 PlayerState::Playing | PlayerState::Paused => {
+                    if position_ms > MAX_POSITION_MS {
+                        return Err(PlayerError::InvalidRequest {
+                            field: "position_ms exceeds 24 hours",
+                        });
+                    }
                     if self
                         .duration_ms
                         .is_some_and(|duration| position_ms > duration)
@@ -1460,16 +1486,39 @@ where
                                 let mut child = ActiveChild::new(child);
                                 match send_request(&mut child, &config, &request).await {
                                     Ok(()) => {
-                                        ready_deadline = Some(Instant::now() + config.ready_timeout);
-                                        active = Some(child);
+                                        let volume = PlayerRequest::SetVolume {
+                                            volume: machine.volume(),
+                                        };
+                                        match send_request(&mut child, &config, &volume).await {
+                                            Ok(()) => {
+                                                ready_deadline =
+                                                    Some(Instant::now() + config.ready_timeout);
+                                                active = Some(child);
+                                            }
+                                            Err(error) => {
+                                                ready_deadline = None;
+                                                event_deadline = None;
+                                                fail_with(
+                                                    &mut machine,
+                                                    &notifications,
+                                                    error.code(),
+                                                )
+                                                .await?;
+                                                teardown_child(child, &config).await;
+                                            }
+                                        }
                                     }
                                     Err(error) => {
+                                        ready_deadline = None;
+                                        event_deadline = None;
                                         fail_with(&mut machine, &notifications, error.code()).await?;
                                         teardown_child(child, &config).await;
                                     }
                                 }
                             }
                             Err(error) => {
+                                ready_deadline = None;
+                                event_deadline = None;
                                 fail_with(&mut machine, &notifications, error.code()).await?;
                             }
                         }
@@ -1479,15 +1528,21 @@ where
                         && let Some(child) = active.as_mut()
                         && let Err(error) = send_request(child, &config, &request).await
                     {
+                        ready_deadline = None;
+                        event_deadline = None;
                         fail_with(&mut machine, &notifications, error.code()).await?;
                         teardown(&mut active, &config).await;
                     }
                     match machine.state() {
                         PlayerState::Playing => {
+                            ready_deadline = None;
                             event_deadline = Some(Instant::now() + config.event_timeout);
                         }
-                        PlayerState::Paused
-                        | PlayerState::Idle
+                        PlayerState::Paused => {
+                            ready_deadline = None;
+                            event_deadline = None;
+                        }
+                        PlayerState::Idle
                         | PlayerState::Ended
                         | PlayerState::Error => event_deadline = None,
                         PlayerState::Loading => {}
@@ -1510,10 +1565,14 @@ where
                                         emit(&notifications, notes).await?;
                                         match machine.state() {
                                             PlayerState::Playing => {
+                                                ready_deadline = None;
                                                 event_deadline =
                                                     Some(Instant::now() + config.event_timeout);
                                             }
-                                            PlayerState::Paused => event_deadline = None,
+                                            PlayerState::Paused => {
+                                                ready_deadline = None;
+                                                event_deadline = None;
+                                            }
                                             PlayerState::Ended | PlayerState::Error => {
                                                 ready_deadline = None;
                                                 event_deadline = None;
@@ -1523,12 +1582,16 @@ where
                                         }
                                     }
                                     Err(_) => {
+                                        ready_deadline = None;
+                                        event_deadline = None;
                                         fail_with(&mut machine, &notifications, "protocol").await?;
                                         teardown(&mut active, &config).await;
                                     }
                                 }
                             }
                             Err(_) => {
+                                ready_deadline = None;
+                                event_deadline = None;
                                 fail_with(&mut machine, &notifications, "protocol").await?;
                                 teardown(&mut active, &config).await;
                             }
@@ -1557,6 +1620,8 @@ where
                         }
                     }
                     Some(ChildMessage::Io { code }) => {
+                        ready_deadline = None;
+                        event_deadline = None;
                         fail_with(&mut machine, &notifications, code).await?;
                         teardown(&mut active, &config).await;
                     }
