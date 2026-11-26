@@ -173,10 +173,19 @@ The direct dependencies are:
 - `clap` (with the `derive` feature) for CLI parsing.
 - `serde` (with the `derive` feature) and `toml` for strict TOML decoding.
 - `serde_json` for the player protocol and Jellyfin responses.
-- `tokio` (with `io-util`, `macros`, `process`, `rt`, `sync` and `time`) for
-  the bounded async state loop, child pipes, timeouts and shutdown channel.
+- `tokio` (with `io-util`, `macros`, `net`, `process`, `rt`, `sync` and
+  `time`) for the bounded async state loop, child pipes, timeouts, shutdown
+  channel and the cloud WebSocket TCP stream.
 - `rusqlite` with the `bundled` feature for the embedded SQLite database.
-- `reqwest` for the Jellyfin HTTP client.
+- `reqwest` for the Jellyfin HTTP client and the control-server HTTPS API.
+- `futures-util` (with `std` and `sink`, no default features) for the
+  WebSocket sink/stream adapters. It was already resolved in the existing
+  lockfile; the cloud socket makes the direct use explicit.
+- `tokio-tungstenite` 0.30 with `connect`, `handshake` and
+  `rustls-tls-native-roots`, and without default features, for
+  `/v1/ws/device`. Rustls uses the host trust store, so no OpenSSL
+  development package is added. The device bearer travels in the
+  `Authorization` header, never in the URL, and frame contents are not logged.
 - `url` for strict URL parsing and redaction.
 - `thiserror` for typed error enums.
 - `tracing` for structured diagnostics.
@@ -202,7 +211,10 @@ The direct dependencies are:
 
 Their transitive dependencies follow from these direct ones. The version
 requirements live in `Cargo.toml`; exact resolved versions live in the
-committed `Cargo.lock`.
+committed `Cargo.lock`. Adding the WebSocket crates changes the lockfile: run
+`cargo update` (or a normal `cargo check`) once, review the diff, and commit
+`Cargo.toml` and `Cargo.lock` together. Every gate command after that uses
+`--locked`.
 
 To update dependencies:
 
@@ -213,6 +225,31 @@ To update dependencies:
 
 Review the lockfile diff before committing; the pinned toolchain and CI both
 build from `Cargo.lock` via `--locked`.
+
+## Cloud WebSocket dependency
+
+The cloud device socket is always compiled; it is not behind a Cargo feature.
+This keeps the protocol, dedupe, pairing and reconnect code exercised by the
+default headless gate. It adds `tokio-tungstenite` and an explicit
+`futures-util` dependency but **no system package**:
+
+- TLS is rustls with native roots, matching the existing `reqwest` stack. The
+  host certificate store is read at runtime; there is no OpenSSL or
+  `pkg-config` requirement.
+- The WebSocket and HTTP client share the same HTTPS origin policy
+  (`https://` only). Tests use a loopback `ws://` mock server and a recording
+  HTTP transport; production code derives `wss://` from `server_url`.
+- The device bearer is supplied only as an `Authorization` header. The URL,
+  query string, argv, preferences and logs never contain it.
+- The link uses bounded channels: 32 pending commands, 32 outbound frames and
+  32 UI events. A full queue is a typed rejection, not unbounded buffering.
+- The connection uses a 10-second handshake/request timeout, a 15-second ping,
+  a 45-second inbound timeout and 1–60 second jittered reconnects. The pending
+  command queue is per connection, so reconnect does not replay commands.
+
+The dependency is built on x86_64 headless and aarch64. It has no GStreamer or
+Slint requirement, so the native-player and native-UI feature checks are
+unchanged. See [`cloud.md`](cloud.md) for enrollment and behavior.
 
 ## CI
 

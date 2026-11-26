@@ -7,6 +7,7 @@
 //! `webrtc` flags remain seams without an implementation; the kernel HDMI-CEC
 //! bridge is runtime code, not a feature.
 
+pub mod cloud;
 pub mod config;
 pub mod input;
 pub mod jellyfin;
@@ -17,6 +18,10 @@ pub mod state;
 pub mod storage;
 pub mod ui;
 
+pub use cloud::{
+    CloudError, CloudHttp, DeviceLink, DeviceToken, Enrollment, EnrollmentToken, LinkConfig,
+    LinkEnd, LinkEvent, PairingSession, StatePayload,
+};
 pub use config::ClientConfig;
 pub use input::{
     CecBridge, CecConfig, CecDisconnect, CecError, CecParser, CecStatus, CecUnavailable,
