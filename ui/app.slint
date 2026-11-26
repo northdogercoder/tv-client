@@ -23,6 +23,8 @@ export component AppWindow inherits Window {
 
     in-out property <int> screen: 0;
     in-out property <string> status-text: "Choose a source";
+    in-out property <string> cloud-status;
+    in-out property <string> pair-code;
     in-out property <int> home-focus: 0;
     in-out property <int> library-focus: 0;
     in-out property <int> settings-focus: 0;
@@ -197,6 +199,21 @@ export component AppWindow inherits Window {
                 Rectangle {
                     horizontal-stretch: 1;
                     background: transparent;
+                }
+
+                if root.cloud-status != "" : Text {
+                    text: root.cloud-status;
+                    font-size: root.base / 34;
+                    color: #9fc2ff;
+                    vertical-alignment: center;
+                }
+
+                if root.pair-code != "" : Text {
+                    text: "Pair " + root.pair-code;
+                    font-size: root.base / 30;
+                    font-weight: 700;
+                    color: #ffd479;
+                    vertical-alignment: center;
                 }
 
                 Text {

@@ -385,6 +385,9 @@ pub enum UiReject {
     /// Retry was requested outside an error state.
     #[error("no retry is available")]
     NothingToRetry,
+    /// The Slint event loop is no longer available.
+    #[error("the user interface is unavailable")]
+    Unavailable,
 }
 
 /// Result of feeding one input event to the view model.
@@ -394,6 +397,10 @@ pub enum UiOutcome {
     Action(Action),
     /// Approve a pending pairing request from local input.
     ApprovePairing { request_id: Uuid },
+    /// Deny a pending pairing request from local input.
+    DenyPairing { request_id: Uuid },
+    /// Start a pairing-code request from the local settings screen.
+    StartPairing,
     /// Ask the owner to retry the current library load.
     Retry,
     /// Ask the controller to act on the active playback.
@@ -433,6 +440,8 @@ impl PairChoice {
 pub struct PairPrompt {
     pub request_id: Uuid,
     pub choice: PairChoice,
+    /// Server comparison code, already reduced to four ASCII digits.
+    pub comparison_code: Option<String>,
 }
 
 impl PairPrompt {
@@ -440,6 +449,18 @@ impl PairPrompt {
     #[must_use]
     pub const fn message(&self) -> &'static str {
         "A device wants to pair with this TV. Approve only if you started pairing."
+    }
+
+    /// Text shown by the TV dialog.
+    ///
+    /// The comparison code is not remote free-form text: callers must pass a
+    /// four-digit value through [`UiModel::present_pairing_request_with_code`].
+    #[must_use]
+    pub fn display_text(&self) -> String {
+        match self.comparison_code.as_deref() {
+            Some(code) => format!("{}\n\nComparison code: {code}", self.message()),
+            None => self.message().to_owned(),
+        }
     }
 }
 
@@ -471,6 +492,7 @@ impl RepeatThrottle {
 struct PlayerView {
     title: String,
     source: Option<Source>,
+    item_id: Option<String>,
     method: String,
     position_ms: u64,
     duration_ms: Option<u64>,
@@ -492,6 +514,7 @@ impl Default for PlayerView {
         Self {
             title: "Nothing playing".to_owned(),
             source: None,
+            item_id: None,
             method: String::new(),
             position_ms: 0,
             duration_ms: None,
@@ -622,6 +645,9 @@ pub struct UiModel {
     player: PlayerView,
     cast_state: String,
     status: String,
+    cloud_status: String,
+    pair_code: String,
+    volume: u8,
     modal: Option<PairPrompt>,
     throttle: RepeatThrottle,
     resume: Option<MediaItem>,
@@ -639,6 +665,9 @@ impl Default for UiModel {
             player: PlayerView::default(),
             cast_state: "No receiver attached".to_owned(),
             status: "Choose a source".to_owned(),
+            cloud_status: String::new(),
+            pair_code: String::new(),
+            volume: crate::model::DEFAULT_VOLUME,
             modal: None,
             throttle: RepeatThrottle::default(),
             resume: None,
@@ -987,6 +1016,148 @@ impl UiModel {
         self.cast_state = sanitize(state, 80, "No receiver attached");
     }
 
+    /// Eight-digit pairing code to show on the TV, or empty when inactive.
+    #[must_use]
+    pub fn pairing_code(&self) -> &str {
+        &self.pair_code
+    }
+
+    /// Display a server-issued pairing code on the TV.
+    ///
+    /// The code is validated as eight ASCII digits before it can reach the
+    /// declarative UI, so a server cannot inject layout or markup.
+    pub fn set_pairing_code(&mut self, code: &str) -> Result<(), UiReject> {
+        if code.len() != 8 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(UiReject::InvalidRequest);
+        }
+        self.pair_code = code.to_owned();
+        Ok(())
+    }
+
+    /// Remove the pairing code from the TV.
+    pub fn clear_pairing_code(&mut self) {
+        self.pair_code.clear();
+    }
+
+    /// Dismiss the confirmation dialog when it belongs to `request_id`.
+    ///
+    /// Used when the server reports a terminal pairing status, the request
+    /// expires or the device is revoked. A stale dialog must never remain
+    /// available for a decision that can no longer be submitted.
+    pub fn dismiss_pairing_request(&mut self, request_id: Uuid) {
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|prompt| prompt.request_id == request_id)
+        {
+            self.modal = None;
+            self.refresh_status();
+        }
+    }
+
+    /// Clear a previous playback error before retrying a remote play command.
+    ///
+    /// The stale source and position are removed as well: otherwise an old
+    /// `playing` snapshot for the same item could satisfy the retry wait
+    /// before the queued play command has actually started.
+    pub fn clear_player_error(&mut self) {
+        if self.player.error.is_some() {
+            self.player.error = None;
+            self.player.loading = false;
+            self.player.source = None;
+            self.player.item_id = None;
+            self.player.paused = false;
+            self.player.position_ms = 0;
+            self.player.duration_ms = None;
+        }
+        self.refresh_status();
+    }
+
+    /// Persistent cloud status shown in the header.
+    #[must_use]
+    pub fn cloud_status(&self) -> &str {
+        &self.cloud_status
+    }
+
+    /// Update the persistent cloud status line.
+    pub fn set_cloud_status(&mut self, status: &str) {
+        self.cloud_status = sanitize(status, 80, "");
+    }
+
+    /// Project the current presentation state for cloud publication.
+    ///
+    /// This never includes a media URL. The caller adds the device id and
+    /// applies `share_titles`.
+    #[must_use]
+    pub fn snapshot(&self) -> AppState {
+        let mode = if self.player.error.is_some() {
+            Mode::Error
+        } else if self.player.loading {
+            Mode::Loading
+        } else if self.player.source.is_some() {
+            if self.player.paused {
+                Mode::Paused
+            } else {
+                Mode::Playing
+            }
+        } else {
+            match self.screen {
+                Screen::Library | Screen::Settings => Mode::Browsing,
+                Screen::Cast => Mode::Casting,
+                Screen::Home | Screen::Player => Mode::Home,
+            }
+        };
+        let playing = self.player.source.is_some();
+        AppState {
+            device_id: None,
+            mode,
+            source: self.player.source,
+            item_id: self.player.item_id.clone(),
+            title: if playing {
+                Some(self.player.title.clone())
+            } else {
+                None
+            },
+            position_ms: playing.then_some(self.player.position_ms),
+            duration_ms: self.player.duration_ms,
+            volume: self.volume,
+            paused: self.player.paused,
+            error: self
+                .player
+                .error
+                .as_ref()
+                .map(|_| "playback_error".to_owned()),
+            playback: None,
+        }
+    }
+
+    /// Apply a wire navigation action through the local view-model path.
+    ///
+    /// Only navigation is represented here; playback actions travel through
+    /// the playback command channel. The pairing dialog is never reachable
+    /// from this method.
+    pub fn handle_remote_action(&mut self, action: Action, now: Duration) -> UiOutcome {
+        if self.modal.is_some() {
+            return UiOutcome::Rejected(UiReject::RemoteApprovalDenied);
+        }
+        let Action::Navigate { direction } = action else {
+            return UiOutcome::Ignored;
+        };
+        if direction == Direction::Select && self.screen == Screen::Settings {
+            return UiOutcome::Ignored;
+        }
+        let key = match direction {
+            Direction::Up => Key::Up,
+            Direction::Down => Key::Down,
+            Direction::Left => Key::Left,
+            Direction::Right => Key::Right,
+            Direction::Select => Key::Enter,
+            Direction::Back => Key::Escape,
+            Direction::Home => Key::Home,
+        };
+        self.handle_local_key(key, now)
+    }
+
     /// Pending local confirmation, if any.
     #[must_use]
     pub fn pair_prompt(&self) -> Option<&PairPrompt> {
@@ -1109,7 +1280,24 @@ impl UiModel {
     /// still requires a local key: [`UiInput::RemoteAction`] is always refused
     /// while the prompt is visible.
     pub fn present_pairing_request(&mut self, request_id: Uuid) -> Result<(), UiReject> {
+        self.present_pairing_request_with_code(request_id, None)
+    }
+
+    /// Present a pairing request together with the server comparison code.
+    ///
+    /// The code must be exactly four ASCII digits; anything else is refused
+    /// instead of being rendered.
+    pub fn present_pairing_request_with_code(
+        &mut self,
+        request_id: Uuid,
+        comparison_code: Option<&str>,
+    ) -> Result<(), UiReject> {
         if request_id.is_nil() {
+            return Err(UiReject::InvalidRequest);
+        }
+        if let Some(code) = comparison_code
+            && (code.len() != 4 || !code.bytes().all(|byte| byte.is_ascii_digit()))
+        {
             return Err(UiReject::InvalidRequest);
         }
         if self.modal.is_some() {
@@ -1118,6 +1306,7 @@ impl UiModel {
         self.modal = Some(PairPrompt {
             request_id,
             choice: PairChoice::Deny,
+            comparison_code: comparison_code.map(str::to_owned),
         });
         self.status = "Pairing confirmation required".to_owned();
         Ok(())
@@ -1144,7 +1333,9 @@ impl UiModel {
             .clone()
             .unwrap_or_else(|| "Nothing playing".to_owned());
         self.player.source = state.source;
+        self.player.item_id = state.item_id.clone();
         self.player.position_ms = state.position_ms.unwrap_or(0);
+        self.volume = state.volume;
         self.player.duration_ms = state.duration_ms;
         self.player.paused = state.paused;
 
@@ -1215,6 +1406,7 @@ impl UiModel {
                 self.screen = Screen::Player;
                 self.player.title = title.clone().unwrap_or_else(|| format!("Item {item_id}"));
                 self.player.source = Some(Source::Jellyfin);
+                self.player.item_id = Some(item_id.clone());
                 self.player.method.clear();
                 self.player.position_ms = 0;
                 self.player.duration_ms = None;
@@ -1232,12 +1424,13 @@ impl UiModel {
                 self.status = format!("Opening {}", self.player.title);
             }
             PlaybackUpdate::Position {
-                item_id: _,
+                item_id,
                 position_ms,
                 duration_ms,
                 paused,
             } => {
                 self.screen = Screen::Player;
+                self.player.item_id = Some(item_id.clone());
                 self.player.loading = false;
                 self.player.error = None;
                 self.player.position_ms = *position_ms;
@@ -1298,14 +1491,16 @@ impl UiModel {
                 }
             }
             PlaybackUpdate::Ended {
-                item_id: _,
+                item_id,
                 position_ms,
                 duration_ms,
                 next_episode,
             } => {
                 self.screen = Screen::Player;
+                self.player.item_id = Some(item_id.clone());
+                self.player.source = None;
                 self.player.loading = false;
-                self.player.paused = false;
+                self.player.paused = true;
                 self.player.position_ms = *position_ms;
                 self.player.duration_ms = *duration_ms;
                 self.player.retry_available = false;
@@ -1315,11 +1510,14 @@ impl UiModel {
                 self.refresh_status();
             }
             PlaybackUpdate::Failed {
-                item_id: _,
+                item_id,
                 code,
                 message,
                 retry_available,
             } => {
+                if let Some(item_id) = item_id {
+                    self.player.item_id = Some(item_id.clone());
+                }
                 self.screen = Screen::Player;
                 self.player.loading = false;
                 self.player.paused = false;
@@ -1332,6 +1530,7 @@ impl UiModel {
                 self.screen = Screen::Home;
                 self.player.title = "Nothing playing".to_string();
                 self.player.source = None;
+                self.player.item_id = None;
                 self.player.method.clear();
                 self.player.position_ms = 0;
                 self.player.duration_ms = None;
@@ -1480,7 +1679,7 @@ impl UiModel {
                 self.modal = None;
                 self.refresh_status();
                 match choice {
-                    PairChoice::Deny => UiOutcome::Dismissed,
+                    PairChoice::Deny => UiOutcome::DenyPairing { request_id },
                     PairChoice::Approve => UiOutcome::ApprovePairing { request_id },
                 }
             }
@@ -1997,6 +2196,7 @@ impl UiModel {
                 self.status = "tv-client is licensed GPL-3.0-only".to_owned();
                 self.navigated()
             }
+            3 => UiOutcome::StartPairing,
             _ => {
                 self.go_home();
                 UiOutcome::Action(Action::Navigate {
@@ -2123,10 +2323,11 @@ impl UiModel {
 const PLAYER_CONTROLS: usize = 7;
 
 /// Settings rows, in display order.
-pub const SETTINGS_ROWS: [&str; 4] = [
+pub const SETTINGS_ROWS: [&str; 5] = [
     "Video: 720p / 1080p auto",
     "Audio: HDMI (compositor)",
     "Licence: GPL-3.0-only",
+    "Pair a remote",
     "Back to home",
 ];
 
@@ -2198,6 +2399,10 @@ mod native {
         Action(Action),
         /// A local operator approved a pending pairing request.
         ApprovePairing { request_id: Uuid },
+        /// A local operator denied a pending pairing request.
+        DenyPairing { request_id: Uuid },
+        /// The operator asked to start a pairing-code request.
+        StartPairing,
         /// The operator asked to retry the current library load.
         Retry,
         /// The operator opened a library source; the controller should fetch it.
@@ -2328,6 +2533,77 @@ mod native {
             self.post(move |model| {
                 let _ = model.present_pairing_request(request_id);
             });
+        }
+
+        /// Present a pairing request with its server comparison code.
+        pub fn present_pairing_request_with_code(
+            &self,
+            request_id: Uuid,
+            comparison_code: Option<String>,
+        ) {
+            self.post(move |model| {
+                let _ =
+                    model.present_pairing_request_with_code(request_id, comparison_code.as_deref());
+            });
+        }
+
+        /// Show the server-issued eight-digit pairing code on the TV.
+        pub fn set_pairing_code(&self, code: String) {
+            self.post(move |model| {
+                if model.set_pairing_code(&code).is_err() {
+                    tracing::warn!("ignoring malformed pairing code");
+                }
+            });
+        }
+
+        /// Clear the pairing code banner.
+        pub fn clear_pairing_code(&self) {
+            self.post(UiModel::clear_pairing_code);
+        }
+
+        /// Dismiss the confirmation dialog for a terminal or expired request.
+        pub fn dismiss_pairing_request(&self, request_id: Uuid) {
+            self.post(move |model| model.dismiss_pairing_request(request_id));
+        }
+
+        /// Clear a stale playback error before a remote retry.
+        ///
+        /// The model is updated synchronously so the cloud applier can seed
+        /// its failure detection from the cleared state; the event loop post
+        /// only refreshes the window.
+        pub fn clear_player_error(&self) {
+            lock_model(&self.model).clear_player_error();
+            self.post(|_model| {});
+        }
+
+        /// Update the persistent cloud status line.
+        pub fn set_cloud_status(&self, status: String) {
+            self.post(move |model| model.set_cloud_status(&status));
+        }
+
+        /// Snapshot the presentation state for cloud publication.
+        pub fn snapshot(&self) -> crate::model::AppState {
+            lock_model(&self.model).snapshot()
+        }
+
+        /// Apply one wire action through the local view-model command path.
+        pub async fn apply_remote_action(
+            self,
+            action: crate::model::Action,
+        ) -> Result<UiOutcome, UiReject> {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            let window = self.window.clone();
+            let model = std::sync::Arc::clone(&self.model);
+            let on_command = std::sync::Arc::clone(&self.on_command);
+            let start = self.start;
+            let _ = window.upgrade_in_event_loop(move |window| {
+                let mut model = lock_model(&model);
+                let outcome = model.handle_remote_action(action, start.elapsed());
+                dispatch(&on_command, outcome.clone());
+                refresh(&window, &model);
+                let _ = reply.send(outcome);
+            });
+            response.await.map_err(|_| UiReject::Unavailable)
         }
 
         fn post(&self, update: impl FnOnce(&mut UiModel) + Send + 'static) {
@@ -2589,6 +2865,10 @@ mod native {
             UiOutcome::ApprovePairing { request_id } => {
                 (**on_command)(UiCommand::ApprovePairing { request_id });
             }
+            UiOutcome::DenyPairing { request_id } => {
+                (**on_command)(UiCommand::DenyPairing { request_id });
+            }
+            UiOutcome::StartPairing => (**on_command)(UiCommand::StartPairing),
             UiOutcome::Retry => (**on_command)(UiCommand::Retry),
             UiOutcome::Playback(command) => (**on_command)(UiCommand::Playback(command)),
             UiOutcome::Rejected(UiReject::RemoteApprovalDenied) => {
@@ -2683,9 +2963,15 @@ mod native {
         window.set_cast_state(model.cast_state().into());
         window.set_settings_version(VERSION_LABEL.into());
 
+        window.set_pair_code(model.pairing_code().into());
+        window.set_cloud_status(model.cloud_status().into());
         let prompt = model.pair_prompt();
         window.set_pair_visible(prompt.is_some());
-        window.set_pair_message(prompt.map_or("", |prompt| prompt.message()).into());
+        window.set_pair_message(
+            prompt
+                .map_or_else(String::new, |prompt| prompt.display_text())
+                .into(),
+        );
         window.set_pair_choice(
             prompt
                 .map_or(PairChoice::Deny, |prompt| prompt.choice)
