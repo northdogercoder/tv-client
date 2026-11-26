@@ -396,6 +396,14 @@ async fn run_unavailable(
                     PlaybackCommand::LoadLibrary { .. } | PlaybackCommand::RetryLibrary => {
                         ui.set_library_error(message.to_string());
                     }
+                    // Navigation/back and player controls on an error screen are
+                    // no-ops, not new failures; otherwise Escape would re-open
+                    // the error screen and trap the UI.
+                    PlaybackCommand::Pause
+                    | PlaybackCommand::Resume
+                    | PlaybackCommand::TogglePause
+                    | PlaybackCommand::Seek { .. }
+                    | PlaybackCommand::Stop => {}
                     _ => ui.apply_playback_update(playback_failure(code, message)),
                 }
             }
