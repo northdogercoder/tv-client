@@ -76,9 +76,10 @@ Authorization: Bearer <device token>
 5. Format policy: H.264 (`avc1`) with AAC (`mp4a`), **720p30 first**, then a
    muxed progressive H.264 fallback, then **1080p30** only when no 720p option
    exists. The selector contains `fps<=30`, never prefers VP9/AV1 and refuses
-   1080p60/720p60. 720p is first because measured 1080p30 playback dropped
-   roughly 72% of frames on the Pi, versus about 19% at 720p30; 1080p30 remains
-   an accepted last resort when a video has no 720p30 H.264/AAC format.
+   1080p60/720p60. 720p is first because measured 1080p30 playback in labwc
+   dropped roughly 72% of frames, versus about 19% at 720p30; under Cage/GLES
+   720p30 passes. 1080p30 remains an accepted last resort when a video has no
+   720p30 H.264/AAC format, but is not a supported Pi 3B hardware mode.
 6. The resolved stream URLs live only in memory for one session. `Debug`
    prints `redacted`, no URL is written to argv, the log, the database or a
    file, and the temporary socket directory is removed on teardown.
@@ -176,46 +177,56 @@ Lab target: Raspberry Pi 3B, Debian 13, kernel 6.18, labwc/Wayland at 1080p,
 used the current PyPI `yt-dlp 2026.11.23` in a throwaway `/tmp` venv. The
 distribution `2025.04.30` binary is **not** the playback dependency.
 
-Short public-video probe (video id `6v2L2UGZJAM`), no soak. The operator
-reported visible stutter on the TV; the measurements below confirm it. **The Pi
-playback gate is FAIL / not smooth.**
+Short public-video probes (video id `6v2L2UGZJAM` unless noted), no soak.
+The operator reported visible stutter on the TV; measurement confirmed the
+labwc session is the source. The accepted C010 hardware gate is **720p30 under
+Cage/GLES**, not labwc:
 
-| Configuration (short run) | Format | Renderer / hwdec | Time advanced | Frame drops | CPU | Result |
-|---|---|---|---|---|---|---|
-| 1080p30 | `137` avc1.640028 + mp4a | `gpu` (explicit `wayland`), `v4l2m2m` | 5.61 s / 6.03 s | **131 / 181 (~72%)** | 7.34 s | stutter |
-| 720p30 | `136` avc1.4D401F + mp4a | `gpu` (explicit `wayland`), `v4l2m2m` | 6.04 s / 6.01 s | **35 / 180 (~19%)** | 4.28 s | stutter |
-| 720p30 | `136` + mp4a | `gpu`, software decode | 6.04 s / 6.05 s | 27 / 181 (~15%) | 6.02 s | stutter |
-| 720p30 | `136` + mp4a | `wlshm`, `v4l2m2m` | 7.61 s / 8.10 s | 47 / ~240 (~20%) | 19.51 s | stutter |
-| 720p30 | `136` + mp4a | `wlshm`, software decode | 5.21 s / 5.01 s | 43 / 150 (~29%) | 15.36 s | stutter |
-| 480p30 (the operator's Big Buck Bunny, `aqz-KE-bpKQ`) | progressive H.264/AAC | `gpu`, `v4l2m2m` | 5.03 s / 5.00 s | **1 / 150** | 2.71 s | smooth |
+- **labwc/Wayland remains FAIL.** 720p30 drops ~19% and 1080p30 drops ~72% of
+  frames in this compositor session, with both `vo=gpu` and `wlshm`.
+- **Nested Cage/GLES 720p30 PASS.** Running a nested Cage compositor with
+  `WLR_BACKENDS=wayland WLR_RENDERER=gles2` dropped **2 frames out of 240** at
+  30 fps (≈0.8%) for local 720p30 playback.
+- **Cage 1080p30 FAIL / unsupported.** The same Cage/GLES path dropped **151
+  frames** at 1080p. 1080p30 is explicitly not supported on the Raspberry Pi
+  3B.
+- **Big Buck Bunny 480p30 is smooth.** `aqz-KE-bpKQ` has no 30 fps 720p/1080p
+  H.264 format; the 30 fps cap selects its progressive 480p30 H.264/AAC stream,
+  which dropped **1 frame out of 150** and plays smoothly.
 
-- `hwdec-current` was `v4l2m2m` for the hardware rows and `no` for the
-  software rows; `current-vo` was `gpu` or `wlshm`. Display refresh reported
-  60 Hz (`display-fps=60.0`, output `HDMI-A-1`), `paused-for-cache=false`, and
-  demuxer cache stayed ~18–20 s, so the drops are renderer/present-side, not
-  network buffering.
-- With `--video-sync=display-resample` on 720p30/`gpu`, mpv reported
-  `estimated-display-fps ≈ 24.9`, below the 29.97 fps source.
-- One 1080p30 run with the default `gpu` context (no explicit
-  `--gpu-context=wayland`) exited with **SIGSEGV** during OpenGL shader setup
-  (`returncode -11`). The client now passes `--gpu-context=wayland` explicitly.
-- Audio attached correctly in every completed run (`aid=1`,
-  `audio-codec-name=aac`), so the stutter is video-presentation, not a missing
-  audio track.
-- RAM was 107–175 MiB, FD count 43–64, and package temperature 47–58 °C during
-  these short runs.
+| Session / renderer | Format | Frames dropped | Result |
+|---|---|---|---|
+| labwc, `gpu --gpu-context=wayland`, `v4l2m2m` | 720p30 `136` + mp4a | 35 / 180 (~19%) | FAIL |
+| labwc, `gpu --gpu-context=wayland`, `v4l2m2m` | 1080p30 `137` + mp4a | 131 / 181 (~72%) | FAIL |
+| labwc, `gpu`, software decode | 720p30 | 27 / 181 (~15%) | FAIL |
+| labwc, `wlshm`, `v4l2m2m` | 720p30 | 47 / ~240 (~20%) | FAIL |
+| labwc, `wlshm`, software decode | 720p30 | 43 / 150 (~29%) | FAIL |
+| nested Cage, `WLR_BACKENDS=wayland WLR_RENDERER=gles2` | 720p30 local | **2 / 240 (~0.8%)** | **PASS** |
+| Cage/GLES | 1080p30 | **151** | FAIL / unsupported |
+| labwc Big Buck Bunny `aqz-KE-bpKQ` | progressive 480p30 | **1 / 150** | smooth |
 
-The operator's Big Buck Bunny case is fixed by the 30 fps cap: it has no 30 fps
-720p/1080p H.264 format, so the selector now chooses its progressive 480p30
-H.264/AAC format, which measured 1 dropped frame in 150 and clearly smoother
-playback. The least-bad measured high-resolution option remains 720p30 with
-`vo=gpu`/`v4l2m2m`; the client prefers 720p30 and keeps 1080p30 only as a last
-resort. **This is not a blanket smooth-playback claim and the Pi 720p/1080p
-gate is not passed.** A renderer fix (Wayland dmabuf/zero-copy, compositor
-renderer, or a faster present path) is still required for true 720p30/1080p30. `libplacebo`/Vulkan remains unreliable on this target, 1080p60
-is not offered, and a video with only 60 fps H.264/VP9/AV1 formats is refused
-as `unsupported_format` rather than silently preferring a desynchronized or
-dropping path.
+labwc detail: `hwdec-current` was `v4l2m2m` for hardware rows and `no` for
+software rows; `current-vo` was `gpu` or `wlshm`; `display-fps=60.0` on
+`HDMI-A-1`, `paused-for-cache=false`, demuxer cache ~18–20 s, so the drops are
+presentation-side, not network. With `--video-sync=display-resample` on
+720p30/`gpu`, mpv reported `estimated-display-fps ≈ 24.9`. One 1080p30 run with
+the default `gpu` context (no explicit `--gpu-context=wayland`) exited with
+**SIGSEGV** during OpenGL shader setup (`returncode -11`). Audio attached in
+completed runs (`aid=1`, `audio-codec-name=aac`). Labwc RAM was 107–188 MiB,
+FD count 43–64, package temperature 47–59 °C.
+
+The accepted renderer decision:
+
+- C010 hardware gate: **PASS for local 720p30 under Cage/GLES**.
+- 1080p30: **FAIL / explicitly unsupported on the Pi 3B**.
+- labwc/pixman: **FAIL**, not a supported playback session.
+- C013 kiosk will use **Cage**; the C004 UI must be revalidated under Cage
+  (fullscreen, focus, input and teardown), not assumed from labwc.
+- The client keeps the 720p30-first, 480p-progressive, 1080p-last selector with
+  the 30 fps cap; 1080p60 and 720p60 are never offered. `libplacebo`/Vulkan
+  remains unreliable on this target, and a video with only 60 fps
+  H.264/VP9/AV1 formats is refused as `unsupported_format` rather than
+  silently preferring a dropping or desynchronized path.
 
 The `/tmp` venv is a probe only. Production uses the absolute managed path in
 `youtube_ytdlp_path`, kept updated with:
@@ -240,8 +251,8 @@ blocking to the device.
   and local Jellyfin remains unaffected.
 - The accepted tradeoff is that ads, branding and the official embed are not
   preserved. This is not a hosted-player implementation.
-- **Pi renderer gate is FAIL for 720p30/1080p30:** those paths drop roughly
-  15–29% and 72% of frames respectively in the current labwc/Wayland session.
-  The 30 fps-capped progressive 480p30 fallback measured 1 dropped frame in
-  150 for Big Buck Bunny. Keep runs short and do not generalize from that one
-  smooth case; a zero-copy/faster renderer is still needed for 720p/1080p.
+- **Renderer support is session-specific:** labwc is FAIL for 720p30/1080p30
+  (~19%/~72% drops); Cage/GLES 720p30 PASSes (2/240 drops), Cage 1080p30 is
+  unsupported (151 drops). C013 uses Cage, and C004 UI behavior must be
+  revalidated under Cage. The 480p30 Big Buck Bunny result is smooth but is
+  not a blanket claim for every 480p source.

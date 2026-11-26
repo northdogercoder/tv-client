@@ -151,6 +151,40 @@ If the helper is absent, install the distribution package that provides
 `cec-ctl` (usually `v4l-utils` or `cec-utils`) or use the USB keyboard. The
 bridge itself still builds and its tests run without the helper.
 
+## Cage/GLES renderer for YouTube playback
+
+The labwc session is **not** a supported YouTube playback renderer on the Pi
+3B. In labwc, mpv 0.40 dropped about 19% of frames at 720p30 and 72% at
+1080p30 with both `vo=gpu` and `vo=wlshm`; the drops are compositor/present
+side, not network or decoder drops. Do not tune the client around labwc.
+
+C013 will run the kiosk under **Cage**, and C004 UI behavior must be
+revalidated there (fullscreen, focus, input, teardown). C010 hardware
+acceptance is local 720p30 under Cage with the GLES2 renderer; 1080p30 is
+explicitly unsupported on the Pi 3B.
+
+Nested validation from an existing Wayland/labwc session:
+
+```sh
+WLR_BACKENDS=wayland WLR_RENDERER=gles2 \
+  cage -- mpv --no-config --no-terminal --really-quiet \
+    --vo=gpu --gpu-context=wayland --hwdec=v4l2m2m /path/to/local-test.mp4
+```
+
+This probes the renderer independently. The client itself starts mpv as a
+child through private IPC; under a real Cage kiosk the child inherits Cage's
+`WAYLAND_DISPLAY` and no manual mpv command is used.
+
+A direct Cage kiosk session (the C013 shape) uses the DRM backend instead of
+`WLR_BACKENDS=wayland`, with `WLR_RENDERER=gles2` exported in the session
+environment. The nested Cage/GLES 720p30 local run measured **2 dropped frames
+out of 240 at 30 fps** (PASS); the same path at 1080p dropped **151 frames**
+(FAIL). Keep validation runs short, and do not power-cycle the panel.
+
+The client policy is unchanged: 720p30 first, progressive H.264/AAC at 720p or
+lower second, 1080p30 only as a last resort, and a hard 30 fps cap (no 1080p60
+or 720p60). See [`youtube.md`](youtube.md) for the full matrix.
+
 ## GStreamer player build
 
 On the Pi, install the GStreamer development headers first:
