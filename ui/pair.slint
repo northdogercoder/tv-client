@@ -1,0 +1,110 @@
+// Copyright (C) 2026 the tv-client authors.
+// SPDX-License-Identifier: GPL-3.0-only
+
+// Local physical confirmation. Deny is the default and the left-hand button;
+// remote input never reaches this component.
+
+export component PairDialog inherits Rectangle {
+    in property <length> base: 720px;
+    in property <string> message;
+    in property <int> choice: 0;
+
+    callback choice-activated(int);
+
+    background: #05070a;
+
+    VerticalLayout {
+        alignment: center;
+        padding: root.base / 12;
+
+        Rectangle {
+            height: root.base / 2;
+            border-radius: root.base / 70;
+            background: #151c25;
+            border-width: 4px;
+            border-color: #a8c7ff;
+
+            VerticalLayout {
+                padding: root.base / 22;
+                spacing: root.base / 30;
+
+                Text {
+                    height: root.base / 12;
+                    text: "Pairing request";
+                    font-size: root.base / 13;
+                    font-weight: 700;
+                    color: #f4f7fb;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    vertical-stretch: 1;
+                    text: root.message;
+                    font-size: root.base / 20;
+                    color: #e3ebf5;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    height: root.base / 9;
+                    spacing: root.base / 30;
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        border-radius: root.base / 120;
+                        background: root.choice == 0 ? #7d1f28 : #10161e;
+                        border-width: 4px;
+                        border-color: root.choice == 0 ? #ff9a9a : #38485c;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "Deny";
+                            font-size: root.base / 18;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                root.choice-activated(0);
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        border-radius: root.base / 120;
+                        background: root.choice == 1 ? #1f6feb : #10161e;
+                        border-width: 4px;
+                        border-color: root.choice == 1 ? #a8c7ff : #38485c;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "Allow on this TV";
+                            font-size: root.base / 18;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                root.choice-activated(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

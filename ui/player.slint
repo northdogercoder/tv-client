@@ -1,0 +1,104 @@
+// Copyright (C) 2026 the tv-client authors.
+// SPDX-License-Identifier: GPL-3.0-only
+
+// Player surface: metadata, progress and three large controls.
+
+export component PlayerScreen inherits Rectangle {
+    in property <length> base: 720px;
+    in property <string> title: "Nothing playing";
+    in property <string> source;
+    in property <string> position: "0:00 / --:--";
+    in property <float> progress: 0.0;
+    in property <bool> paused: false;
+    in property <bool> loading: false;
+    in property <int> focus-index: 0;
+
+    callback control-activated(int);
+
+    property <[string]> controls: ["Play / Pause", "Stop", "Back"];
+
+    VerticalLayout {
+        padding: root.base / 16;
+        spacing: root.base / 36;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.loading ? "Opening..." : root.title;
+            font-size: root.base / 11;
+            font-weight: 700;
+            color: #f4f7fb;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            height: root.base / 12;
+            text: root.source;
+            font-size: root.base / 22;
+            color: #9fc2ff;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Rectangle {
+            height: root.base / 26;
+            border-radius: root.base / 120;
+            background: #151c25;
+            border-width: 1px;
+            border-color: #2c3642;
+
+            Rectangle {
+                width: parent.width * root.progress;
+                height: parent.height;
+                border-radius: root.base / 120;
+                background: #1f6feb;
+            }
+        }
+
+        Text {
+            height: root.base / 14;
+            text: root.position;
+            font-size: root.base / 24;
+            color: #d7e2ef;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: transparent;
+        }
+
+        HorizontalLayout {
+            height: root.base / 8;
+            spacing: root.base / 28;
+
+            for label[idx] in root.controls : Rectangle {
+                horizontal-stretch: 1;
+                border-radius: root.base / 120;
+                background: idx == root.focus-index ? #1f6feb : #151c25;
+                border-width: idx == root.focus-index ? 4px : 1px;
+                border-color: idx == root.focus-index ? #a8c7ff : #2c3642;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: label;
+                    font-size: root.base / 20;
+                    font-weight: idx == root.focus-index ? 700 : 400;
+                    color: #f4f7fb;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.control-activated(idx);
+                    }
+                }
+            }
+        }
+    }
+}

@@ -5,16 +5,18 @@
 The Rust toolchain is pinned in `rust-toolchain.toml` to **1.100.0** with the
 `minimal` profile plus the `rustfmt` and `clippy` components. A rustup
 installation honours that pin automatically, so no per-shell override is
-needed. `Cargo.toml` sets `rust-version = "1.92"` as the package's minimum
-supported Rust version, required by the locked dependency set and by the
-optional GStreamer bindings (`gstreamer`, `gstreamer-video`,
-`gstreamer-audio` 0.25.4). The pinned 1.100.0 toolchain is the version the
-project builds and checks with.
+needed. `Cargo.toml` sets `rust-version = "1.95"` as the package's minimum
+supported Rust version. The bump from 1.92 is required by the optional Slint
+`1.19.1` dependency; the locked headless dependency set and the optional
+GStreamer bindings (`gstreamer`, `gstreamer-video`, `gstreamer-audio` 0.25.4)
+are satisfied by the same minimum. The pinned 1.100.0 toolchain is the version
+the project builds and checks with.
 
 Both binaries and the library target are produced from the single package
 `tv-client`:
 
-- `src/main.rs` is the headless `tv-client` binary.
+- `src/main.rs` is the `tv-client` binary: headless by default, and the Slint
+  window when built with `native-ui`.
 - `src/bin/tv-native-player.rs` is the supervised GStreamer child. It declares
   `required-features = ["gstreamer-player"]`, so a default or
   `--no-default-features` build does not produce it and does not link
@@ -34,7 +36,12 @@ Because clippy and test use `--locked`, a committed `Cargo.lock` must exist and
 match `Cargo.toml`.
 
 The gate is executed on **x86_64 Linux** with no platform services present.
-That host is the only architecture the headless gate validates.
+That host is the only architecture the headless gate validates. The C004
+window adds `slint` and `slint-build` to `Cargo.toml`; after that change the
+committed `Cargo.lock` must be regenerated (`cargo update` or a normal resolve)
+before any `--locked` command can pass. Do not hand-edit the lockfile. The
+headless gate itself does not compile any Slint crate into the library or
+binary targets, and `build.rs` is a no-op without `native-ui`.
 
 ## Architecture targets
 
@@ -53,19 +60,68 @@ and state machine compile, lint and pass their tests on the CI host.
   `gstreamer-audio` dependencies, the `tv-native-player` binary and the
   production child factory. The parent-side protocol and supervision code in
   `src/player/` is always compiled and does not need GStreamer.
+- `native-ui` enables the optional `slint` dependency, `build.rs` compilation
+  of `ui/app.slint`, and the Slint window launched by `src/main.rs`. The pure
+  `src/ui.rs` view model and `tests/ui_navigation.rs` are always compiled and
+  contain no Slint types.
 - The supervisor, protocol and `ProgramChildFactory` are always compiled and
   backend neutral, so a future libmpv/yt-dlp child can be added without
   touching the gated GStreamer code.
-- `native-ui`, `cec`, `airplay` and `webrtc` remain empty arrays that reserve
-  future seams. No default feature is set, so a plain build stays headless.
+- `cec`, `airplay` and `webrtc` remain empty arrays that reserve future seams.
+  No default feature is set, so a plain build stays headless.
 
 The headless gate deliberately passes `--no-default-features`; it exercises
-the protocol, the state machine and the scripted fake-child tests without
-GStreamer. Build the native player explicitly:
+the protocol, the state machine, the UI view model and the scripted fake-child
+tests without GStreamer or Slint. Build the native player explicitly:
 
 ```sh
 cargo build --release --features gstreamer-player
 ```
+
+Build the Slint launcher explicitly:
+
+```sh
+cargo build --release --features native-ui
+```
+
+## Native UI build
+
+Slint 1.19.1 needs a C toolchain plus fontconfig and xkbcommon development
+headers on Linux. The headless CI host used by this repository has no
+`fontconfig.pc` and no passwordless sudo, so the feature check is run in a
+container or on the Pi. A minimal container image is:
+
+```sh
+docker run --rm -it -v "$PWD:/work" -w /work rust:1.100-slim \
+  sh -c 'apt-get update && apt-get install -y --no-install-recommends \
+    libfontconfig1-dev libxkbcommon-dev pkg-config && \
+    cargo check --locked --features native-ui'
+```
+
+Use the same two packages for a local Debian/Ubuntu host:
+`libfontconfig1-dev libxkbcommon-dev`. The Pi already has
+`fontconfig 2.15.0`, `xkbcommon 1.13.1`, `wayland-client 1.24.0`, EGL/GL and
+`pkg-config`; no extra UI package install was needed for C004. On the Pi build
+from a directory on the root filesystem with one job and no debug info:
+
+```sh
+source "$HOME/.cargo/env"
+cd "$HOME/tv-client-c004"
+CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo build --release --features native-ui
+```
+
+Run it inside the active labwc session with `WAYLAND_DISPLAY=wayland-0` and
+`XDG_RUNTIME_DIR=/run/user/1000`. The chosen renderer is winit + FemtoVG
+(OpenGL/EGL); see [`design.md`](design.md). `SLINT_BACKEND=winit-femtovg` may be
+set explicitly to make the choice visible in diagnostics. Cage is installed on
+the Pi but is not the active session and is not used.
+
+The Slint feature adds a large dependency graph. Do not build it in `/tmp` on
+the Pi (453 MiB tmpfs); use `~` as above. If the Pi runs out of memory, stop
+and report that instead of raising the job count.
+
+## GStreamer player build
 
 On the Pi, install the GStreamer development headers first:
 `libgstreamer1.0-dev` and `libgstreamer-plugins-base1.0-dev`. The runtime needs
@@ -77,7 +133,8 @@ Build on the Pi from a directory on the root filesystem (for example
 `~/tv-client-c006`), not from `/tmp`: `/tmp` is a 453 MiB tmpfs on the lab
 target, so a GStreamer build fills RAM, can kill the session, and is lost on
 reboot. Use one compiler job (`CARGO_BUILD_JOBS=1`) and no debug info
-(`CARGO_PROFILE_DEV_DEBUG=0`) on the 1 GiB Pi 3B.
+(`CARGO_PROFILE_DEV_DEBUG=0`) on the 1 GiB Pi 3B. These C002/C006 build notes
+are unchanged by the Slint window.
 
 ## Dependencies
 
@@ -96,6 +153,15 @@ The direct dependencies are:
 - `uuid` (with `serde` and `v4`) for request ids and artwork file names.
 - `gstreamer`, `gstreamer-video` and `gstreamer-audio` 0.25.4, optional and
   enabled only by `gstreamer-player`, for native playback.
+- `slint` 1.19.1, optional and enabled only by `native-ui`, with only the
+  `std`, `backend-winit`, `renderer-femtovg` and `compat-1-2` features. The
+  default software-renderer, accessibility and system-tray features are not
+  enabled, which keeps the Pi build smaller.
+- `slint-build` 1.19.1, build-only, which compiles `ui/app.slint` when
+  `native-ui` is enabled and is otherwise unused. It enables only `compat-1-18`
+  (required by the crate's forward-compatibility check) and selects the
+  `fluent` widget style explicitly; it does not pull the software-renderer
+  resource pipeline because the launcher uses no images.
 - `tempfile`, dev-only, for isolated test state directories.
 
 Their transitive dependencies follow from these direct ones. The version

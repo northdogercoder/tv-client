@@ -1,10 +1,10 @@
 //! Core library for the `tv-client` package.
 //!
-//! The portable state, storage, Jellyfin and player-protocol layers are always
-//! compiled. The GStreamer child binary and its production factory are gated
-//! behind the `gstreamer-player` feature; the other platform feature flags
-//! (`native-ui`, `cec`, `airplay`, `webrtc`) remain seams without an
-//! implementation.
+//! The portable state, storage, Jellyfin, player-protocol and UI view-model
+//! layers are always compiled. The GStreamer child binary and its production
+//! factory are gated behind the `gstreamer-player` feature; the Slint window
+//! and its bridge are gated behind `native-ui`. The `cec`, `airplay` and
+//! `webrtc` flags remain seams without an implementation.
 
 pub mod config;
 pub mod jellyfin;
@@ -12,6 +12,7 @@ pub mod model;
 pub mod player;
 pub mod state;
 pub mod storage;
+pub mod ui;
 
 pub use config::ClientConfig;
 pub use jellyfin::{

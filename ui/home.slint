@@ -1,0 +1,60 @@
+// Copyright (C) 2026 the tv-client authors.
+// SPDX-License-Identifier: GPL-3.0-only
+
+// Fixed five-row launcher home screen. No images, no unbounded models.
+
+export component HomeScreen inherits Rectangle {
+    in property <length> base: 720px;
+    in property <int> focus-index: 0;
+
+    callback activated(int);
+
+    property <[string]> rows: ["Resume", "Jellyfin", "YouTube", "Cast", "Settings"];
+
+    VerticalLayout {
+        padding: root.base / 16;
+        spacing: root.base / 48;
+
+        Text {
+            height: root.base / 9;
+            text: "Home";
+            font-size: root.base / 13;
+            font-weight: 700;
+            color: #f4f7fb;
+            vertical-alignment: center;
+        }
+
+        for label[idx] in root.rows : Rectangle {
+            height: root.base / 10;
+            border-radius: root.base / 120;
+            background: idx == root.focus-index ? #1f6feb : #151c25;
+            border-width: idx == root.focus-index ? 4px : 1px;
+            border-color: idx == root.focus-index ? #a8c7ff : #2c3642;
+
+            Text {
+                x: root.base / 30;
+                width: parent.width - root.base / 20;
+                height: parent.height;
+                text: label;
+                font-size: root.base / 17;
+                font-weight: idx == root.focus-index ? 700 : 400;
+                color: #f4f7fb;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    root.activated(idx);
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: transparent;
+        }
+    }
+}

@@ -1,0 +1,74 @@
+// Copyright (C) 2026 the tv-client authors.
+// SPDX-License-Identifier: GPL-3.0-only
+
+// Casting status. No receiver is started by the UI; this screen only reports
+// the reducer's casting state.
+
+export component CastScreen inherits Rectangle {
+    in property <length> base: 720px;
+    in property <string> state: "No receiver attached";
+
+    callback back-requested();
+
+    VerticalLayout {
+        padding: root.base / 16;
+        spacing: root.base / 40;
+
+        Text {
+            height: root.base / 9;
+            text: "Cast";
+            font-size: root.base / 13;
+            font-weight: 700;
+            color: #f4f7fb;
+            vertical-alignment: center;
+        }
+
+        Text {
+            height: root.base / 8;
+            text: root.state;
+            font-size: root.base / 20;
+            color: #e3ebf5;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: "AirPlay and WebRTC receivers are reserved and are not running in this build.";
+            font-size: root.base / 24;
+            color: #a9b7c8;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: transparent;
+        }
+
+        Rectangle {
+            height: root.base / 9;
+            border-radius: root.base / 120;
+            background: #151c25;
+            border-width: 3px;
+            border-color: #a8c7ff;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "Back to home";
+                font-size: root.base / 20;
+                font-weight: 700;
+                color: #f4f7fb;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => {
+                    root.back-requested();
+                }
+            }
+        }
+    }
+}

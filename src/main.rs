@@ -60,6 +60,19 @@ fn run(cli: Cli) -> Result<(), CliError> {
         schema_version,
         "headless initialization complete"
     );
+
+    #[cfg(feature = "native-ui")]
+    launch_native_ui()?;
+
+    Ok(())
+}
+
+#[cfg(feature = "native-ui")]
+fn launch_native_ui() -> Result<(), CliError> {
+    let ui = tv_client::ui::NativeUi::new(tv_client::AppState::default(), |command| {
+        tracing::debug!(?command, "native UI command (no controller attached)");
+    })?;
+    ui.run()?;
     Ok(())
 }
 
@@ -87,6 +100,9 @@ enum CliError {
     MissingConfig { path: PathBuf },
     #[error("cannot determine a default directory; set HOME or pass an explicit path")]
     MissingHome,
+    #[cfg(feature = "native-ui")]
+    #[error("native UI error: {0}")]
+    Ui(#[from] tv_client::ui::NativeUiError),
 }
 
 impl CliError {
@@ -94,6 +110,8 @@ impl CliError {
         match self {
             Self::Config(_) | Self::MissingConfig { .. } => ExitCode::from(2),
             Self::Storage(_) | Self::MissingHome => ExitCode::FAILURE,
+            #[cfg(feature = "native-ui")]
+            Self::Ui(_) => ExitCode::FAILURE,
         }
     }
 }

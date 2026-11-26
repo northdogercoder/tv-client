@@ -1,0 +1,222 @@
+// Copyright (C) 2026 the tv-client authors.
+// SPDX-License-Identifier: GPL-3.0-only
+
+// Ten-foot launcher window. Design base is 1280x720 (16:9); `base` grows to
+// 1080 at a 1080p fullscreen window, and every size below is derived from it.
+
+import { CastScreen } from "cast.slint";
+import { HomeScreen } from "home.slint";
+import { LibraryScreen, MediaCard } from "library.slint";
+import { PairDialog } from "pair.slint";
+import { PlayerScreen } from "player.slint";
+import { SettingsScreen } from "settings.slint";
+
+export component AppWindow inherits Window {
+    title: "tv-client";
+    width: 1920px;
+    height: 1080px;
+    preferred-width: 1920px;
+    preferred-height: 1080px;
+    background: #0b0e13;
+
+    property <length> base: Math.min(root.width * 9 / 16, root.height);
+
+    in-out property <int> screen: 0;
+    in-out property <string> status-text: "Choose a source";
+    in-out property <int> home-focus: 0;
+    in-out property <int> library-focus: 0;
+    in-out property <int> settings-focus: 0;
+    in-out property <int> player-focus: 0;
+    in-out property <[MediaCard]> library-items;
+    in-out property <string> filter-label: "All sources";
+    in-out property <bool> search-active: false;
+    in-out property <string> query;
+    in-out property <bool> library-loading: false;
+    in-out property <bool> library-empty: false;
+    in-out property <bool> library-error: false;
+    in-out property <string> library-error-text;
+    in-out property <string> player-title: "Nothing playing";
+    in-out property <string> player-source: "--";
+    in-out property <string> player-position: "0:00 / --:--";
+    in-out property <float> player-progress: 0.0;
+    in-out property <bool> player-paused: false;
+    in-out property <bool> player-loading: false;
+    in-out property <string> cast-state: "No receiver attached";
+    in-out property <string> settings-version;
+    in-out property <bool> pair-visible: false;
+    in-out property <string> pair-message;
+    in-out property <int> pair-choice: 0;
+
+    callback key-pressed(string, bool);
+    callback home-activated(int);
+    callback library-activated(int);
+    callback library-retry-requested();
+    callback library-search-requested();
+    callback player-control-activated(int);
+    callback settings-activated(int);
+    callback pair-choice-activated(int);
+    callback back-requested();
+
+    VerticalLayout {
+        Rectangle {
+            height: root.base / 10;
+            background: #141a22;
+
+            HorizontalLayout {
+                padding-left: root.base / 32;
+                padding-right: root.base / 32;
+                spacing: root.base / 32;
+
+                Text {
+                    text: "tv-client";
+                    font-size: root.base / 24;
+                    font-weight: 700;
+                    color: #f4f7fb;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.status-text;
+                    font-size: root.base / 30;
+                    color: #c6d2e1;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: "GPL-3.0-only";
+                    font-size: root.base / 36;
+                    color: #8fa3b8;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if root.screen == 0 : HomeScreen {
+            vertical-stretch: 1;
+            base: root.base;
+            focus-index: root.home-focus;
+            activated(index) => {
+                root.home-activated(index);
+            }
+        }
+
+        if root.screen == 1 : LibraryScreen {
+            vertical-stretch: 1;
+            base: root.base;
+            focus-index: root.library-focus;
+            items: root.library-items;
+            filter-label: root.filter-label;
+            query: root.query;
+            search-active: root.search-active;
+            loading: root.library-loading;
+            empty: root.library-empty;
+            error: root.library-error;
+            error-text: root.library-error-text;
+            activated(index) => {
+                root.library-activated(index);
+            }
+            retry-requested() => {
+                root.library-retry-requested();
+            }
+            search-requested() => {
+                root.library-search-requested();
+            }
+        }
+
+        if root.screen == 2 : PlayerScreen {
+            vertical-stretch: 1;
+            base: root.base;
+            title: root.player-title;
+            source: root.player-source;
+            position: root.player-position;
+            progress: root.player-progress;
+            paused: root.player-paused;
+            loading: root.player-loading;
+            focus-index: root.player-focus;
+            control-activated(index) => {
+                root.player-control-activated(index);
+            }
+        }
+
+        if root.screen == 3 : SettingsScreen {
+            vertical-stretch: 1;
+            base: root.base;
+            focus-index: root.settings-focus;
+            version: root.settings-version;
+            activated(index) => {
+                root.settings-activated(index);
+            }
+        }
+
+        if root.screen == 4 : CastScreen {
+            vertical-stretch: 1;
+            base: root.base;
+            state: root.cast-state;
+            back-requested() => {
+                root.back-requested();
+            }
+        }
+
+        Rectangle {
+            height: root.base / 18;
+            background: #0e131a;
+
+            HorizontalLayout {
+                padding-left: root.base / 32;
+                padding-right: root.base / 32;
+
+                Text {
+                    text: "ARROWS move    ENTER select    ESC back";
+                    font-size: root.base / 38;
+                    color: #8fa3b8;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+                }
+
+                Text {
+                    text: root.search-active ? "SEARCH" : "";
+                    font-size: root.base / 38;
+                    font-weight: 700;
+                    color: #9fc2ff;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    if root.pair-visible : PairDialog {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        z: 100;
+        base: root.base;
+        message: root.pair-message;
+        choice: root.pair-choice;
+        choice-activated(index) => {
+            root.pair-choice-activated(index);
+        }
+    }
+
+    keys := FocusScope {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+
+        key-pressed(event) => {
+            root.key-pressed(event.text, event.repeat);
+            EventResult.accept
+        }
+    }
+
+    init => {
+        keys.focus();
+    }
+}
