@@ -10,7 +10,7 @@ Greenfield backlog, 2026-11-25. All rows begin TODO; no application code exists 
 | [C004](004-kiosk-ui.md) | Build a native remote-first Slint launcher | P1 | L | HIGH | C002, C003 | DONE |
 | [C005](005-jellyfin-library.md) | Authenticate and browse the existing Jellyfin server | P1 | L | MED | C003 | DONE |
 | [C006](006-native-player.md) | Implement exclusive native GStreamer playback | P1 | L | HIGH | C002, C003 | DONE |
-| [C007](007-jellyfin-playback.md) | Negotiate Jellyfin playback and report watch progress | P1 | L | HIGH | C004, C005, C006 | TODO |
+| [C007](007-jellyfin-playback.md) | Negotiate Jellyfin playback and report watch progress | P1 | L | HIGH | C004, C005, C006 | DONE |
 | [C008](008-input.md) | Unify keyboard, HDMI-CEC and physical input provenance | P1 | M | HIGH | C004, C006 | TODO |
 | [C009](009-cloud-device.md) | Implement enrollment, pairing and remote command client | P1 | L | MED | C003, C004, C008 | TODO |
 | [C010](010-youtube.md) | Implement YouTube discovery and native local playback | P1 | L | HIGH | C006, C008, C009 | TODO |
@@ -33,6 +33,7 @@ Status: TODO / IN PROGRESS / DONE / BLOCKED (reason) / REJECTED (rationale). Mar
 - **C005 DONE 2026-11-25**: merged in `c157130` from `advisor/c005-jellyfin-library` @ `fb1181b`; reviewer APPROVE after one base-path fix; `bash scripts/check.sh` exit 0 (53 tests, 1 ignored); live Jellyfin 12.4.0 auth/views/logout passes; path-prefixed URL regression covered.
 - **C006 DONE 2026-11-25**: merged in `9838203` from `advisor/c006-native-player` @ `781b0b4`; reviewer APPROVE after one revision; host gate 17 player tests + gated feature clippy/build; Pi short 720p/1080p `v4l2h264dec`/`waylandsink` runs; 30-min soak, CEC/focus and authenticated HTTPS not run; tmpfs reboot documented.
 - **C004 DONE 2026-11-26**: merged in `c1920af` from `advisor/c004-kiosk-ui` @ `71a4626`; reviewer APPROVE after one revision; 18 UI tests, Docker Slint check/clippy, Pi fullscreen 1920×1080 launch captured; 720p, physical input and soak NOT RUN.
+- **C007 DONE 2026-11-26**: merged in `618f655` from `advisor/c007-jellyfin-playback` @ `7fa5f73`; reviewer APPROVE after two revisions; host 22 playback + 1 ignored tests and 18 UI tests; combined clippy; live Pi Transcode 21.3 s; direct-play/remux, HEVC, subtitle burn-in and soak NOT VERIFIED.
 - **Repository public**: switched to public 2026-11-25 after a history scan found no credentials; GitHub-hosted arm64 runners (`ubuntu-24.04-arm`) are available for C013.
 - **C010 amended 2026-11-25**: server owns YouTube API search/browse only; Pi playback uses yt-dlp + libmpv + ffmpeg. Chromium/IFrame, player tickets, the server player bridge and server-side download/relay are removed/rejected. The TV is 1080p: target H.264 1080p30, fall back to 720p30; 1080p60 hardware-decodes with v4l2m2m but currently desyncs, so do not offer it. Measure a working renderer (Wayland/OpenGL/wlshm); Vulkan/libplacebo is not assumed. The distro yt-dlp is unreliable; a managed version/update policy, client kill switch and typed extractor-unavailable state are required. Depends on C006's exclusive supervisor, C008 input and C009 device auth. `HANDOFF.md` is the live cross-repo contract; re-read it before C010 dispatch.
 
