@@ -6,8 +6,14 @@
 - **Method:** read-only capability probe from the development host over SSH, then
   short GStreamer playbacks inside the already-running labwc session over SSH
   (`XDG_RUNTIME_DIR=/run/user/1000`, `WAYLAND_DISPLAY=wayland-0`). Playback ran in
-  the existing session, not from a physical console login. Nothing was installed,
-  no compositor was started or restarted, no VT was changed.
+  the existing session, not from a physical console login. The probe and playback
+  themselves installed nothing, started or restarted no compositor, and changed no
+  VT.
+- **Target preparation:** the target received operator-approved installs after
+  the baseline: `libgstreamer1.0-dev` (20:40), rustup 1.100.0 (20:43),
+  `libgstreamer-plugins-base1.0-dev` (20:45) and `cage` 0.3.1 (20:47:58);
+  `gstreamer1.0-tools` was installed by the advisor. Cage was installed with
+  operator approval and was **NOT started** during this work.
 - **Raw evidence:** probe capture `362` lines; per-run logs on the Pi in
   `/tmp/c002-*.out` and `/tmp/c002-*.err` (disposable); window screenshot
   `/tmp/c002-window.png` (also copied to the development host).
@@ -21,8 +27,10 @@ bash scripts/probe-pi.sh
 ```
 
 `PI_HOST` defaults to `raspberry`; the script uses `ssh -o BatchMode=yes`, runs a
-quoted heredoc of read-only commands, installs nothing, writes nothing on the
-target and uses no tokens. It exited `0`.
+quoted heredoc of read-only commands, installs nothing, changes no configuration
+and uses no tokens. `GST_REGISTRY_UPDATE=no` is exported in the remote shell, so
+the `gst-inspect-1.0` calls do not refresh
+`~/.cache/gstreamer-1.0/registry.aarch64.bin`. It exited `0`.
 
 | Check | Observed value |
 |---|---|
@@ -47,7 +55,7 @@ target and uses no tokens. It exited `0`.
 | Network | eth0 `10.0.0.2/24`, link `100` Mbit/s full duplex, state up |
 | Rust | `rustc 1.100.0` / `cargo 1.100.0` at `~/.cargo/bin` (not on non-login `PATH`) |
 | C compiler | gcc 14.2.0 |
-| CMA at probe time | `CmaTotal: 262144 kB`, `CmaFree: 12824 kB` (idle; later idle samples ranged ~48,000–98,000 kB free) |
+| CMA at probe time | `CmaTotal: 262144 kB`, `CmaFree: 12824 kB` (idle; later idle samples ranged ~48,000–102,000 kB free, including a 101,860 kB reading) |
 
 Quoted excerpts:
 
@@ -286,9 +294,9 @@ The remaining reductions:
 - Slint placeholder: NOT RUN — no placeholder UI was built or launched
   (time and memory); the window check used `videotestsrc` only. No
   Slint→video→launcher focus sequence was exercised.
-- No compositor change: cage was not started, labwc was not restarted, no VT was
-  switched, no `WLR_RENDERER` override was applied, and the 1920x1080 output mode
-  was left untouched.
+- No compositor change: cage was not started (it was installed with operator
+  approval only), labwc was not restarted, no VT was switched, no `WLR_RENDERER`
+  override was applied, and the 1920x1080 output mode was left untouched.
 - No playback from the physical console; no operator visual confirmation was
   used as evidence beyond the screenshot.
 - `pactl` is absent, so per-stream sink routing was confirmed via `wpctl` and
@@ -321,4 +329,4 @@ If the 1 % drop budget matters for the product, retry under a GLES-capable
 compositor or an approved Cage session, and if composition cost persists,
 evaluate direct KMS presentation before UI work.
 
-Core gate: PASS (basic) — 720p30/1080p30 hardware decode to waylandsink completed to EOS at ~real time with HDMI audio; 17/16 QoS drop warnings (~2.8%) exceed the proposed 1% threshold; 30-min soak and Slint placeholder NOT RUN per operator waiver.
+Core gate: PASS (basic) — 720p30/1080p30 hardware decode to waylandsink completed to EOS at ~real time with HDMI audio; 17/16 QoS drop warnings (~2.8% at 720p, ~2.7% at 1080p) exceed the proposed 1% threshold; 30-min soak and Slint placeholder NOT RUN per operator waiver.

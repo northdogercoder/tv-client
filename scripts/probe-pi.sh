@@ -2,8 +2,11 @@
 # Read-only capability probe for the TV client target Pi.
 #
 # Runs a fixed set of read-only commands over SSH and prints their raw output.
-# It installs nothing, writes nothing on the target, and uses no credentials
-# beyond the caller's SSH agent/key. BatchMode=yes guarantees no password prompt.
+# It installs nothing, changes no configuration, and uses no credentials beyond
+# the caller's SSH agent/key. GStreamer registry updates are disabled
+# (GST_REGISTRY_UPDATE=no), so element inspection does not rewrite
+# ~/.cache/gstreamer-1.0/registry.aarch64.bin. BatchMode=yes guarantees no
+# password prompt.
 #
 # Usage:
 #   bash scripts/probe-pi.sh            # targets host alias "raspberry"
@@ -21,6 +24,8 @@ printf 'probe-pi.sh: target %s, host UTC %s\n' "$PI_HOST" "$(date -u +%Y-%m-%dT%
 
 ssh -o BatchMode=yes "$PI_HOST" bash -s <<'REMOTE'
 export LC_ALL=C
+# Do not let gst-inspect refresh ~/.cache/gstreamer-1.0/registry.aarch64.bin.
+export GST_REGISTRY_UPDATE=no
 
 section() { printf '\n========== %s ==========\n' "$1"; }
 
@@ -88,8 +93,7 @@ done
 
 section "audio devices"
 show aplay-list aplay -l
-show wpctl-default wpctl get-default
-printf '\n--- wpctl status (sinks)\n'
+printf '\n--- wpctl status (sinks); * marks the default sink\n'
 wpctl status 2>&1 | sed -n '1,40p' || true
 
 section "HDMI CEC"

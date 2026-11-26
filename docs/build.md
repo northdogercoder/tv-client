@@ -84,6 +84,12 @@ Verified on the lab target, a Raspberry Pi 3 Model B Rev 1.2 running Debian 13
 (trixie) and kernel `6.18.39+rpt-rpi-v8` (aarch64). Full probe output and
 playback evidence are in [`hardware-report.md`](hardware-report.md).
 
+The target received operator-approved installs after the baseline:
+`libgstreamer1.0-dev` (20:40), rustup 1.100.0 (20:43),
+`libgstreamer-plugins-base1.0-dev` (20:45), `cage` 0.3.1 (20:47:58), and
+`gstreamer1.0-tools` installed by the advisor. Cage was installed with operator
+approval and was not started; the active session remained labwc.
+
 - Rust 1.100.0 is installed with rustup under `~/.cargo` (the same version as
   `rust-toolchain.toml`). A non-login shell does not have it on `PATH`; run
   `source "$HOME/.cargo/env"` first, after which `cargo --version` and
@@ -100,4 +106,7 @@ playback evidence are in [`hardware-report.md`](hardware-report.md).
   `WAYLAND_DISPLAY=wayland-0`.
 - `bash scripts/probe-pi.sh` reruns the read-only capability probe from a
   development host; it needs only SSH access to the host alias `raspberry`
-  (override with `PI_HOST=...`) and makes no changes on the Pi.
+  (override with `PI_HOST=...`). It installs nothing and changes no
+  configuration on the Pi; `GST_REGISTRY_UPDATE=no` is exported so
+  `gst-inspect-1.0` does not rewrite
+  `~/.cache/gstreamer-1.0/registry.aarch64.bin`.
