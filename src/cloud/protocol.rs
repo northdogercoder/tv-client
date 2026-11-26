@@ -19,7 +19,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Largest accepted WebSocket text frame.
 pub const MAX_FRAME_BYTES: usize = 32 * 1024;
 /// Largest accepted state title, in characters.
-pub const MAX_TITLE_CHARS: usize = 512;
+pub const MAX_TITLE_CHARS: usize = 256;
 /// Largest accepted acknowledgement reason.
 pub const MAX_REASON_BYTES: usize = 160;
 /// Highest accepted capability count.
@@ -87,6 +87,8 @@ struct Outbound<'a, T> {
 pub enum InboundMessage {
     /// Server acknowledgement of the device hello.
     HelloAck(HelloAck),
+    /// Authoritative local state echoed by the server after hello.
+    State(StatePayload),
     /// One remote command.
     Command(CommandPayload),
     /// A new pairing request waiting for local confirmation.
@@ -297,6 +299,12 @@ pub fn parse_inbound(frame: &[u8]) -> Result<InboundMessage, ProtocolError> {
                 return Err(ProtocolError::Malformed);
             }
             Ok(InboundMessage::HelloAck(payload))
+        }
+        "state" => {
+            let payload: StatePayload =
+                serde_json::from_value(envelope.payload).map_err(|_| ProtocolError::Malformed)?;
+            payload.validate()?;
+            Ok(InboundMessage::State(payload))
         }
         "command" => {
             let payload: RawCommandPayload =
@@ -532,6 +540,7 @@ impl InboundMessage {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::HelloAck(_) => "hello_ack",
+            Self::State(_) => "state",
             Self::Command(_) => "command",
             Self::PairRequest(_) => "pair_request",
             Self::PairStatus(_) => "pair_status",
@@ -552,6 +561,52 @@ mod tests {
         assert!(parse_rfc3339("2026-11-26T12:00:00+02:00").is_some());
         assert!(parse_rfc3339("2026-02-30T12:00:00Z").is_none());
         assert!(parse_rfc3339("yesterday").is_none());
+    }
+
+    #[test]
+    fn server_state_is_accepted_and_titles_are_bounded() {
+        let device_id = Uuid::new_v4();
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "v": PROTOCOL_VERSION,
+            "type": "state",
+            "id": Uuid::new_v4(),
+            "payload": {
+                "device_id": device_id,
+                "seq": 1,
+                "mode": "home",
+                "source": null,
+                "item_id": null,
+                "title": "x".repeat(MAX_TITLE_CHARS),
+                "position_ms": null,
+                "duration_ms": null,
+                "volume": 50,
+                "paused": false,
+                "error_code": null,
+            },
+        }))
+        .expect("state frame");
+        let state = match parse_inbound(&frame).expect("state accepted") {
+            InboundMessage::State(state) => state,
+            other => panic!("unexpected message: {other:?}"),
+        };
+        assert_eq!(state.device_id, device_id);
+        assert_eq!(state.title.as_deref().map(str::len), Some(MAX_TITLE_CHARS));
+
+        let mut too_long = state;
+        too_long.title = Some("x".repeat(MAX_TITLE_CHARS + 1));
+        assert_eq!(too_long.validate(), Err(ProtocolError::InvalidState));
+
+        let local = AppState {
+            title: Some("x".repeat(MAX_TITLE_CHARS + 20)),
+            ..AppState::default()
+        };
+        let projected =
+            StatePayload::from_app_state(&local, device_id, true).expect("projected state");
+        assert_eq!(
+            projected.title.as_deref().map(str::len),
+            Some(MAX_TITLE_CHARS)
+        );
+        projected.validate().expect("bounded title is valid");
     }
 
     #[test]

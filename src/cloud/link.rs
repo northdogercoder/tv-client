@@ -469,6 +469,9 @@ impl DeviceLink {
                                 Ok(InboundMessage::HelloAck(hello)) => {
                                     let _ = events.try_send(LinkEvent::HelloAck(hello));
                                 }
+                                // The server echoes the device's own state after
+                                // hello_ack; the device remains authoritative.
+                                Ok(InboundMessage::State(_state)) => {}
                                 Ok(InboundMessage::Command(command)) => {
                                     handle_command(
                                         command,
@@ -596,6 +599,8 @@ fn handle_command(
         command_id: command.command_id,
         action: command.action,
         mode: state.mode,
+        received_at: now,
+        deadline: now + COMMAND_APPLY_TIMEOUT,
     };
     match queue.try_push(request) {
         Ok(()) => {
@@ -672,6 +677,17 @@ async fn command_worker(
 ) {
     while let Some(request) = commands.recv().await {
         let command_id = request.command_id;
+        if request.is_expired(Instant::now()) {
+            let ack = AckPayload::new(command_id, AckStatus::Rejected, Some("expired"));
+            dedupe
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .record(command_id, Instant::now(), ack.clone());
+            if let Ok(frame) = ack_frame(&ack) {
+                let _ = outbound.try_send(Outbound::Text(frame));
+            }
+            continue;
+        }
         let outcome =
             match tokio::time::timeout(COMMAND_APPLY_TIMEOUT, applier.apply(request)).await {
                 Ok(outcome) => outcome,
@@ -784,6 +800,63 @@ fn classify_read(error: WsError) -> LinkClose {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn expired_queued_command_is_rejected_without_applying() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::model::Action;
+
+        struct TestApplier(Arc<AtomicBool>);
+
+        impl CommandApplier for TestApplier {
+            fn apply(
+                &self,
+                _request: ApplyRequest,
+            ) -> futures_util::future::BoxFuture<'_, ApplyOutcome> {
+                let applied = Arc::clone(&self.0);
+                Box::pin(async move {
+                    applied.store(true, Ordering::SeqCst);
+                    ApplyOutcome::Applied
+                })
+            }
+        }
+
+        let (commands, receiver) = mpsc::channel(1);
+        let (outbound, mut received) = mpsc::channel(1);
+        let applied = Arc::new(AtomicBool::new(false));
+        let command_id = Uuid::new_v4();
+        let now = Instant::now();
+        commands
+            .send(ApplyRequest {
+                command_id,
+                action: Action::Stop,
+                mode: Mode::Home,
+                received_at: now - Duration::from_secs(11),
+                deadline: now - Duration::from_secs(1),
+            })
+            .await
+            .expect("queue");
+        drop(commands);
+        let worker = tokio::spawn(command_worker(
+            receiver,
+            Arc::new(TestApplier(Arc::clone(&applied))),
+            Arc::new(Mutex::new(DedupeCache::default())),
+            outbound,
+        ));
+        match received.recv().await.expect("ack frame") {
+            Outbound::Text(bytes) => {
+                let frame: serde_json::Value = serde_json::from_slice(&bytes).expect("ack json");
+                assert_eq!(frame["type"], "ack");
+                assert_eq!(frame["payload"]["command_id"], command_id.to_string());
+                assert_eq!(frame["payload"]["status"], "rejected");
+                assert_eq!(frame["payload"]["reason"], "expired");
+            }
+            other => panic!("unexpected outbound frame: {other:?}"),
+        }
+        assert!(!applied.load(Ordering::SeqCst));
+        worker.await.expect("worker");
+    }
 
     #[test]
     fn jitter_stays_inside_one_to_sixty_seconds() {

@@ -33,10 +33,10 @@ use tv_client::cloud::{
     LinkConfig, LinkEnd, LinkEvent, PROTOCOL_VERSION, PairError, PairRequestPayload,
     PairingSession, PairingState, ProtocolError, ReconnectPolicy, StatePayload, parse_inbound,
 };
-use tv_client::model::{Action, AppState, InputOrigin, Mode, Source};
+use tv_client::model::{Action, AppState, Direction, InputOrigin, Mode, Source};
 use tv_client::playback::PlaybackUpdate;
 use tv_client::state::shutdown_channel;
-use tv_client::ui::UiModel;
+use tv_client::ui::{Key, UiModel, UiOutcome};
 
 const CLIENT_VERSION: &str = "0.1.0-test";
 const TOKEN_TEXT: &str = "test-device-token-1234567890";
@@ -346,6 +346,26 @@ async fn hello_state_bearer_header_and_applied_ack() {
             &mut ws,
             "hello_ack",
             json!({"connection_id": Uuid::new_v4()}),
+        )
+        .await;
+        // The server echoes the device's authoritative state right after
+        // hello_ack; the link must accept it as a no-op.
+        send_json(
+            &mut ws,
+            "state",
+            json!({
+                "device_id": device_id,
+                "seq": 1,
+                "mode": "home",
+                "source": null,
+                "item_id": null,
+                "title": null,
+                "position_ms": null,
+                "duration_ms": null,
+                "volume": 50,
+                "paused": false,
+                "error_code": null,
+            }),
         )
         .await;
         let command_id = Uuid::new_v4();
@@ -1391,6 +1411,64 @@ fn ui_snapshot_projects_playback_without_media_urls() {
     });
     assert_eq!(model.snapshot().mode, Mode::Home);
     assert_eq!(model.snapshot().item_id, None);
+}
+
+#[test]
+fn pairing_dismissal_error_clear_and_ended_state_contracts() {
+    let request_id = Uuid::new_v4();
+    let mut model = UiModel::new();
+    model
+        .present_pairing_request_with_code(request_id, Some("1234"))
+        .expect("prompt");
+    model.dismiss_pairing_request(Uuid::new_v4());
+    assert!(model.pair_visible());
+    model.dismiss_pairing_request(request_id);
+    assert!(!model.pair_visible());
+
+    model.apply_playback_update(&PlaybackUpdate::Failed {
+        item_id: None,
+        code: "playback_failed".to_owned(),
+        message: Some("failed".to_owned()),
+        retry_available: true,
+    });
+    assert!(model.snapshot().error.is_some());
+    model.clear_player_error();
+    let cleared = model.snapshot();
+    assert!(cleared.error.is_none());
+    assert_eq!(cleared.source, None);
+
+    model.apply_playback_update(&PlaybackUpdate::Loading {
+        item_id: "opaque-item".to_owned(),
+        title: Some("Episode one".to_owned()),
+    });
+    let retry = model.snapshot();
+    assert_eq!(retry.mode, Mode::Loading);
+    assert_eq!(retry.source, Some(Source::Jellyfin));
+    assert_eq!(retry.item_id.as_deref(), Some("opaque-item"));
+    model.apply_playback_update(&PlaybackUpdate::Ended {
+        item_id: "opaque-item".to_owned(),
+        position_ms: 1_000,
+        duration_ms: Some(1_000),
+        next_episode: None,
+    });
+    let ended = model.snapshot();
+    assert_eq!(ended.source, None);
+    assert_ne!(ended.mode, Mode::Playing);
+
+    let mut navigation = UiModel::new();
+    for _ in 0..4 {
+        navigation.handle_key(Key::Down, Duration::ZERO);
+    }
+    navigation.handle_key(Key::Enter, Duration::ZERO);
+    assert_eq!(
+        navigation.handle_remote_action(
+            Action::Navigate {
+                direction: Direction::Select
+            },
+            Duration::ZERO
+        ),
+        UiOutcome::Ignored
+    );
 }
 
 #[test]

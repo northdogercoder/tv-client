@@ -86,7 +86,7 @@ impl HttpTransport for ReqwestTransport {
                     .header(CONTENT_TYPE, "application/json")
                     .body(body.to_vec());
             }
-            let response = builder.send().await.map_err(|_| CloudError::Transport)?;
+            let mut response = builder.send().await.map_err(|_| CloudError::Transport)?;
             let status = response.status();
             if !status.is_success() {
                 return Err(match status.as_u16() {
@@ -98,11 +98,20 @@ impl HttpTransport for ReqwestTransport {
                     code => CloudError::Status { status: code },
                 });
             }
-            let bytes = response.bytes().await.map_err(|_| CloudError::Transport)?;
-            if bytes.len() > MAX_HTTP_BODY_BYTES {
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_HTTP_BODY_BYTES as u64)
+            {
                 return Err(CloudError::ResponseTooLarge);
             }
-            Ok(bytes.to_vec())
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|_| CloudError::Transport)? {
+                if bytes.len().saturating_add(chunk.len()) > MAX_HTTP_BODY_BYTES {
+                    return Err(CloudError::ResponseTooLarge);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
         })
     }
 }
@@ -469,6 +478,67 @@ mod tests {
         assert!(parse_origin("http://staging.example").is_err());
         assert!(parse_origin("https://user:pass@staging.example").is_err());
         assert!(parse_origin("https://staging.example/?token=1").is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_chunked_body_is_rejected() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .expect("headers");
+            let chunk = vec![b'x'; 4096];
+            for _ in 0..20 {
+                socket
+                    .write_all(format!("{:X}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .expect("chunk size");
+                socket.write_all(&chunk).await.expect("chunk");
+                socket.write_all(b"\r\n").await.expect("chunk end");
+            }
+            socket.write_all(b"0\r\n\r\n").await.expect("end");
+        });
+        let transport = ReqwestTransport::new().expect("transport");
+        let result = transport
+            .request("GET", &format!("http://{address}/"), None, None)
+            .await;
+        assert!(matches!(result, Err(CloudError::ResponseTooLarge)));
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn oversized_content_length_is_rejected_before_reading() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 70000\r\n\r\n")
+                .await
+                .expect("headers");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+        let transport = ReqwestTransport::new().expect("transport");
+        let result = transport
+            .request("GET", &format!("http://{address}/"), None, None)
+            .await;
+        assert!(matches!(result, Err(CloudError::ResponseTooLarge)));
+        let _ = server.await;
     }
 
     #[test]

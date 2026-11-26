@@ -138,6 +138,18 @@ pub struct ApplyRequest {
     pub action: Action,
     /// Mode observed when the command was accepted.
     pub mode: Mode,
+    /// When the command was received from the socket.
+    pub received_at: Instant,
+    /// Last instant at which the command may still be applied.
+    pub deadline: Instant,
+}
+
+impl ApplyRequest {
+    /// Whether the queued command missed its application deadline.
+    #[must_use]
+    pub fn is_expired(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
 }
 
 /// Result reported by the local application path.
@@ -341,6 +353,20 @@ mod tests {
             cache.record(id, now, ack(id));
         }
         assert_eq!(cache.len(), DEDUPE_CAPACITY);
+    }
+
+    #[test]
+    fn queued_commands_expire_after_the_protocol_deadline() {
+        let received_at = Instant::now();
+        let request = ApplyRequest {
+            command_id: Uuid::new_v4(),
+            action: Action::Stop,
+            mode: Mode::Home,
+            received_at,
+            deadline: received_at + COMMAND_APPLY_TIMEOUT,
+        };
+        assert!(!request.is_expired(received_at));
+        assert!(request.is_expired(received_at + COMMAND_APPLY_TIMEOUT));
     }
 
     #[test]

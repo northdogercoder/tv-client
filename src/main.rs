@@ -455,7 +455,11 @@ async fn run_cloud(
                         }
                     }
                     LinkEvent::PairStatus(status) => {
+                        let request_id = status.request_id;
                         pairing.on_status(status);
+                        if status.status != PairStatus::Pending {
+                            ui.dismiss_pairing_request(request_id);
+                        }
                         match status.status {
                             PairStatus::Pending => {}
                             PairStatus::Accepted => {
@@ -479,6 +483,11 @@ async fn run_cloud(
                         ui.set_cloud_status("Cloud offline; reconnecting".to_string());
                     }
                     LinkEvent::Revoked => {
+                        if let Some(request_id) = pairing.pending().map(|pending| pending.request_id) {
+                            ui.dismiss_pairing_request(request_id);
+                        }
+                        pairing.reset();
+                        ui.clear_pairing_code();
                         ui.set_cloud_status("Cloud access revoked".to_string());
                     }
                 }
@@ -490,10 +499,23 @@ async fn run_cloud(
                     let _ = state_tx.send(payload.clone());
                     last_state = Some(payload);
                 }
-                let code_expired = pairing
+                let now = std::time::SystemTime::now();
+                let request_id = pairing
+                    .pending()
+                    .filter(|pending| now >= pending.expires_at)
+                    .map(|pending| pending.request_id);
+                if let Some(request_id) = request_id {
+                    ui.dismiss_pairing_request(request_id);
+                    pairing.reset();
+                    ui.clear_pairing_code();
+                    ui.set_cloud_status("Pairing request expired".to_string());
+                } else if pairing
                     .code()
-                    .is_some_and(|code| std::time::SystemTime::now() >= code.expires_at);
-                if code_expired {
+                    .is_some_and(|code| now >= code.expires_at)
+                {
+                    if let Some(request_id) = pairing.pending().map(|pending| pending.request_id) {
+                        ui.dismiss_pairing_request(request_id);
+                    }
                     ui.clear_pairing_code();
                     ui.set_cloud_status("Pairing code expired".to_string());
                     pairing.reset();
@@ -503,6 +525,11 @@ async fn run_cloud(
                 link_finished = true;
                 match result {
                     Ok(LinkEnd::Revoked) => {
+                        if let Some(request_id) = pairing.pending().map(|pending| pending.request_id) {
+                            ui.dismiss_pairing_request(request_id);
+                        }
+                        pairing.reset();
+                        ui.clear_pairing_code();
                         ui.set_cloud_status("Cloud access revoked".to_string());
                     }
                     Ok(LinkEnd::Shutdown) => {}
@@ -631,18 +658,27 @@ impl NativeCloudApplier {
         use tv_client::cloud::{ApplyOutcome, Rejection};
         use tv_client::model::{Mode, Source};
 
+        let was_error = self
+            .snapshot()
+            .is_some_and(|state| state.error_code.is_some());
+        let ui = self.ui_handle();
+        ui.clear_player_error();
         if let Err(rejection) = self.send_command(tv_client::playback::PlaybackCommand::Play(
             tv_client::playback::PlayRequest::new(item_id.clone()),
         )) {
             return ApplyOutcome::Rejected(rejection);
         }
         let target = item_id;
+        let mut saw_recovery = !was_error;
         match self
             .wait_for(std::time::Duration::from_secs(8), |state| {
-                state.error_code.is_some()
-                    || (state.source == Some(Source::Jellyfin)
-                        && state.item_id.as_deref() == Some(target.as_str())
-                        && matches!(state.mode, Mode::Loading | Mode::Playing | Mode::Paused))
+                if state.error_code.is_none() {
+                    saw_recovery = true;
+                }
+                (state.source == Some(Source::Jellyfin)
+                    && state.item_id.as_deref() == Some(target.as_str())
+                    && matches!(state.mode, Mode::Loading | Mode::Playing | Mode::Paused))
+                    || (saw_recovery && state.error_code.is_some())
             })
             .await
         {
@@ -752,6 +788,12 @@ impl tv_client::cloud::CommandApplier for NativeCloudApplier {
                 Action::Navigate { .. } => {
                     let ui = self.ui_handle();
                     match ui.apply_remote_action(request.action).await {
+                        Ok(tv_client::ui::UiOutcome::Action(_))
+                        | Ok(tv_client::ui::UiOutcome::Navigated { .. })
+                        | Ok(tv_client::ui::UiOutcome::Playback(_)) => ApplyOutcome::Applied,
+                        Ok(tv_client::ui::UiOutcome::Ignored) => ApplyOutcome::Rejected(
+                            Rejection::new("not_applicable", "the UI ignored the navigation"),
+                        ),
                         Ok(tv_client::ui::UiOutcome::Rejected(_)) => {
                             ApplyOutcome::Rejected(Rejection::new(
                                 "remote_input_rejected",
@@ -761,7 +803,10 @@ impl tv_client::cloud::CommandApplier for NativeCloudApplier {
                         Ok(tv_client::ui::UiOutcome::Throttled) => ApplyOutcome::Rejected(
                             Rejection::new("throttled", "input was throttled"),
                         ),
-                        Ok(_) => ApplyOutcome::Applied,
+                        Ok(_) => ApplyOutcome::Rejected(Rejection::new(
+                            "remote_input_rejected",
+                            "the navigation did not change the UI",
+                        )),
                         Err(tv_client::ui::UiReject::RemoteApprovalDenied) => {
                             ApplyOutcome::Rejected(Rejection::new(
                                 "pairing_confirmation_pending",

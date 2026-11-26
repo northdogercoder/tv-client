@@ -1039,6 +1039,40 @@ impl UiModel {
         self.pair_code.clear();
     }
 
+    /// Dismiss the confirmation dialog when it belongs to `request_id`.
+    ///
+    /// Used when the server reports a terminal pairing status, the request
+    /// expires or the device is revoked. A stale dialog must never remain
+    /// available for a decision that can no longer be submitted.
+    pub fn dismiss_pairing_request(&mut self, request_id: Uuid) {
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|prompt| prompt.request_id == request_id)
+        {
+            self.modal = None;
+            self.refresh_status();
+        }
+    }
+
+    /// Clear a previous playback error before retrying a remote play command.
+    ///
+    /// The stale source and position are removed as well: otherwise an old
+    /// `playing` snapshot for the same item could satisfy the retry wait
+    /// before the queued play command has actually started.
+    pub fn clear_player_error(&mut self) {
+        if self.player.error.is_some() {
+            self.player.error = None;
+            self.player.loading = false;
+            self.player.source = None;
+            self.player.item_id = None;
+            self.player.paused = false;
+            self.player.position_ms = 0;
+            self.player.duration_ms = None;
+        }
+        self.refresh_status();
+    }
+
     /// Persistent cloud status shown in the header.
     #[must_use]
     pub fn cloud_status(&self) -> &str {
@@ -1464,8 +1498,9 @@ impl UiModel {
             } => {
                 self.screen = Screen::Player;
                 self.player.item_id = Some(item_id.clone());
+                self.player.source = None;
                 self.player.loading = false;
-                self.player.paused = false;
+                self.player.paused = true;
                 self.player.position_ms = *position_ms;
                 self.player.duration_ms = *duration_ms;
                 self.player.retry_available = false;
@@ -2524,6 +2559,16 @@ mod native {
         /// Clear the pairing code banner.
         pub fn clear_pairing_code(&self) {
             self.post(UiModel::clear_pairing_code);
+        }
+
+        /// Dismiss the confirmation dialog for a terminal or expired request.
+        pub fn dismiss_pairing_request(&self, request_id: Uuid) {
+            self.post(move |model| model.dismiss_pairing_request(request_id));
+        }
+
+        /// Clear a stale playback error before a remote retry.
+        pub fn clear_player_error(&self) {
+            self.post(UiModel::clear_player_error);
         }
 
         /// Update the persistent cloud status line.
