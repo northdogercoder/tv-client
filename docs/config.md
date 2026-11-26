@@ -22,6 +22,11 @@ jellyfin_url = "https://jellyfin.example.ts.net"
 server_url = "https://tv-control.example.ts.net"
 cloud_enabled = false
 youtube_enabled = false
+youtube_playback_enabled = false
+# youtube_ytdlp_path = "/opt/tv-client/yt-dlp"
+# youtube_mpv_path = "/usr/bin/mpv"
+youtube_playback_timeout_secs = 60
+youtube_hwdec = "auto-safe"
 airplay_enabled = false
 webrtc_enabled = false
 max_width = 1280
@@ -38,7 +43,12 @@ share_titles = false
 | `jellyfin_url` | string, optional | absent | Absolute URL; `https` anywhere, `http` only for a local Jellyfin host |
 | `server_url` | string, optional | absent | Absolute `https` URL; required by `cloud_enabled`, `youtube_enabled` and `webrtc_enabled` |
 | `cloud_enabled` | boolean | `false` | Must remain `false` until the control server is validated |
-| `youtube_enabled` | boolean | `false` | Requires `server_url` |
+| `youtube_enabled` | boolean | `false` | Requires `server_url`; enables search/metadata and the YouTube row |
+| `youtube_playback_enabled` | boolean | `false` | Local kill switch; effective only when `youtube_ytdlp_path` is an executable managed extractor |
+| `youtube_ytdlp_path` | string, optional | absent | Absolute path to the managed yt-dlp executable; no distro pin; missing/non-executable leaves playback disabled |
+| `youtube_mpv_path` | string, optional | `mpv` on `PATH` | Absolute path to the mpv binary used for local playback |
+| `youtube_playback_timeout_secs` | integer | `60` | `10..=300` seconds for resolve/start |
+| `youtube_hwdec` | string | `"auto-safe"` | `auto-safe`, `v4l2m2m` or `none` |
 | `airplay_enabled` | boolean | `false` | Local feature switch |
 | `webrtc_enabled` | boolean | `false` | Requires `server_url` |
 | `max_width` | integer | `1280` | `320..=7680` |

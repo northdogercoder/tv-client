@@ -37,6 +37,7 @@ export component AppWindow inherits Window {
     in-out property <bool> library-empty: false;
     in-out property <bool> library-error: false;
     in-out property <string> library-error-text;
+    in-out property <bool> next-page-available: false;
     in-out property <string> player-title: "Nothing playing";
     in-out property <string> player-source: "--";
     in-out property <string> player-method;
@@ -62,6 +63,7 @@ export component AppWindow inherits Window {
     callback library-activated(int);
     callback library-retry-requested();
     callback library-search-requested();
+    callback library-more-requested();
     callback player-control-activated(int);
     callback track-activated(int);
     callback settings-activated(int);
@@ -126,6 +128,7 @@ export component AppWindow inherits Window {
             empty: root.library-empty;
             error: root.library-error;
             error-text: root.library-error-text;
+            next-page-available: root.next-page-available;
             activated(index) => {
                 root.library-activated(index);
             }
@@ -134,6 +137,9 @@ export component AppWindow inherits Window {
             }
             search-requested() => {
                 root.library-search-requested();
+            }
+            more-requested() => {
+                root.library-more-requested();
             }
         }
 

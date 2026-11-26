@@ -296,3 +296,90 @@ approval and was not started; the active session remained labwc.
   configuration on the Pi; `GST_REGISTRY_UPDATE=no` is exported so
   `gst-inspect-1.0` does not rewrite
   `~/.cache/gstreamer-1.0/registry.aarch64.bin`.
+
+## YouTube local playback
+
+The YouTube client in `src/youtube/` is always compiled; it has **no Cargo
+feature and no new build-time package**. It uses the already-required
+`reqwest`, `tokio` (`process`, `net`, `time`) and `serde_json` crates, and it
+talks to two runtime helpers:
+
+- `mpv` (0.40 on the Pi) with its private JSON IPC socket. The Rust code does
+  not link libmpv; `libmpv-dev` is present because the mpv binary needs it.
+- A managed `yt-dlp` release. The distribution package (`/usr/bin/yt-dlp`
+  2025.04.30 on the lab Pi) is **not** the supported playback dependency: it
+  failed a public metadata test with `The page needs to be reloaded`. Install
+  or update yt-dlp in a dedicated location on the root filesystem, for
+  example:
+
+  ```sh
+  python3 -m venv "$HOME/.local/share/tv-client/yt-dlp"
+  "$HOME/.local/share/tv-client/yt-dlp/bin/pip" install --upgrade yt-dlp
+  "$HOME/.local/share/tv-client/yt-dlp/bin/yt-dlp" --version
+  ```
+
+  Do not install it under `/tmp` on the Pi (a 453 MiB tmpfs). Keep the
+  executable path absolute and record the version when changing it. Update it
+  deliberately with the same `pip install --upgrade yt-dlp` command after a
+  playback failure that the client classifies as `stale_extractor`; this is
+  the supported maintenance path for the unofficial extractor.
+
+`ffmpeg` 7.1 is already present for mpv's local demuxing. There is no server
+download, media relay or mux endpoint; the only muxing is local inside mpv.
+
+### Configuration
+
+```toml
+youtube_playback_enabled = false
+youtube_ytdlp_path = "/home/anders/.local/share/tv-client/yt-dlp/bin/yt-dlp"
+youtube_mpv_path = "/usr/bin/mpv"
+youtube_playback_timeout_secs = 60
+youtube_hwdec = "v4l2m2m"          # "auto-safe" | "v4l2m2m" | "none"
+```
+
+- `youtube_playback_enabled` is the kill switch. It is off by default, and it
+  is also effectively off when `youtube_ytdlp_path` is absent, not absolute,
+  missing or not executable. A broken installation therefore fails safe
+  instead of half-enabling the feature.
+- `youtube_ytdlp_path` must be an absolute, existing executable path. The
+  path is validated without running it; an unavailable binary is reported as a
+  typed `extractor_unavailable` playback failure at runtime.
+- `youtube_mpv_path` is optional; `mpv` is resolved from `PATH` when absent.
+- `youtube_playback_timeout_secs` is the bounded resolve-and-start budget and
+  must be `10..=300`.
+- `youtube_hwdec` is a fixed allowlist mapped to mpv's `--hwdec=`; it is never
+  taken from remote input.
+
+### Verification
+
+```sh
+mpv --version
+pkg-config --modversion mpv
+/absolute/path/to/yt-dlp --version
+ffmpeg -version | head -1
+cargo test --locked --no-default-features --test youtube
+```
+
+The mock tests need no network, mpv or yt-dlp. One ignored live test exists for
+an operator-run probe:
+
+```sh
+TV_CLIENT_YOUTUBE_LIVE_ID=<11-char id> \
+TV_CLIENT_YOUTUBE_YTDLP=/absolute/path/to/yt-dlp \
+TV_CLIENT_YOUTUBE_MPV=/usr/bin/mpv \
+  cargo test --no-default-features --test youtube -- --ignored live_local_playback
+```
+
+Build the window and the media path on the Pi from a root-filesystem directory,
+not `/tmp`, with one job and no debug info:
+
+```sh
+source "$HOME/.cargo/env"
+CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo build --release --features native-ui
+```
+
+Playback requires the active Wayland session (`WAYLAND_DISPLAY=wayland-0`,
+`XDG_RUNTIME_DIR=/run/user/1000`). See [`youtube.md`](youtube.md) for the
+search contract, the format policy, failure classes and the measured Pi
+renderer/decoder evidence.

@@ -106,39 +106,168 @@ enum CloudControl {
     },
 }
 
+/// Control-plane request routed by the single media arbiter.
 #[cfg(feature = "native-ui")]
-fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(), CliError> {
-    use tokio::sync::mpsc;
+#[derive(Debug, Clone)]
+enum RouteCommand {
+    /// Start Jellyfin playback through the C006 controller.
+    PlayJellyfin(String),
+    /// Start local YouTube playback; `remote` records the command origin.
+    PlayYoutube { video_id: String, remote: bool },
+    /// Pause or resume the active source.
+    Pause(bool),
+    /// Seek the active source.
+    Seek(u64),
+    /// Stop whichever source is active.
+    Stop,
+    /// Retry the last failed start of the active source.
+    Retry,
+    /// Forward a Jellyfin-only controller command.
+    Jellyfin(tv_client::playback::PlaybackCommand),
+    /// The cloud socket dropped; remote-initiated YouTube stops.
+    NetworkLost,
+}
 
-    use tv_client::playback::PlaybackCommand;
+/// One explicit YouTube search request from the UI.
+#[cfg(feature = "native-ui")]
+#[derive(Debug, Clone)]
+enum SearchCommand {
+    Search {
+        request_id: u64,
+        query: String,
+        page_token: Option<String>,
+    },
+    Cancel,
+}
+
+#[cfg(feature = "native-ui")]
+fn route_command(command: &tv_client::ui::UiCommand) -> Option<RouteCommand> {
+    use tv_client::model::{Action, Direction};
+    use tv_client::playback::{LibraryFilter, PlaybackCommand};
+    use tv_client::ui::{SourceFilter, UiCommand, UiPlaybackCommand};
+
+    match command {
+        UiCommand::Action(Action::PlayJellyfin { item_id }) => {
+            Some(RouteCommand::PlayJellyfin(item_id.clone()))
+        }
+        UiCommand::Action(Action::PlayYoutube { video_id }) => Some(RouteCommand::PlayYoutube {
+            video_id: video_id.clone(),
+            remote: false,
+        }),
+        UiCommand::Action(Action::SetPaused { paused }) => Some(RouteCommand::Pause(*paused)),
+        UiCommand::Action(Action::Seek { position_ms }) => Some(RouteCommand::Seek(*position_ms)),
+        UiCommand::Action(Action::Stop) => Some(RouteCommand::Stop),
+        UiCommand::Action(Action::Navigate { direction })
+            if matches!(*direction, Direction::Back | Direction::Home) =>
+        {
+            Some(RouteCommand::Stop)
+        }
+        UiCommand::Playback(UiPlaybackCommand::Retry) => Some(RouteCommand::Retry),
+        UiCommand::Playback(UiPlaybackCommand::NextEpisode) => {
+            Some(RouteCommand::Jellyfin(PlaybackCommand::NextEpisode))
+        }
+        UiCommand::Playback(UiPlaybackCommand::SelectAudio { index }) => {
+            Some(RouteCommand::Jellyfin(PlaybackCommand::SelectAudio {
+                index: *index,
+            }))
+        }
+        UiCommand::Playback(UiPlaybackCommand::SelectSubtitle { index }) => {
+            Some(RouteCommand::Jellyfin(PlaybackCommand::SelectSubtitle {
+                index: *index,
+            }))
+        }
+        UiCommand::Retry => Some(RouteCommand::Jellyfin(PlaybackCommand::RetryLibrary)),
+        UiCommand::LoadLibrary { filter } => match *filter {
+            SourceFilter::All | SourceFilter::Jellyfin => {
+                Some(RouteCommand::Jellyfin(PlaybackCommand::LoadLibrary {
+                    filter: LibraryFilter::Jellyfin,
+                }))
+            }
+            SourceFilter::YouTube => None,
+        },
+        UiCommand::Action(_)
+        | UiCommand::YoutubeSearch { .. }
+        | UiCommand::YoutubeMore { .. }
+        | UiCommand::YoutubeCancel
+        | UiCommand::ApprovePairing { .. }
+        | UiCommand::DenyPairing { .. }
+        | UiCommand::StartPairing => None,
+    }
+}
+
+#[cfg(feature = "native-ui")]
+fn search_command(command: &tv_client::ui::UiCommand) -> Option<SearchCommand> {
     use tv_client::ui::UiCommand;
 
+    match command {
+        UiCommand::YoutubeSearch { request_id, query } => Some(SearchCommand::Search {
+            request_id: *request_id,
+            query: query.clone(),
+            page_token: None,
+        }),
+        UiCommand::YoutubeMore {
+            request_id,
+            query,
+            page_token,
+        } => Some(SearchCommand::Search {
+            request_id: *request_id,
+            query: query.clone(),
+            page_token: Some(page_token.clone()),
+        }),
+        UiCommand::YoutubeCancel => Some(SearchCommand::Cancel),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "native-ui")]
+fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(), CliError> {
+    use tokio::sync::{mpsc, watch};
+
+    use tv_client::model::Source;
+    use tv_client::playback::PlaybackCommand;
+    use tv_client::ui::UiCommand;
+    use tv_client::youtube::{
+        PLAYER_COMMAND_CAPACITY, PlaybackConfig as YoutubePlaybackConfig, PlayerCommand,
+    };
+
+    let youtube_config = YoutubePlaybackConfig::from_client(config);
     let (commands, command_rx) = mpsc::channel::<PlaybackCommand>(32);
-    let cloud_commands = commands.clone();
+    let (youtube_commands, youtube_rx) = mpsc::channel::<PlayerCommand>(PLAYER_COMMAND_CAPACITY);
+    let (route_commands, route_rx) = mpsc::channel::<RouteCommand>(16);
+    let (search_commands, search_rx) = mpsc::channel::<SearchCommand>(4);
+    let (activity, _activity_rx) = watch::channel::<Option<Source>>(None);
+    let cloud_routes = route_commands.clone();
+    let ui_routes = route_commands.clone();
+    let ui_search = search_commands.clone();
     let (cloud_control, cloud_control_rx) = mpsc::channel::<CloudControl>(32);
     let (shutdown, signal) = tv_client::state::shutdown_channel();
+    let (media_shutdown, media_signal) = tv_client::state::shutdown_channel();
     let ui = tv_client::ui::NativeUi::new(tv_client::AppState::default(), move |command| {
-        match command {
+        match &command {
             UiCommand::StartPairing => {
                 let _ = cloud_control.try_send(CloudControl::StartPairing);
             }
             UiCommand::ApprovePairing { request_id } => {
                 let _ = cloud_control.try_send(CloudControl::Decide {
-                    request_id,
+                    request_id: *request_id,
                     accept: true,
                 });
             }
             UiCommand::DenyPairing { request_id } => {
                 let _ = cloud_control.try_send(CloudControl::Decide {
-                    request_id,
+                    request_id: *request_id,
                     accept: false,
                 });
             }
             other => {
-                if let Some(command) = controller_command(&other) {
-                    // The Slint callback never blocks: a full queue drops the
-                    // command rather than stalling the UI thread.
-                    let _ = commands.try_send(command);
+                // The Slint callback never blocks and never performs I/O: a
+                // full queue drops the command rather than stalling the UI.
+                if let Some(search) = search_command(other) {
+                    let _ = ui_search.try_send(search);
+                    return;
+                }
+                if let Some(route) = route_command(other) {
+                    let _ = ui_routes.try_send(route);
                 }
             }
         }
@@ -153,6 +282,7 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
         command_rx,
         signal,
         handle.clone(),
+        activity.clone(),
     );
     #[cfg(not(feature = "gstreamer-player"))]
     {
@@ -160,15 +290,29 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
         // controller is compiled out, so these wiring values are unused.
         drop(command_rx);
         drop(signal);
-        tracing::warn!("native UI built without gstreamer-player; playback is disabled");
+        tracing::warn!("native UI built without gstreamer-player; Jellyfin playback is disabled");
     }
+
+    let media_thread = start_media_thread(
+        config.clone(),
+        state_directory.to_path_buf(),
+        handle.clone(),
+        youtube_config,
+        youtube_rx,
+        route_rx,
+        search_rx,
+        commands,
+        youtube_commands,
+        activity,
+        media_signal,
+    );
 
     let (cloud_shutdown, cloud_signal) = tv_client::state::shutdown_channel();
     let cloud_thread = start_cloud_thread(
         config.clone(),
         state_directory.to_path_buf(),
         handle.clone(),
-        cloud_commands,
+        cloud_routes,
         cloud_control_rx,
         cloud_signal,
     );
@@ -183,9 +327,11 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
         }
     }
     shutdown.cancel();
+    media_shutdown.cancel();
     cloud_shutdown.cancel();
     #[cfg(feature = "gstreamer-player")]
     join_playback_thread(playback_thread);
+    join_media_thread(media_thread);
     join_cloud_thread(cloud_thread);
     result?;
     Ok(())
@@ -196,7 +342,7 @@ fn start_cloud_thread(
     config: ClientConfig,
     state_directory: PathBuf,
     ui: tv_client::ui::UiHandle,
-    commands: tokio::sync::mpsc::Sender<tv_client::playback::PlaybackCommand>,
+    routes: tokio::sync::mpsc::Sender<RouteCommand>,
     control: tokio::sync::mpsc::Receiver<CloudControl>,
     shutdown: tv_client::state::ShutdownSignal,
 ) -> Option<std::thread::JoinHandle<()>> {
@@ -219,7 +365,7 @@ fn start_cloud_thread(
                 config,
                 state_directory,
                 ui,
-                commands,
+                routes,
                 control,
                 shutdown,
             ));
@@ -239,7 +385,7 @@ async fn run_cloud(
     config: ClientConfig,
     state_directory: PathBuf,
     ui: tv_client::ui::UiHandle,
-    commands: tokio::sync::mpsc::Sender<tv_client::playback::PlaybackCommand>,
+    routes: tokio::sync::mpsc::Sender<RouteCommand>,
     mut control: tokio::sync::mpsc::Receiver<CloudControl>,
     mut shutdown: tv_client::state::ShutdownSignal,
 ) {
@@ -318,11 +464,12 @@ async fn run_cloud(
             }
         };
 
+    let youtube_ready = tv_client::youtube::PlaybackConfig::from_client(&config).enabled;
     let mut link_config = match LinkConfig::new(
         &server_url,
         device.device_id,
         env!("CARGO_PKG_VERSION"),
-        cloud::capabilities(config.jellyfin_url.is_some(), false),
+        cloud::capabilities(config.jellyfin_url.is_some(), youtube_ready),
     ) {
         Ok(config) => config,
         Err(_) => {
@@ -345,9 +492,10 @@ async fn run_cloud(
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(LINK_EVENT_CAPACITY);
     let applier = Arc::new(NativeCloudApplier {
         ui: Arc::new(Mutex::new(ui.clone())),
-        commands,
+        routes: routes.clone(),
         device_id: device.device_id,
         share_titles,
+        youtube_enabled: youtube_ready,
     });
     let link = match DeviceLink::new(
         link_config,
@@ -355,7 +503,7 @@ async fn run_cloud(
         state_rx,
         events_tx,
         applier,
-        CommandPolicy::for_build(config.jellyfin_url.is_some()),
+        CommandPolicy::with_youtube(config.jellyfin_url.is_some(), youtube_ready),
     ) {
         Ok(link) => link,
         Err(_) => {
@@ -480,9 +628,11 @@ async fn run_cloud(
                         }
                     }
                     LinkEvent::Disconnected(_) => {
+                        let _ = routes.try_send(RouteCommand::NetworkLost);
                         ui.set_cloud_status("Cloud offline; reconnecting".to_string());
                     }
                     LinkEvent::Revoked => {
+                        let _ = routes.try_send(RouteCommand::NetworkLost);
                         if let Some(request_id) = pairing.pending().map(|pending| pending.request_id) {
                             ui.dismiss_pairing_request(request_id);
                         }
@@ -525,6 +675,7 @@ async fn run_cloud(
                 link_finished = true;
                 match result {
                     Ok(LinkEnd::Revoked) => {
+                        let _ = routes.try_send(RouteCommand::NetworkLost);
                         if let Some(request_id) = pairing.pending().map(|pending| pending.request_id) {
                             ui.dismiss_pairing_request(request_id);
                         }
@@ -589,9 +740,10 @@ fn cloud_state(
 #[cfg(feature = "native-ui")]
 struct NativeCloudApplier {
     ui: std::sync::Arc<std::sync::Mutex<tv_client::ui::UiHandle>>,
-    commands: tokio::sync::mpsc::Sender<tv_client::playback::PlaybackCommand>,
+    routes: tokio::sync::mpsc::Sender<RouteCommand>,
     device_id: uuid::Uuid,
     share_titles: bool,
+    youtube_enabled: bool,
 }
 
 #[cfg(feature = "native-ui")]
@@ -635,23 +787,16 @@ impl NativeCloudApplier {
         }
     }
 
-    fn send_command(
-        &self,
-        command: tv_client::playback::PlaybackCommand,
-    ) -> Result<(), tv_client::cloud::Rejection> {
-        self.commands
-            .try_send(command)
-            .map_err(|error| match error {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                    tv_client::cloud::Rejection::new("queue_full", "playback queue is full")
-                }
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                    tv_client::cloud::Rejection::new(
-                        "playback_unavailable",
-                        "playback is not available in this build",
-                    )
-                }
-            })
+    fn send_route(&self, command: RouteCommand) -> Result<(), tv_client::cloud::Rejection> {
+        self.routes.try_send(command).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                tv_client::cloud::Rejection::new("queue_full", "playback queue is full")
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => tv_client::cloud::Rejection::new(
+                "playback_unavailable",
+                "playback is not available in this build",
+            ),
+        })
     }
 
     async fn apply_play(&self, item_id: String) -> tv_client::cloud::ApplyOutcome {
@@ -670,9 +815,7 @@ impl NativeCloudApplier {
             || self
                 .snapshot()
                 .is_some_and(|state| state.error_code.is_none());
-        if let Err(rejection) = self.send_command(tv_client::playback::PlaybackCommand::Play(
-            tv_client::playback::PlayRequest::new(item_id.clone()),
-        )) {
+        if let Err(rejection) = self.send_route(RouteCommand::PlayJellyfin(item_id.clone())) {
             return ApplyOutcome::Rejected(rejection);
         }
         let target = item_id;
@@ -697,18 +840,69 @@ impl NativeCloudApplier {
         }
     }
 
+    async fn apply_play_youtube(&self, video_id: String) -> tv_client::cloud::ApplyOutcome {
+        use tv_client::cloud::{ApplyOutcome, Rejection};
+
+        if !self.youtube_enabled {
+            return ApplyOutcome::Rejected(Rejection::new(
+                "youtube_disabled",
+                "YouTube playback is disabled by local configuration",
+            ));
+        }
+        if tv_client::youtube::VideoId::parse(&video_id).is_err() {
+            return ApplyOutcome::Rejected(Rejection::invalid_action());
+        }
+        let was_error = self
+            .snapshot()
+            .is_some_and(|state| state.error_code.is_some());
+        let ui = self.ui_handle();
+        ui.clear_player_error();
+        let mut saw_recovery = !was_error
+            || self
+                .snapshot()
+                .is_some_and(|state| state.error_code.is_none());
+        if let Err(rejection) = self.send_route(RouteCommand::PlayYoutube {
+            video_id: video_id.clone(),
+            remote: true,
+        }) {
+            return ApplyOutcome::Rejected(rejection);
+        }
+        match self
+            .wait_for(std::time::Duration::from_secs(20), |state| {
+                if state.error_code.is_none() {
+                    saw_recovery = true;
+                }
+                let evidence = tv_client::youtube::playback_evidence_fields(
+                    state.source,
+                    state.item_id.as_deref(),
+                    state.mode,
+                    state.position_ms,
+                    state.error_code.as_deref(),
+                    &video_id,
+                );
+                evidence || (saw_recovery && state.error_code.is_some())
+            })
+            .await
+        {
+            None => {
+                ApplyOutcome::Failed(Rejection::new("timeout", "YouTube playback did not start"))
+            }
+            Some(state) if state.error_code.is_some() => ApplyOutcome::Failed(Rejection::new(
+                "playback_failed",
+                "the local YouTube player reported a failure",
+            )),
+            Some(_) => ApplyOutcome::Applied,
+        }
+    }
+
     async fn apply_pause(&self, paused: bool) -> tv_client::cloud::ApplyOutcome {
         use tv_client::cloud::{ApplyOutcome, Rejection};
 
         if self.snapshot().is_some_and(|state| state.source.is_none()) {
             return ApplyOutcome::Rejected(Rejection::invalid_mode());
         }
-        let command = if paused {
-            tv_client::playback::PlaybackCommand::Pause
-        } else {
-            tv_client::playback::PlaybackCommand::Resume
-        };
-        if let Err(rejection) = self.send_command(command) {
+        let command = RouteCommand::Pause(paused);
+        if let Err(rejection) = self.send_route(command) {
             return ApplyOutcome::Rejected(rejection);
         }
         match self
@@ -739,9 +933,7 @@ impl NativeCloudApplier {
                 "seek position exceeds the reported duration",
             ));
         }
-        if let Err(rejection) =
-            self.send_command(tv_client::playback::PlaybackCommand::Seek { position_ms })
-        {
+        if let Err(rejection) = self.send_route(RouteCommand::Seek(position_ms)) {
             return ApplyOutcome::Rejected(rejection);
         }
         match self
@@ -765,7 +957,7 @@ impl NativeCloudApplier {
     async fn apply_stop(&self) -> tv_client::cloud::ApplyOutcome {
         use tv_client::cloud::{ApplyOutcome, Rejection};
 
-        if let Err(rejection) = self.send_command(tv_client::playback::PlaybackCommand::Stop) {
+        if let Err(rejection) = self.send_route(RouteCommand::Stop) {
             return ApplyOutcome::Rejected(rejection);
         }
         match self
@@ -838,10 +1030,7 @@ impl tv_client::cloud::CommandApplier for NativeCloudApplier {
                     "unsupported_action",
                     "remote standby is not wired",
                 )),
-                Action::PlayYoutube { .. } => ApplyOutcome::Rejected(Rejection::new(
-                    "unsupported_source",
-                    "YouTube playback is not available in this build",
-                )),
+                Action::PlayYoutube { video_id } => self.apply_play_youtube(video_id).await,
             }
         })
     }
@@ -928,62 +1117,6 @@ fn join_playback_thread(handle: Option<std::thread::JoinHandle<()>>) {
     }
 }
 
-/// Translate a local UI command into a controller command.
-#[cfg(feature = "native-ui")]
-fn controller_command(
-    command: &tv_client::ui::UiCommand,
-) -> Option<tv_client::playback::PlaybackCommand> {
-    use tv_client::model::{Action, Direction};
-    use tv_client::playback::{LibraryFilter, PlayRequest, PlaybackCommand};
-    use tv_client::ui::{SourceFilter, UiCommand, UiPlaybackCommand};
-
-    match command {
-        UiCommand::Action(Action::PlayJellyfin { item_id }) => {
-            Some(PlaybackCommand::Play(PlayRequest::new(item_id.clone())))
-        }
-        UiCommand::Action(Action::PlayYoutube { .. }) => Some(PlaybackCommand::Unsupported {
-            code: "unsupported_source".to_string(),
-            message: "YouTube playback is not supported by this build".to_string(),
-        }),
-        UiCommand::Action(Action::SetPaused { paused }) => Some(if *paused {
-            PlaybackCommand::Pause
-        } else {
-            PlaybackCommand::Resume
-        }),
-        UiCommand::Action(Action::Seek { position_ms }) => Some(PlaybackCommand::Seek {
-            position_ms: *position_ms,
-        }),
-        UiCommand::Action(Action::Stop) => Some(PlaybackCommand::Stop),
-        UiCommand::Action(Action::Navigate { direction })
-            if matches!(*direction, Direction::Back | Direction::Home) =>
-        {
-            Some(PlaybackCommand::Stop)
-        }
-        UiCommand::Playback(UiPlaybackCommand::Retry) => Some(PlaybackCommand::Retry),
-        UiCommand::Playback(UiPlaybackCommand::NextEpisode) => Some(PlaybackCommand::NextEpisode),
-        UiCommand::Playback(UiPlaybackCommand::SelectAudio { index }) => {
-            Some(PlaybackCommand::SelectAudio { index: *index })
-        }
-        UiCommand::Playback(UiPlaybackCommand::SelectSubtitle { index }) => {
-            Some(PlaybackCommand::SelectSubtitle { index: *index })
-        }
-        UiCommand::Retry => Some(PlaybackCommand::RetryLibrary),
-        UiCommand::LoadLibrary { filter } => Some(match *filter {
-            SourceFilter::All | SourceFilter::Jellyfin => PlaybackCommand::LoadLibrary {
-                filter: LibraryFilter::Jellyfin,
-            },
-            SourceFilter::YouTube => PlaybackCommand::Unsupported {
-                code: "unsupported_source".to_string(),
-                message: "YouTube playback is not supported by this build".to_string(),
-            },
-        }),
-        UiCommand::Action(_)
-        | UiCommand::ApprovePairing { .. }
-        | UiCommand::DenyPairing { .. }
-        | UiCommand::StartPairing => None,
-    }
-}
-
 /// Run the Jellyfin client and native player on a dedicated thread.
 #[cfg(all(feature = "native-ui", feature = "gstreamer-player"))]
 fn start_playback_thread(
@@ -992,6 +1125,7 @@ fn start_playback_thread(
     commands: tokio::sync::mpsc::Receiver<tv_client::playback::PlaybackCommand>,
     shutdown: tv_client::state::ShutdownSignal,
     ui: tv_client::ui::UiHandle,
+    activity: tokio::sync::watch::Sender<Option<tv_client::model::Source>>,
 ) -> Option<std::thread::JoinHandle<()>> {
     let thread = std::thread::Builder::new()
         .name("tv-playback".to_string())
@@ -1153,10 +1287,30 @@ fn start_playback_thread(
                 };
                 let (updates, mut received) = tokio::sync::mpsc::channel(32);
                 let ui_updates = ui.clone();
+                let activity_updates = activity;
                 let updater = tokio::spawn(async move {
                     while let Some(update) = received.recv().await {
+                        match &update {
+                            tv_client::playback::PlaybackUpdate::Loading { .. }
+                            | tv_client::playback::PlaybackUpdate::Position { .. }
+                            | tv_client::playback::PlaybackUpdate::Method { .. }
+                            | tv_client::playback::PlaybackUpdate::Tracks { .. } => {
+                                let _ =
+                                    activity_updates.send(Some(tv_client::model::Source::Jellyfin));
+                            }
+                            tv_client::playback::PlaybackUpdate::Stopped { .. }
+                            | tv_client::playback::PlaybackUpdate::Ended { .. }
+                            | tv_client::playback::PlaybackUpdate::Failed { .. }
+                            | tv_client::playback::PlaybackUpdate::SessionExpired => {
+                                let _ = activity_updates.send(None);
+                            }
+                            tv_client::playback::PlaybackUpdate::LibraryReady { .. }
+                            | tv_client::playback::PlaybackUpdate::LibraryFailed { .. }
+                            | tv_client::playback::PlaybackUpdate::Message { .. } => {}
+                        }
                         ui_updates.apply_playback_update(update);
                     }
+                    let _ = activity_updates.send(None);
                 });
                 if let Err(error) = controller.run(commands, updates, shutdown, cancel).await {
                     tracing::warn!(%error, "playback controller stopped");
@@ -1171,6 +1325,452 @@ fn start_playback_thread(
             tracing::error!(%error, "cannot spawn the playback thread");
             None
         }
+    }
+}
+
+#[cfg(feature = "native-ui")]
+#[allow(clippy::too_many_arguments)]
+fn start_media_thread(
+    config: ClientConfig,
+    state_directory: PathBuf,
+    ui: tv_client::ui::UiHandle,
+    youtube: tv_client::youtube::PlaybackConfig,
+    youtube_commands: tokio::sync::mpsc::Receiver<tv_client::youtube::PlayerCommand>,
+    routes: tokio::sync::mpsc::Receiver<RouteCommand>,
+    searches: tokio::sync::mpsc::Receiver<SearchCommand>,
+    jellyfin_commands: tokio::sync::mpsc::Sender<tv_client::playback::PlaybackCommand>,
+    youtube_sender: tokio::sync::mpsc::Sender<tv_client::youtube::PlayerCommand>,
+    activity: tokio::sync::watch::Sender<Option<tv_client::model::Source>>,
+    mut shutdown: tv_client::state::ShutdownSignal,
+) -> Option<std::thread::JoinHandle<()>> {
+    let thread = std::thread::Builder::new()
+        .name("tv-media".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::error!(%error, "cannot start the media runtime");
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                use std::sync::Arc;
+                use std::time::Duration;
+
+                use tv_client::state::shutdown_channel;
+                use tv_client::youtube::{
+                    Extractor, MpvBackendFactory, PLAYER_EVENT_CAPACITY, YtdlpExtractor, run_player,
+                };
+
+                let client = youtube_search_client(&config, &state_directory);
+                let (search_shutdown, search_signal) = shutdown_channel();
+                let (player_shutdown, player_signal) = shutdown_channel();
+                let (router_shutdown, router_signal) = shutdown_channel();
+                let (event_tx, event_rx) = tokio::sync::mpsc::channel(PLAYER_EVENT_CAPACITY);
+                let extractor: Arc<dyn Extractor> = Arc::new(YtdlpExtractor::new(
+                    youtube.extractor.clone(),
+                    youtube.timeout,
+                ));
+                let factory = Arc::new(MpvBackendFactory::new(youtube.mpv.clone()));
+
+                let mut player = tokio::spawn(run_player(
+                    youtube,
+                    extractor,
+                    factory,
+                    youtube_commands,
+                    event_tx,
+                    player_signal,
+                ));
+                let mut search = tokio::spawn(run_youtube_search(
+                    client,
+                    searches,
+                    ui.clone(),
+                    search_signal,
+                ));
+                let bridge =
+                    tokio::spawn(run_youtube_bridge(event_rx, ui.clone(), activity.clone()));
+                let mut router = tokio::spawn(run_router(
+                    routes,
+                    jellyfin_commands,
+                    youtube_sender,
+                    activity.subscribe(),
+                    router_signal,
+                ));
+
+                tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => {}
+                    result = &mut player => {
+                        if let Ok(Err(error)) = result {
+                            tracing::warn!(code = error.code(), "youtube player stopped");
+                        }
+                    }
+                    result = &mut search => {
+                        if result.is_err() {
+                            tracing::warn!("youtube search worker stopped");
+                        }
+                    }
+                    result = &mut router => {
+                        if result.is_err() {
+                            tracing::warn!("media router stopped");
+                        }
+                    }
+                }
+                player_shutdown.cancel();
+                search_shutdown.cancel();
+                router_shutdown.cancel();
+                if tokio::time::timeout(Duration::from_secs(5), &mut player)
+                    .await
+                    .is_err()
+                {
+                    player.abort();
+                }
+                if tokio::time::timeout(Duration::from_secs(5), &mut search)
+                    .await
+                    .is_err()
+                {
+                    search.abort();
+                }
+                if tokio::time::timeout(Duration::from_secs(5), &mut router)
+                    .await
+                    .is_err()
+                {
+                    router.abort();
+                }
+                bridge.abort();
+            });
+        });
+    match thread {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            tracing::error!(%error, "cannot spawn the media thread");
+            None
+        }
+    }
+}
+
+#[cfg(feature = "native-ui")]
+fn youtube_search_client(
+    config: &ClientConfig,
+    state_directory: &Path,
+) -> Option<tv_client::youtube::SearchClient> {
+    if !config.youtube_enabled {
+        return None;
+    }
+    let server_url = config.server_url.as_deref()?;
+    let storage =
+        tv_client::storage::Storage::open(state_directory, config.artwork_cache_bytes).ok()?;
+    let device = tv_client::cloud::load_device(&storage).ok()??;
+    tv_client::youtube::SearchClient::new(server_url, device.token).ok()
+}
+
+#[cfg(feature = "native-ui")]
+async fn run_youtube_search(
+    client: Option<tv_client::youtube::SearchClient>,
+    mut commands: tokio::sync::mpsc::Receiver<SearchCommand>,
+    ui: tv_client::ui::UiHandle,
+    mut shutdown: tv_client::state::ShutdownSignal,
+) {
+    use tv_client::jellyfin::cancellation;
+    use tv_client::model::Source;
+    use tv_client::ui::MediaItem;
+    use tv_client::youtube::SearchRequest;
+
+    let mut current: Option<tokio::task::JoinHandle<()>> = None;
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                if let Some(task) = current.take() {
+                    task.abort();
+                }
+                return;
+            }
+            command = commands.recv() => {
+                let Some(command) = command else {
+                    if let Some(task) = current.take() {
+                        task.abort();
+                    }
+                    return;
+                };
+                if let Some(task) = current.take() {
+                    task.abort();
+                }
+                let SearchCommand::Search {
+                    request_id,
+                    query,
+                    page_token,
+                } = command
+                else {
+                    continue;
+                };
+                let Some(client) = client.clone() else {
+                    ui.set_youtube_error(
+                        request_id,
+                        "YouTube search is not configured".to_string(),
+                    );
+                    continue;
+                };
+                let ui = ui.clone();
+                current = Some(tokio::spawn(async move {
+                    let request = match SearchRequest::new(&query, page_token.as_deref()) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            ui.set_youtube_error(request_id, error.to_string());
+                            return;
+                        }
+                    };
+                    ui.set_youtube_loading(request_id);
+                    let (_cancel_handle, token) = cancellation();
+                    match client.search(&request, &token).await {
+                        Ok(page) => {
+                            let items = page
+                                .items
+                                .into_iter()
+                                .map(|result| {
+                                    let channel = if result.channel_title.is_empty() {
+                                        "YouTube".to_string()
+                                    } else {
+                                        result.channel_title
+                                    };
+                                    MediaItem::new(Source::YouTube, result.video_id, result.title)
+                                        .with_subtitle(channel)
+                                })
+                                .collect();
+                            ui.set_youtube_page(request_id, items, page.next_page_token);
+                        }
+                        Err(error) => ui.set_youtube_error(request_id, error.to_string()),
+                    }
+                }));
+            }
+        }
+    }
+}
+
+#[cfg(feature = "native-ui")]
+async fn run_youtube_bridge(
+    mut events: tokio::sync::mpsc::Receiver<tv_client::youtube::PlayerEvent>,
+    ui: tv_client::ui::UiHandle,
+    activity: tokio::sync::watch::Sender<Option<tv_client::model::Source>>,
+) {
+    use tv_client::model::Source;
+    use tv_client::youtube::PlayerEvent;
+
+    while let Some(event) = events.recv().await {
+        match event {
+            PlayerEvent::Loading { video_id, title } => {
+                ui.youtube_loading(video_id, title);
+                let _ = activity.send(Some(Source::YouTube));
+            }
+            PlayerEvent::Playing {
+                video_id,
+                title,
+                position_ms,
+                duration_ms,
+                method,
+            } => {
+                ui.youtube_playing(video_id, title, position_ms, duration_ms, method);
+                let _ = activity.send(Some(Source::YouTube));
+            }
+            PlayerEvent::Progress {
+                position_ms,
+                duration_ms,
+                paused,
+                ..
+            } => {
+                ui.youtube_progress(position_ms, duration_ms, paused);
+            }
+            PlayerEvent::Paused { paused } => ui.youtube_paused(paused),
+            PlayerEvent::Ended { .. } => {
+                ui.youtube_ended();
+                let _ = activity.send(None);
+            }
+            PlayerEvent::Stopped { .. } => {
+                ui.youtube_stopped();
+                let _ = activity.send(None);
+            }
+            PlayerEvent::Failed {
+                code,
+                message,
+                retry_available,
+                ..
+            } => {
+                ui.youtube_failed(code, message, retry_available);
+                let _ = activity.send(None);
+            }
+        }
+    }
+    let _ = activity.send(None);
+}
+
+#[cfg(feature = "native-ui")]
+async fn run_router(
+    mut routes: tokio::sync::mpsc::Receiver<RouteCommand>,
+    jellyfin: tokio::sync::mpsc::Sender<tv_client::playback::PlaybackCommand>,
+    youtube: tokio::sync::mpsc::Sender<tv_client::youtube::PlayerCommand>,
+    mut activity: tokio::sync::watch::Receiver<Option<tv_client::model::Source>>,
+    mut shutdown: tv_client::state::ShutdownSignal,
+) {
+    use std::time::Duration;
+
+    use tv_client::model::Source;
+    use tv_client::playback::{PlayRequest, PlaybackCommand};
+    use tv_client::youtube::{PlayerCommand, VideoId};
+
+    let mut active: Option<(Source, bool)> = None;
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                let _ = youtube.send(PlayerCommand::Stop).await;
+                let _ = jellyfin.send(PlaybackCommand::Stop).await;
+                return;
+            }
+            changed = activity.changed() => {
+                if changed.is_ok() {
+                    let idle = { activity.borrow_and_update().is_none() };
+                    if idle {
+                        active = None;
+                    }
+                }
+            }
+            command = routes.recv() => {
+                let Some(command) = command else {
+                    let _ = youtube.send(PlayerCommand::Stop).await;
+                    let _ = jellyfin.send(PlaybackCommand::Stop).await;
+                    return;
+                };
+                match command {
+                    RouteCommand::PlayJellyfin(item_id) => {
+                        if matches!(active, Some((Source::YouTube, _))) {
+                            let _ = youtube.send(PlayerCommand::Stop).await;
+                            wait_for_source_gone(
+                                &mut activity,
+                                Source::YouTube,
+                                Duration::from_secs(5),
+                            )
+                            .await;
+                        }
+                        active = Some((Source::Jellyfin, false));
+                        let _ = jellyfin
+                            .send(PlaybackCommand::Play(PlayRequest::new(item_id)))
+                            .await;
+                    }
+                    RouteCommand::PlayYoutube { video_id, remote } => {
+                        if matches!(active, Some((Source::Jellyfin, _))) {
+                            let _ = jellyfin.send(PlaybackCommand::Stop).await;
+                            wait_for_source_gone(
+                                &mut activity,
+                                Source::Jellyfin,
+                                Duration::from_secs(5),
+                            )
+                            .await;
+                        }
+                        match VideoId::parse(&video_id) {
+                            Ok(video_id) => {
+                                active = Some((Source::YouTube, remote));
+                                let _ = youtube
+                                    .send(PlayerCommand::Play {
+                                        video_id,
+                                        title: None,
+                                    })
+                                    .await;
+                            }
+                            Err(_) => {
+                                active = None;
+                            }
+                        }
+                    }
+                    RouteCommand::Pause(paused) => match active {
+                        Some((Source::YouTube, _)) => {
+                            let _ = youtube.send(PlayerCommand::Pause { paused }).await;
+                        }
+                        _ => {
+                            let command = if paused {
+                                PlaybackCommand::Pause
+                            } else {
+                                PlaybackCommand::Resume
+                            };
+                            let _ = jellyfin.send(command).await;
+                        }
+                    },
+                    RouteCommand::Seek(position_ms) => match active {
+                        Some((Source::YouTube, _)) => {
+                            let _ = youtube.send(PlayerCommand::Seek { position_ms }).await;
+                        }
+                        _ => {
+                            let _ = jellyfin.send(PlaybackCommand::Seek { position_ms }).await;
+                        }
+                    },
+                    RouteCommand::Stop => {
+                        active = None;
+                        let _ = youtube.send(PlayerCommand::Stop).await;
+                        let _ = jellyfin.send(PlaybackCommand::Stop).await;
+                    }
+                    RouteCommand::Retry => match active {
+                        Some((Source::YouTube, _)) => {
+                            let _ = youtube.send(PlayerCommand::Retry).await;
+                        }
+                        _ => {
+                            let _ = jellyfin.send(PlaybackCommand::Retry).await;
+                        }
+                    },
+                    RouteCommand::Jellyfin(command) => {
+                        if !matches!(active, Some((Source::YouTube, _))) {
+                            let _ = jellyfin.send(command).await;
+                        }
+                    }
+                    RouteCommand::NetworkLost => {
+                        if matches!(active, Some((Source::YouTube, true))) {
+                            active = None;
+                            let _ = youtube.send(PlayerCommand::Stop).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "native-ui")]
+async fn wait_for_source_gone(
+    activity: &mut tokio::sync::watch::Receiver<Option<tv_client::model::Source>>,
+    source: tv_client::model::Source,
+    timeout: std::time::Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let current = { *activity.borrow_and_update() };
+        if current != Some(source) {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        tokio::select! {
+            _ = activity.changed() => {}
+            _ = tokio::time::sleep(remaining) => return,
+        }
+    }
+}
+
+#[cfg(feature = "native-ui")]
+fn join_media_thread(handle: Option<std::thread::JoinHandle<()>>) {
+    let Some(handle) = handle else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while !handle.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+    } else {
+        tracing::warn!("media thread did not stop within 8 s");
     }
 }
 
