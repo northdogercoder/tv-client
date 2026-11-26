@@ -8,7 +8,7 @@ Greenfield backlog, 2026-11-25. All rows begin TODO; no application code exists 
 | [C002](002-hardware-spike.md) | Prove Pi graphics, H.264, audio and networking before UI work | P1 | L | HIGH | C001 | DONE |
 | [C003](003-core-state.md) | Implement typed application state, configuration and bounded persistence | P1 | M | MED | C001 | DONE |
 | [C004](004-kiosk-ui.md) | Build a native remote-first Slint launcher | P1 | L | HIGH | C002, C003 | TODO |
-| [C005](005-jellyfin-library.md) | Authenticate and browse the existing Jellyfin server | P1 | L | MED | C003 | TODO |
+| [C005](005-jellyfin-library.md) | Authenticate and browse the existing Jellyfin server | P1 | L | MED | C003 | DONE |
 | [C006](006-native-player.md) | Implement exclusive native GStreamer playback | P1 | L | HIGH | C002, C003 | TODO |
 | [C007](007-jellyfin-playback.md) | Negotiate Jellyfin playback and report watch progress | P1 | L | HIGH | C004, C005, C006 | TODO |
 | [C008](008-input.md) | Unify keyboard, HDMI-CEC and physical input provenance | P1 | M | HIGH | C004, C006 | TODO |
@@ -30,6 +30,8 @@ Status: TODO / IN PROGRESS / DONE / BLOCKED (reason) / REJECTED (rationale). Mar
 - **C001 DONE 2026-11-25**: commit `14c3186fae4065209eb65d7a76e9c98399f778c3` merged to `main`; `bash scripts/check.sh` exit 0; bootstrap tests 3/3. C002 and C003 are the next dependency-ready plans.
 - **C002 DONE 2026-11-25**: merged in `66d5657` from `advisor/c002-hardware-spike` @ `97f12f9`; reviewer APPROVE; `bash scripts/check.sh` exit 0; core gate `PASS (basic)` with 17/16 QoS drop warnings (~2.8%/2.7%); 30-min soak and Slint placeholder NOT RUN per operator waiver.
 - **C003 DONE 2026-11-25**: merged in `0bf089c` from `advisor/c003-core-state` @ `943ebe9`; reviewer APPROVE after one revision; `bash scripts/check.sh` exit 0 (3 bootstrap + 15 reducer + 15 storage tests); TOML error redaction, artwork reconciliation and MSRV 1.89.
+- **C005 DONE 2026-11-25**: merged in `c157130` from `advisor/c005-jellyfin-library` @ `fb1181b`; reviewer APPROVE after one base-path fix; `bash scripts/check.sh` exit 0 (53 tests, 1 ignored); live Jellyfin 12.4.0 auth/views/logout passes; path-prefixed URL regression covered.
+- **Repository public**: switched to public 2026-11-25 after a history scan found no credentials; GitHub-hosted arm64 runners (`ubuntu-24.04-arm`) are available for C013.
 
 ## Considered and deferred
 - Full Chromecast receiver: proprietary compatibility not guaranteed; no clone in core.
