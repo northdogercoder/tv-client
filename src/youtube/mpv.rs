@@ -173,10 +173,44 @@ pub fn mpv_arguments(socket: &Path, hwdec: YoutubeHwdec) -> Vec<String> {
         "--osc=no".to_owned(),
         "--osd-level=0".to_owned(),
         "--vo=gpu".to_owned(),
+        "--gpu-context=wayland".to_owned(),
         format!("--hwdec={}", hwdec.as_arg()),
         format!("--input-ipc-server={}", socket.display()),
     ]
     .into()
+}
+
+/// Removes a temporary private socket directory unless ownership is moved into
+/// a constructed [`MpvBackend`].
+struct SocketGuard {
+    path: Option<PathBuf>,
+}
+
+impl SocketGuard {
+    fn create(path: PathBuf) -> Result<Self, BackendError> {
+        std::fs::create_dir_all(&path).map_err(|_| BackendError::Unavailable)?;
+        Ok(Self { path: Some(path) })
+    }
+
+    fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("socket guard is disarmed only on success")
+    }
+
+    fn take(&mut self) -> PathBuf {
+        self.path
+            .take()
+            .expect("socket guard is disarmed only once")
+    }
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 /// A live mpv child and its IPC connection.
@@ -193,18 +227,17 @@ pub struct MpvBackend {
 impl MpvBackend {
     /// Start mpv with a private socket and wait until it accepts commands.
     pub async fn start(options: &MpvOptions) -> Result<Self, BackendError> {
-        let socket_directory =
-            std::env::temp_dir().join(format!("tv-client-mpv-{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&socket_directory).map_err(|_| BackendError::Unavailable)?;
+        let mut guard = SocketGuard::create(
+            std::env::temp_dir().join(format!("tv-client-mpv-{}", uuid::Uuid::new_v4().simple())),
+        )?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&socket_directory, std::fs::Permissions::from_mode(0o700))
+            std::fs::set_permissions(guard.path(), std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| BackendError::Unavailable)?;
         }
-        let socket = socket_directory.join("ipc.sock");
+        let socket = guard.path().join("ipc.sock");
         if socket.as_os_str().len() >= 100 {
-            let _ = std::fs::remove_dir_all(&socket_directory);
             return Err(BackendError::Unavailable);
         }
         let arguments = mpv_arguments(&socket, options.hwdec);
@@ -215,10 +248,7 @@ impl MpvBackend {
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|_| {
-                let _ = std::fs::remove_dir_all(&socket_directory);
-                BackendError::Unavailable
-            })?;
+            .map_err(|_| BackendError::Unavailable)?;
 
         let deadline = tokio::time::Instant::now() + options.start_timeout;
         let stream = loop {
@@ -226,12 +256,10 @@ impl MpvBackend {
                 Ok(stream) => break stream,
                 Err(_) => {
                     if let Ok(Some(_)) = child.try_wait() {
-                        let _ = std::fs::remove_dir_all(&socket_directory);
                         return Err(BackendError::Unavailable);
                     }
                     if tokio::time::Instant::now() >= deadline {
                         let _ = child.start_kill();
-                        let _ = std::fs::remove_dir_all(&socket_directory);
                         return Err(BackendError::Timeout);
                     }
                     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -243,7 +271,7 @@ impl MpvBackend {
             child,
             writer: write,
             reader: BufReader::new(read),
-            socket_directory,
+            socket_directory: guard.take(),
             reap_timeout: options.reap_timeout,
             pending_audio: None,
             closed: false,

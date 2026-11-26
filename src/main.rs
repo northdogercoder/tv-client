@@ -1618,9 +1618,9 @@ async fn run_router(
 
     use tv_client::model::Source;
     use tv_client::playback::{PlayRequest, PlaybackCommand};
-    use tv_client::youtube::{PlayerCommand, VideoId};
+    use tv_client::youtube::{Ownership, PlayerCommand, VideoId};
 
-    let mut active: Option<(Source, bool)> = None;
+    let mut ownership = Ownership::default();
     loop {
         tokio::select! {
             biased;
@@ -1631,10 +1631,8 @@ async fn run_router(
             }
             changed = activity.changed() => {
                 if changed.is_ok() {
-                    let idle = { activity.borrow_and_update().is_none() };
-                    if idle {
-                        active = None;
-                    }
+                    let current = { *activity.borrow_and_update() };
+                    ownership.observe(current);
                 }
             }
             command = routes.recv() => {
@@ -1645,7 +1643,7 @@ async fn run_router(
                 };
                 match command {
                     RouteCommand::PlayJellyfin(item_id) => {
-                        if matches!(active, Some((Source::YouTube, _))) {
+                        if ownership.active_is(Source::YouTube) {
                             let _ = youtube.send(PlayerCommand::Stop).await;
                             wait_for_source_gone(
                                 &mut activity,
@@ -1654,13 +1652,13 @@ async fn run_router(
                             )
                             .await;
                         }
-                        active = Some((Source::Jellyfin, false));
+                        ownership.starting(Source::Jellyfin, false);
                         let _ = jellyfin
                             .send(PlaybackCommand::Play(PlayRequest::new(item_id)))
                             .await;
                     }
                     RouteCommand::PlayYoutube { video_id, remote } => {
-                        if matches!(active, Some((Source::Jellyfin, _))) {
+                        if ownership.active_is(Source::Jellyfin) {
                             let _ = jellyfin.send(PlaybackCommand::Stop).await;
                             wait_for_source_gone(
                                 &mut activity,
@@ -1671,7 +1669,7 @@ async fn run_router(
                         }
                         match VideoId::parse(&video_id) {
                             Ok(video_id) => {
-                                active = Some((Source::YouTube, remote));
+                                ownership.starting(Source::YouTube, remote);
                                 let _ = youtube
                                     .send(PlayerCommand::Play {
                                         video_id,
@@ -1680,12 +1678,12 @@ async fn run_router(
                                     .await;
                             }
                             Err(_) => {
-                                active = None;
+                                ownership.stopped();
                             }
                         }
                     }
-                    RouteCommand::Pause(paused) => match active {
-                        Some((Source::YouTube, _)) => {
+                    RouteCommand::Pause(paused) => match ownership.active() {
+                        Some(Source::YouTube) => {
                             let _ = youtube.send(PlayerCommand::Pause { paused }).await;
                         }
                         _ => {
@@ -1697,8 +1695,8 @@ async fn run_router(
                             let _ = jellyfin.send(command).await;
                         }
                     },
-                    RouteCommand::Seek(position_ms) => match active {
-                        Some((Source::YouTube, _)) => {
+                    RouteCommand::Seek(position_ms) => match ownership.active() {
+                        Some(Source::YouTube) => {
                             let _ = youtube.send(PlayerCommand::Seek { position_ms }).await;
                         }
                         _ => {
@@ -1706,26 +1704,25 @@ async fn run_router(
                         }
                     },
                     RouteCommand::Stop => {
-                        active = None;
+                        ownership.stopped();
                         let _ = youtube.send(PlayerCommand::Stop).await;
                         let _ = jellyfin.send(PlaybackCommand::Stop).await;
                     }
-                    RouteCommand::Retry => match active {
-                        Some((Source::YouTube, _)) => {
+                    RouteCommand::Retry => {
+                        if ownership.retry_source() == Some(Source::YouTube) {
                             let _ = youtube.send(PlayerCommand::Retry).await;
-                        }
-                        _ => {
+                        } else {
                             let _ = jellyfin.send(PlaybackCommand::Retry).await;
                         }
-                    },
+                    }
                     RouteCommand::Jellyfin(command) => {
-                        if !matches!(active, Some((Source::YouTube, _))) {
+                        if !ownership.active_is(Source::YouTube) {
                             let _ = jellyfin.send(command).await;
                         }
                     }
                     RouteCommand::NetworkLost => {
-                        if matches!(active, Some((Source::YouTube, true))) {
-                            active = None;
+                        if ownership.active_is(Source::YouTube) && ownership.remote() {
+                            ownership.stopped();
                             let _ = youtube.send(PlayerCommand::Stop).await;
                         }
                     }

@@ -12,6 +12,7 @@
 //! kill switch so the feature can be removed without a rebuild.
 
 pub mod mpv;
+pub mod ownership;
 pub mod player;
 pub mod resolve;
 pub mod search;
@@ -20,6 +21,7 @@ pub use mpv::{
     BackendCommand, BackendError, BackendEvent, BackendFactory, MpvBackend, MpvBackendFactory,
     MpvOptions, PlayerBackend,
 };
+pub use ownership::Ownership;
 pub use player::{
     PLAYER_COMMAND_CAPACITY, PLAYER_EVENT_CAPACITY, PlaybackConfig, PlayerCommand, PlayerError,
     PlayerEvent, run_player,

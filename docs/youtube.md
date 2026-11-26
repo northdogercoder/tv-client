@@ -73,10 +73,12 @@ Authorization: Bearer <device token>
    gets a bounded total timeout, bounded stdout (2 MiB), bounded stderr
    (8 KiB) and `kill_on_drop`. stderr is classified and discarded; it is never
    logged, because it can contain a media URL or a challenge page.
-5. Format policy: H.264 (`avc1`) with AAC (`mp4a`), **1080p30** first, then
-   **720p30**, then a muxed progressive H.264 fallback at 720p or lower. The
-   selector contains `fps<=30`, never prefers VP9/AV1 and refuses a selected
-   1080p60 format. A 720p stream may be up to 60 fps; 1080p is capped at 30.
+5. Format policy: H.264 (`avc1`) with AAC (`mp4a`), **720p30 first**, then a
+   muxed progressive H.264 fallback, then **1080p30** only when no 720p option
+   exists. The selector contains `fps<=30`, never prefers VP9/AV1 and refuses
+   1080p60/720p60. 720p is first because measured 1080p30 playback dropped
+   roughly 72% of frames on the Pi, versus about 19% at 720p30; 1080p30 remains
+   an accepted last resort when a video has no 720p30 H.264/AAC format.
 6. The resolved stream URLs live only in memory for one session. `Debug`
    prints `redacted`, no URL is written to argv, the log, the database or a
    file, and the temporary socket directory is removed on teardown.
@@ -86,7 +88,7 @@ Authorization: Bearer <device token>
    --no-config --no-terminal --really-quiet --idle=yes --force-window=yes
    --fullscreen=yes --no-border --keep-open=no --no-resume-playback
    --save-position-on-quit=no --ytdl=no --osc=no --osd-level=0 --vo=gpu
-   --hwdec=<allowlisted> --input-ipc-server=<socket>
+   --gpu-context=wayland --hwdec=<allowlisted> --input-ipc-server=<socket>
    ```
 
    The resolved video URL is sent with `loadfile`; the separate AAC stream is
@@ -108,11 +110,13 @@ Authorization: Bearer <device token>
 | `youtube_playback_timeout_secs` | `60` | Resolve-and-start bound, `10..=300` |
 | `youtube_hwdec` | `"auto-safe"` | `auto-safe`, `v4l2m2m` or `none` |
 
-Effective playback requires the switch **and** an existing executable at
-`youtube_ytdlp_path`. A missing, relative, non-executable or unreadable path
-leaves playback disabled; startup does not fail. Unknown keys still fail
-strict TOML parsing. The cloud policy advertises the `youtube` capability only
-when the effective switch is on.
+`youtube_ytdlp_path` must be absolute and must not contain `..`; a relative
+or structurally invalid path is rejected by strict configuration validation
+and fails startup. An absolute path that does not exist or is not executable
+does not fail startup, but it leaves local playback effectively disabled. A
+Play attempt then reports the typed `extractor_unavailable` failure. Unknown
+keys still fail strict TOML parsing, and the cloud policy advertises the
+`youtube` capability only when the effective switch is on.
 
 ## Failure classes and teardown
 
@@ -159,7 +163,7 @@ owner to report idle before starting the other source.
   it requests exactly one more page and is disabled while a request is
   pending.
 - The player screen shows title, source, method summary
-  (`yt-dlp · H.264 1080p30 · mpv`), position/duration, pause state and a
+  (`yt-dlp · H.264 720p30 · mpv`), position/duration, pause state and a
   bounded error text. All updates are posted to the Slint event loop; no I/O
   happens on that loop.
 - Search results and Jellyfin items remain separate lists. A cloud or YouTube
@@ -172,26 +176,46 @@ Lab target: Raspberry Pi 3B, Debian 13, kernel 6.18, labwc/Wayland at 1080p,
 used the current PyPI `yt-dlp 2026.11.23` in a throwaway `/tmp` venv. The
 distribution `2025.04.30` binary is **not** the playback dependency.
 
-Short public-video probe (video id `6v2L2UGZJAM`), no soak:
+Short public-video probe (video id `6v2L2UGZJAM`), no soak. The operator
+reported visible stutter on the TV; the measurements below confirm it. **The Pi
+playback gate is FAIL / not smooth.**
 
-- Resolution with the fixed selector selected format `137`,
-  `avc1.640028`, 1920×1080, 29.97 fps, plus AAC `mp4a.40.2` (split streams).
-  Resolution took about 4.8 s.
-- mpv 0.40.0 on Wayland with `--vo=gpu`, `--hwdec=v4l2m2m`:
-  `video-codec` = H.264 / AVC, `video-params` = 1920×1080,
-  `container-fps` = 29.97, `hwdec-current` = `v4l2m2m`, `current-vo` = `gpu`.
-  The file loaded and the position advanced to ≈4.2 s before the probe quit.
-  Media RSS during the run was ≈115 MiB. This confirms a 1080p30 H.264 path on
-  the actual TV with hardware decoding through V4L2 M2M and the Wayland/OpenGL
-  `gpu` output.
-- The earlier baseline found that 1080p60 hardware-decodes but shows A/V
-  desynchronization, and that libplacebo/Vulkan is not a reliable renderer on
-  this target. The client therefore does not offer 1080p60. A 720p30 result is
-  the accepted fallback when a 1080p30 H.264/AAC selection is unavailable
-  (for example, a 1080p60-only upload).
-- A video with only 60 fps H.264/VP9/AV1 formats is refused as
-  `unsupported_format` instead of silently preferring VP9/AV1 or desynchronized
-  1080p60.
+| Configuration (short run) | Format | Renderer / hwdec | Time advanced | Frame drops | CPU | Result |
+|---|---|---|---|---|---|---|
+| 1080p30 | `137` avc1.640028 + mp4a | `gpu` (explicit `wayland`), `v4l2m2m` | 5.61 s / 6.03 s | **131 / 181 (~72%)** | 7.34 s | stutter |
+| 720p30 | `136` avc1.4D401F + mp4a | `gpu` (explicit `wayland`), `v4l2m2m` | 6.04 s / 6.01 s | **35 / 180 (~19%)** | 4.28 s | stutter |
+| 720p30 | `136` + mp4a | `gpu`, software decode | 6.04 s / 6.05 s | 27 / 181 (~15%) | 6.02 s | stutter |
+| 720p30 | `136` + mp4a | `wlshm`, `v4l2m2m` | 7.61 s / 8.10 s | 47 / ~240 (~20%) | 19.51 s | stutter |
+| 720p30 | `136` + mp4a | `wlshm`, software decode | 5.21 s / 5.01 s | 43 / 150 (~29%) | 15.36 s | stutter |
+| 480p30 (the operator's Big Buck Bunny, `aqz-KE-bpKQ`) | progressive H.264/AAC | `gpu`, `v4l2m2m` | 5.03 s / 5.00 s | **1 / 150** | 2.71 s | smooth |
+
+- `hwdec-current` was `v4l2m2m` for the hardware rows and `no` for the
+  software rows; `current-vo` was `gpu` or `wlshm`. Display refresh reported
+  60 Hz (`display-fps=60.0`, output `HDMI-A-1`), `paused-for-cache=false`, and
+  demuxer cache stayed ~18–20 s, so the drops are renderer/present-side, not
+  network buffering.
+- With `--video-sync=display-resample` on 720p30/`gpu`, mpv reported
+  `estimated-display-fps ≈ 24.9`, below the 29.97 fps source.
+- One 1080p30 run with the default `gpu` context (no explicit
+  `--gpu-context=wayland`) exited with **SIGSEGV** during OpenGL shader setup
+  (`returncode -11`). The client now passes `--gpu-context=wayland` explicitly.
+- Audio attached correctly in every completed run (`aid=1`,
+  `audio-codec-name=aac`), so the stutter is video-presentation, not a missing
+  audio track.
+- RAM was 107–175 MiB, FD count 43–64, and package temperature 47–58 °C during
+  these short runs.
+
+The operator's Big Buck Bunny case is fixed by the 30 fps cap: it has no 30 fps
+720p/1080p H.264 format, so the selector now chooses its progressive 480p30
+H.264/AAC format, which measured 1 dropped frame in 150 and clearly smoother
+playback. The least-bad measured high-resolution option remains 720p30 with
+`vo=gpu`/`v4l2m2m`; the client prefers 720p30 and keeps 1080p30 only as a last
+resort. **This is not a blanket smooth-playback claim and the Pi 720p/1080p
+gate is not passed.** A renderer fix (Wayland dmabuf/zero-copy, compositor
+renderer, or a faster present path) is still required for true 720p30/1080p30. `libplacebo`/Vulkan remains unreliable on this target, 1080p60
+is not offered, and a video with only 60 fps H.264/VP9/AV1 formats is refused
+as `unsupported_format` rather than silently preferring a desynchronized or
+dropping path.
 
 The `/tmp` venv is a probe only. Production uses the absolute managed path in
 `youtube_ytdlp_path`, kept updated with:
@@ -216,3 +240,8 @@ blocking to the device.
   and local Jellyfin remains unaffected.
 - The accepted tradeoff is that ads, branding and the official embed are not
   preserved. This is not a hosted-player implementation.
+- **Pi renderer gate is FAIL for 720p30/1080p30:** those paths drop roughly
+  15–29% and 72% of frames respectively in the current labwc/Wayland session.
+  The 30 fps-capped progressive 480p30 fallback measured 1 dropped frame in
+  150 for Big Buck Bunny. Keep runs short and do not generalize from that one
+  smooth case; a zero-copy/faster renderer is still needed for 720p/1080p.

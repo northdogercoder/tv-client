@@ -1301,7 +1301,11 @@ impl UiModel {
     pub fn open_library(&mut self, filter: SourceFilter) {
         self.screen = Screen::Library;
         self.library.filter = filter;
-        self.library.items.clear();
+        // The cached Jellyfin list survives a YouTube detour; only a
+        // Jellyfin-backed open resets it.
+        if filter != SourceFilter::YouTube {
+            self.library.items.clear();
+        }
         self.library.selected = None;
         self.library.focus = 0;
         self.library.query.clear();

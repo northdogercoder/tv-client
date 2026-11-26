@@ -26,14 +26,19 @@ pub const MAX_ERROR_BYTES: usize = 8 * 1024;
 /// Fixed socket timeout passed to yt-dlp.
 const SOCKET_TIMEOUT_SECS: &str = "15";
 
-/// Fixed H.264 selection: 1080p30 first, 720p30 fallback, then a muxed
-/// progressive H.264 file. VP9 and AV1 are never preferred and 1080p60 is
-/// excluded until the Pi renderer is proven clean at that rate.
+type ExtractorTask =
+    tokio::task::JoinHandle<Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus), ExtractorError>>;
+
+/// Fixed H.264 selection: 720p30 first, a muxed progressive fallback, then
+/// 1080p30 only when no 720p option exists. VP9 and AV1 are never preferred;
+/// 1080p60 and 720p60 are excluded. The order follows measured Pi evidence:
+/// 1080p30 dropped roughly 72% of frames while 720p30 was about 19%, so 720p30
+/// is the least-bad option until the renderer is fixed.
 pub const FORMAT_SELECTOR: &str = concat!(
-    "bv*[height<=1080][fps<=30][vcodec^=avc1]+ba[acodec^=mp4a]",
-    "/bv*[height<=720][fps<=30][vcodec^=avc1]+ba[acodec^=mp4a]",
-    "/b[height<=720][vcodec^=avc1][acodec^=mp4a]",
-    "/b[height<=720][vcodec^=avc1]"
+    "bv*[height<=720][fps<=30][vcodec^=avc1]+ba[acodec^=mp4a]",
+    "/b[height<=720][fps<=30][vcodec^=avc1][acodec^=mp4a]",
+    "/bv*[height<=1080][fps<=30][vcodec^=avc1]+ba[acodec^=mp4a]",
+    "/b[height<=720][fps<=30][vcodec^=avc1]"
 );
 
 /// A resolved, still-remote H.264 media selection.
@@ -310,13 +315,13 @@ async fn run_bounded(
     tokio::select! {
         biased;
         () = cancel.cancelled() => {
-            task.abort();
+            abort_and_reap(&mut task).await;
             Err(ExtractorError::Cancelled)
         }
         result = tokio::time::timeout(timeout, &mut task) => {
             match result {
                 Err(_) => {
-                    task.abort();
+                    abort_and_reap(&mut task).await;
                     Err(ExtractorError::Timeout)
                 }
                 Ok(Err(_)) => Err(ExtractorError::InvalidOutput),
@@ -324,6 +329,14 @@ async fn run_bounded(
             }
         }
     }
+}
+
+async fn abort_and_reap(task: &mut ExtractorTask) {
+    task.abort();
+    // Poll until the aborted future has dropped its Child. The child has
+    // kill_on_drop set, so this is the point at which the process is reaped
+    // rather than merely detached.
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
 }
 
 async fn read_capped<R>(reader: &mut R, cap: usize) -> Result<Vec<u8>, ExtractorError>

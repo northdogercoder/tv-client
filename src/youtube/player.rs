@@ -231,13 +231,13 @@ pub async fn run_player(
         tokio::select! {
             biased;
             () = shutdown.cancelled() => {
-                cancel_resolve(&mut resolver);
+                cancel_resolve(&mut resolver, config.mpv.reap_timeout).await;
                 stop_backend(&mut backend, config.mpv.reap_timeout).await;
                 return Ok(());
             }
             command = commands.recv() => {
                 let Some(command) = command else {
-                    cancel_resolve(&mut resolver);
+                    cancel_resolve(&mut resolver, config.mpv.reap_timeout).await;
                     stop_backend(&mut backend, config.mpv.reap_timeout).await;
                     return Err(PlayerError::Closed);
                 };
@@ -263,7 +263,7 @@ pub async fn run_player(
                             // it is already opening/playing is not a restart.
                             continue;
                         }
-                        cancel_resolve(&mut resolver);
+                        cancel_resolve(&mut resolver, config.mpv.reap_timeout).await;
                         stop_backend(&mut backend, config.mpv.reap_timeout).await;
                         phase = Phase::Resolving;
                         let title = title.map(|title| bounded_title(&title));
@@ -298,7 +298,7 @@ pub async fn run_player(
                         deadline = Some(tokio::time::Instant::now() + config.timeout);
                     }
                     PlayerCommand::Stop => {
-                        cancel_resolve(&mut resolver);
+                        cancel_resolve(&mut resolver, config.mpv.reap_timeout).await;
                         stop_backend(&mut backend, config.mpv.reap_timeout).await;
                         phase = Phase::Idle;
                         deadline = None;
@@ -454,7 +454,7 @@ pub async fn run_player(
                             }
                         }
                         match tokio::time::timeout(config.mpv.start_timeout, factory.start()).await {
-                            Err(_) | Ok(Err(_)) => {
+                            Err(_) => {
                                 phase = Phase::Idle;
                                 deadline = None;
                                 let video_id = session.take().map(|session| session.video_id);
@@ -462,6 +462,19 @@ pub async fn run_player(
                                     &events,
                                     video_id,
                                     BackendError::Timeout.code(),
+                                    "The local player did not start in time",
+                                    true,
+                                )
+                                .await?;
+                            }
+                            Ok(Err(error)) => {
+                                phase = Phase::Idle;
+                                deadline = None;
+                                let video_id = session.take().map(|session| session.video_id);
+                                emit_failure(
+                                    &events,
+                                    video_id,
+                                    error.code(),
                                     "The local player could not start",
                                     true,
                                 )
@@ -517,6 +530,21 @@ pub async fn run_player(
             }
             event = await_backend(&mut backend) => {
                 let Some(event) = event else {
+                    if phase == Phase::Idle {
+                        backend = None;
+                        continue;
+                    }
+                    fail_active(
+                        &events,
+                        &mut phase,
+                        &mut session,
+                        &mut backend,
+                        &mut deadline,
+                        config.mpv.reap_timeout,
+                        "player_closed",
+                        "The local player closed unexpectedly",
+                    )
+                    .await?;
                     continue;
                 };
                 match event {
@@ -619,7 +647,7 @@ pub async fn run_player(
             () = wait_deadline(deadline) => {
                 deadline = None;
                 if phase == Phase::Resolving {
-                    cancel_resolve(&mut resolver);
+                    cancel_resolve(&mut resolver, config.mpv.reap_timeout).await;
                 }
                 stop_backend(&mut backend, config.mpv.reap_timeout).await;
                 phase = Phase::Idle;
@@ -638,10 +666,16 @@ pub async fn run_player(
     }
 }
 
-fn cancel_resolve(resolver: &mut Option<ResolveTask>) {
+async fn cancel_resolve(resolver: &mut Option<ResolveTask>, timeout: Duration) {
     if let Some(task) = resolver.take() {
         task.cancel.cancel();
-        task.handle.abort();
+        let ResolveTask { mut handle, .. } = task;
+        // Wait for the extractor future to drop its child before a new
+        // generation may start. Abort only if it ignores cooperative
+        // cancellation.
+        if tokio::time::timeout(timeout, &mut handle).await.is_err() {
+            handle.abort();
+        }
     }
 }
 

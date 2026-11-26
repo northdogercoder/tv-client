@@ -341,9 +341,11 @@ youtube_hwdec = "v4l2m2m"          # "auto-safe" | "v4l2m2m" | "none"
   is also effectively off when `youtube_ytdlp_path` is absent, not absolute,
   missing or not executable. A broken installation therefore fails safe
   instead of half-enabling the feature.
-- `youtube_ytdlp_path` must be an absolute, existing executable path. The
-  path is validated without running it; an unavailable binary is reported as a
-  typed `extractor_unavailable` playback failure at runtime.
+- `youtube_ytdlp_path` must be an absolute path without `..`; a relative or
+  structurally invalid value fails strict configuration validation. Existence
+  and executable bits are checked for readiness but are not fatal: a missing
+  absolute path leaves playback disabled, and a Play attempt reports the typed
+  `extractor_unavailable` failure.
 - `youtube_mpv_path` is optional; `mpv` is resolved from `PATH` when absent.
 - `youtube_playback_timeout_secs` is the bounded resolve-and-start budget and
   must be `10..=300`.

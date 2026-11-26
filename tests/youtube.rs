@@ -20,8 +20,8 @@ use tv_client::jellyfin::{CancelToken, cancellation};
 use tv_client::model::{AppState, Mode, Source};
 use tv_client::state::shutdown_channel;
 use tv_client::youtube::mpv::{
-    BackendCommand, BackendError, BackendEvent, BackendFactory, MpvOptions, PlayerBackend,
-    mpv_arguments,
+    BackendCommand, BackendError, BackendEvent, BackendFactory, MpvBackend, MpvOptions,
+    PlayerBackend, mpv_arguments,
 };
 use tv_client::youtube::player::{
     PLAYER_COMMAND_CAPACITY, PlaybackConfig, PlayerCommand, PlayerEvent,
@@ -275,10 +275,13 @@ fn extractor_arguments_are_fixed_and_shell_free() {
     assert!(!FORMAT_SELECTOR.contains("vp9"));
     assert!(!FORMAT_SELECTOR.contains("av01"));
     assert!(FORMAT_SELECTOR.contains("fps<=30"));
+    let first_720 = FORMAT_SELECTOR.find("height<=720").expect("720 branch");
+    let first_1080 = FORMAT_SELECTOR.find("height<=1080").expect("1080 branch");
+    assert!(first_720 < first_1080, "720p30 must be preferred");
 }
 
 #[test]
-fn selection_prefers_h264_1080p30_and_refuses_1080p60_vp9_and_av1() {
+fn selection_refuses_1080p60_vp9_and_av1_but_accepts_1080p30_fallback() {
     let accepted = json!({
         "url": "https://rr1---sn.example.googlevideo.com/videoplayback",
         "vcodec": "avc1.640028",
@@ -336,6 +339,11 @@ fn mpv_arguments_never_carry_a_url_or_token() {
         arguments
             .iter()
             .any(|argument| argument == "--input-ipc-server=/tmp/tv-client-mpv-test/ipc.sock")
+    );
+    assert!(
+        arguments
+            .iter()
+            .any(|argument| argument == "--gpu-context=wayland")
     );
 }
 
@@ -525,6 +533,7 @@ struct MockFactory {
     spawns: Arc<AtomicUsize>,
     commands: Arc<Mutex<Vec<BackendCommand>>>,
     closes: Arc<AtomicUsize>,
+    failure: Option<BackendError>,
 }
 
 impl MockFactory {
@@ -534,17 +543,35 @@ impl MockFactory {
             spawns: Arc::new(AtomicUsize::new(0)),
             commands: Arc::new(Mutex::new(Vec::new())),
             closes: Arc::new(AtomicUsize::new(0)),
+            failure: None,
+        })
+    }
+
+    fn failing(error: BackendError) -> Arc<Self> {
+        Arc::new(Self {
+            senders: Arc::new(Mutex::new(Vec::new())),
+            spawns: Arc::new(AtomicUsize::new(0)),
+            commands: Arc::new(Mutex::new(Vec::new())),
+            closes: Arc::new(AtomicUsize::new(0)),
+            failure: Some(error),
         })
     }
 
     fn sender(&self) -> Option<mpsc::UnboundedSender<BackendEvent>> {
         self.senders.lock().expect("senders").last().cloned()
     }
+
+    fn close_backends(&self) {
+        self.senders.lock().expect("senders").clear();
+    }
 }
 
 impl BackendFactory for MockFactory {
     fn start(&self) -> BoxFuture<'_, Result<Box<dyn PlayerBackend>, BackendError>> {
         Box::pin(async move {
+            if let Some(error) = self.failure {
+                return Err(error);
+            }
             self.spawns.fetch_add(1, Ordering::SeqCst);
             let (events, receiver) = mpsc::unbounded_channel();
             self.senders.lock().expect("senders").push(events);
@@ -934,6 +961,183 @@ fn config_rejects_invalid_managed_paths_and_timeouts() {
     assert!(config.validate().is_err());
     config.youtube_playback_timeout_secs = MAX_YOUTUBE_TIMEOUT_SECS + 1;
     assert!(config.validate().is_err());
+}
+
+#[tokio::test]
+async fn player_reports_a_closed_backend_once() {
+    let factory = MockFactory::new();
+    let extractor = MockExtractor::ok(Duration::ZERO);
+    let (commands, command_rx) = mpsc::channel(PLAYER_COMMAND_CAPACITY);
+    let (events, mut received) = mpsc::channel(32);
+    let (shutdown_handle, signal) = shutdown_channel();
+    let task = tokio::spawn(run_player(
+        test_config(true),
+        extractor,
+        factory.clone(),
+        command_rx,
+        events,
+        signal,
+    ));
+    commands
+        .send(PlayerCommand::Play {
+            video_id: video(VIDEO_A),
+            title: None,
+        })
+        .await
+        .expect("play");
+    assert!(matches!(
+        next_event(&mut received, Duration::from_secs(2)).await,
+        PlayerEvent::Loading { .. }
+    ));
+    let backend = wait_for_spawn(&factory).await;
+    drop(backend);
+    factory.close_backends();
+
+    match next_event(&mut received, Duration::from_secs(2)).await {
+        PlayerEvent::Failed {
+            code,
+            retry_available,
+            ..
+        } => {
+            assert_eq!(code, "player_closed");
+            assert!(retry_available);
+        }
+        other => panic!("expected a closed failure, got {other:?}"),
+    }
+    // A closed receiver must not spin or repeat the failure.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), received.recv())
+            .await
+            .is_err()
+    );
+    shutdown_handle.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+}
+
+#[tokio::test]
+async fn player_reports_player_unavailable_when_mpv_cannot_start() {
+    let factory = MockFactory::failing(BackendError::Unavailable);
+    let extractor = MockExtractor::ok(Duration::ZERO);
+    let (commands, command_rx) = mpsc::channel(PLAYER_COMMAND_CAPACITY);
+    let (events, mut received) = mpsc::channel(32);
+    let (shutdown_handle, signal) = shutdown_channel();
+    let task = tokio::spawn(run_player(
+        test_config(true),
+        extractor,
+        factory.clone(),
+        command_rx,
+        events,
+        signal,
+    ));
+    commands
+        .send(PlayerCommand::Play {
+            video_id: video(VIDEO_A),
+            title: None,
+        })
+        .await
+        .expect("play");
+    assert!(matches!(
+        next_event(&mut received, Duration::from_secs(2)).await,
+        PlayerEvent::Loading { .. }
+    ));
+    match next_event(&mut received, Duration::from_secs(2)).await {
+        PlayerEvent::Failed { code, .. } => assert_eq!(code, "player_unavailable"),
+        other => panic!("expected player_unavailable, got {other:?}"),
+    }
+    assert_eq!(factory.spawns.load(Ordering::SeqCst), 0);
+    shutdown_handle.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+}
+
+#[tokio::test]
+async fn extractor_cancellation_reaps_the_child_process() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let pid_path = directory.path().join("pid");
+    let extractor = YtdlpExtractor::new(
+        script(
+            directory.path(),
+            "yt-dlp",
+            &format!("echo $$ > '{}'; exec sleep 30", pid_path.display()),
+        ),
+        Duration::from_secs(30),
+    );
+    let (handle, cancel) = cancellation();
+    let task = tokio::spawn(async move { extractor.resolve(&video(VIDEO_A), &cancel).await });
+    for _ in 0..200 {
+        if pid_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pid = std::fs::read_to_string(&pid_path)
+        .expect("pid file")
+        .trim()
+        .to_owned();
+    assert!(!pid.is_empty());
+    handle.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .expect("cancellation is prompt")
+        .expect("task");
+    assert_eq!(result, Err(ExtractorError::Cancelled));
+    let proc_path = PathBuf::from(format!("/proc/{pid}"));
+    let mut gone = false;
+    for _ in 0..200 {
+        if !proc_path.exists() {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(gone, "yt-dlp child {pid} survived cancellation");
+}
+
+#[test]
+fn jellyfin_items_survive_a_youtube_detour() {
+    use tv_client::ui::{MediaItem, SourceFilter, UiModel};
+
+    let mut model = UiModel::new();
+    model.open_library(SourceFilter::Jellyfin);
+    model.set_library_items(vec![MediaItem::new(Source::Jellyfin, "item-a", "Alpha")]);
+    assert_eq!(model.visible_len(), 1);
+    model.open_library(SourceFilter::YouTube);
+    model.set_library_filter(SourceFilter::Jellyfin);
+    assert_eq!(model.visible_len(), 1);
+    assert_eq!(
+        model.focused_item().map(|item| item.title.as_str()),
+        Some("Alpha")
+    );
+}
+
+#[tokio::test]
+async fn mpv_start_failure_removes_the_socket_directory() {
+    fn socket_directories() -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(std::env::temp_dir())
+            .expect("temp dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("tv-client-mpv-"))
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    let before = socket_directories();
+    let options = MpvOptions {
+        program: PathBuf::from("/nonexistent/mpv"),
+        hwdec: YoutubeHwdec::AutoSafe,
+        start_timeout: Duration::from_millis(50),
+        reap_timeout: Duration::from_millis(50),
+    };
+    assert_eq!(
+        MpvBackend::start(&options).await.err(),
+        Some(BackendError::Unavailable)
+    );
+    assert_eq!(socket_directories(), before);
 }
 
 /// Live local playback probe. It is ignored by default and reads the managed
