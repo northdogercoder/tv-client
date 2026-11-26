@@ -2,7 +2,7 @@
 
 > Executor: C013. Work in an isolated worktree, follow steps in order, run each gate, and stop on mismatch. Read the full plan before acting. The reviewer (not executor) owns the index. No push, merge, deployment, or production credentials without separate operator approval.
 >
-> Drift check: planned-at is UNBOUND because this is a new repo. Advisor records actual baseline SHA with `git rev-parse HEAD` and live file excerpts (or explicitly absent) before dispatch. Then run `git diff --stat <BOUND_SHA>..HEAD -- scripts/ deploy/ .github/workflows/ Cargo.toml Cargo.lock docs/release.md tests/release.rs`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
+> Drift check: planned-at is bound to `f344ff8150684fdc7c7f417581c23c9927fee264` (post-C010 merge, 2026-11-26). Advisor verified the baseline and the absent target files below. Then run `git diff --stat f344ff8150684fdc7c7f417581c23c9927fee264..HEAD -- scripts/ deploy/ .github/workflows/ Cargo.toml Cargo.lock docs/release.md docs/build.md tests/release.rs`. If paths changed, reconcile against live code first. Check dependency rows and cross-repo gates below. Do not replace placeholders with invented SHA.
 
 ## Status
 - **Priority**: P1
@@ -10,24 +10,33 @@
 - **Risk**: HIGH
 - **Depends on**: C007, C008, C009, C010
 - **Category**: direction
-- **Planned at**: UNBOUND (greenfield), 2026-11-25
+- **Planned at**: f344ff8150684fdc7c7f417581c23c9927fee264, 2026-11-26
 - **State**: TODO (index authoritative)
+
+## Baseline evidence (advisor, 2026-11-26)
+
+- Baseline `f344ff8`; C001–C010 are done; host gate exit 0 (227 tests, 2 live ignored) and combined `native-ui,gstreamer-player` clippy passes.
+- Accepted hardware gates: C010 YouTube **720p30 under Cage/GLES** (2/240 drops), 1080p unsupported on Pi 3B, labwc FAIL, BBB 480p30 smooth. C002 short-run only; 30-min soak waived. C004 UI still needs Cage revalidation.
+- Pi 3B Rev 1.2, Debian 13 trixie, labwc/Cage, 1080p; server S006 Phase A deployed; no enrollment token. C011/C012 remain optional TODO.
+- Repository is public; GitHub-hosted `ubuntu-24.04-arm` is available. `deploy/client.toml.example` is stale (missing YouTube playback keys); no install/rollback scripts, release workflow, docs/release or tests/release exist.
+- Baseline `bash scripts/check.sh` verifies code only; no ARM64 artifact or hardware acceptance exists yet.
 
 ## Why this matters
 Provide reproducible ARM64 release, boot recovery, atomic updates, operator-controlled rollback. Optional C011/C012 only included if independently accepted.
 
 ## Current state
-No repository source was provided. Expected state: prerequisite plans merged, with their tested interfaces available. Before dispatch, advisor confirms actual tree and adds excerpts if needed. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
+C001–C010 are merged; the code, tests and accepted hardware gates above exist. C013 targets are absent; update the stale deploy example and add packaging/scripts/docs without changing application behavior. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
 
 ## Commands you will need
 | Purpose | Command | Expected |
 |---|---|---|
 | Baseline | `git status --short` | clean before execution |
-| Standard check | `bash scripts/check.sh` | exit 0 (created in 001) |
+| Standard check | `bash scripts/check.sh` | exit 0 (verified on bound baseline) |
+| ARM64 runner | `runs-on: ubuntu-24.04-arm` | public repo; pin action SHAs |
 | Format | `cargo fmt --all -- --check` | exit 0 |
 | Diff | `git diff --stat <BOUND_SHA>..HEAD` | only approved paths |
 
-Commands are proposed greenfield gates, not previously executed on this repo. The bootstrap establishes them; advisor updates this table if actual conventions differ. Real hardware checks need an operator report with command output, not simulated success.
+`bash scripts/check.sh` is verified on the bound baseline; ARM64 packaging and hardware acceptance are not. Real hardware/rollback checks need the operator and must not be simulated. Do not deploy or change services from the executor worktree.
 
 ## Scope
 **In scope** (only these files/directories; trailing slash includes descendants):
@@ -38,6 +47,7 @@ Commands are proposed greenfield gates, not previously executed on this repo. Th
 - `Cargo.lock`
 - `docs/release.md`
 - `tests/release.rs`
+- `docs/build.md`
 
 **Out of scope**: sibling repository, protocol contract edits (coordinate separate reviewed change), plans index edits by executor, unrelated refactoring, production secrets, destructive infrastructure changes. If a required file is missing from scope, STOP and request a scope amendment. `Cargo.lock` changes only where in scope and justified.
 
@@ -54,13 +64,13 @@ Pin Rust, distro ABI and features; build on ARM64 Debian/Trixie runner or compat
 
 ### Step 2: Implement deployment scripts
 
-Copy vetted templates from deploy/ (guide.html in operator bundle specifies manual steps); install version under /opt/tv-client/releases/<version>, root-owned, atomic current symlink, unprivileged tvkiosk user, separate admin SSH, state/config persistent. Console PAM session starts Cage, systemd/getty restarts on exit; watchdog crash backoff; local recovery on tty2. Validate script syntax and idempotence, never blindly change firewall/OS.
+Copy vetted templates from deploy/ and update `deploy/client.toml.example` with the current keys (YouTube playback path/kill switch/timeout/hwdec, cloud/CEC). Install version under /opt/tv-client/releases/<version>, root-owned, atomic current symlink, unprivileged tvkiosk user, separate admin SSH, state/config persistent. Console PAM session starts **Cage with WLR_RENDERER=gles2** (the accepted YouTube renderer), systemd/getty restarts on exit; watchdog crash backoff; local recovery on tty2. Validate script syntax and idempotence, never blindly change firewall/OS. Do not install/deploy from the executor worktree.
 
 **Verify:** `bash -n scripts/install-release.sh scripts/rollback.sh` → exit 0; all named checks pass; inspect actual assertions/output.
 
 ### Step 3: Run full acceptance
 
-Run docs/release.md matrix including core local, OVH pairing/YouTube if enabled, reboot, power loss simulation with safe procedure, offline server, network relay, 2h soak and rollback; capture sanitized evidence.
+Run docs/release.md matrix including core local, OVH pairing/YouTube if enabled, reboot, power loss simulation with safe procedure, offline server, network relay, 2h soak and rollback; capture sanitized evidence. Operator-owned; the executor produces the matrix/templates and marks unrun items NOT RUN. YouTube acceptance is 720p30 under Cage/GLES; 1080p is explicitly unsupported.
 
 **Verify:** `test -s docs/release.md` → exit 0; documented real measurements must meet the stated gate, file existence alone is not acceptance.
 
