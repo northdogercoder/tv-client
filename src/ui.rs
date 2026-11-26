@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::model::{
     Action, AppState, Direction, InputOrigin, Mode, Source, is_valid_item_id, is_valid_youtube_id,
 };
-use crate::playback::PlaybackUpdate;
+use crate::playback::{LibraryFilter, PlaybackUpdate};
 
 /// Number of entries on the home screen.
 pub const HOME_ROW_COUNT: usize = 5;
@@ -197,6 +197,13 @@ pub const fn source_label(source: Source) -> &'static str {
         Source::YouTube => "YouTube",
         Source::AirPlay => "AirPlay",
         Source::WebRtc => "WebRTC",
+    }
+}
+
+fn library_source_filter(filter: LibraryFilter) -> SourceFilter {
+    match filter {
+        LibraryFilter::Jellyfin => SourceFilter::Jellyfin,
+        LibraryFilter::ContinueWatching => SourceFilter::All,
     }
 }
 
@@ -1235,6 +1242,29 @@ impl UiModel {
                 self.player.selected_subtitle = *selected_subtitle;
                 self.player.menu = None;
                 self.player.menu_focus = 0;
+            }
+            PlaybackUpdate::LibraryReady { filter, items } => {
+                if self.screen == Screen::Library {
+                    self.open_library(library_source_filter(*filter));
+                    self.set_library_items(
+                        items
+                            .iter()
+                            .map(|item| {
+                                MediaItem::new(
+                                    Source::Jellyfin,
+                                    item.id.clone(),
+                                    item.title.clone(),
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            PlaybackUpdate::LibraryFailed { filter, message } => {
+                if self.screen == Screen::Library {
+                    self.open_library(library_source_filter(*filter));
+                    self.set_library_error(message);
+                }
             }
             PlaybackUpdate::Ended {
                 item_id: _,

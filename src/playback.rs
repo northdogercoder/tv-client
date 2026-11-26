@@ -16,10 +16,10 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::jellyfin::{
-    CancelToken, JellyfinClient, JellyfinError, MAX_PLAYBACK_START_TICKS, MediaSelection,
-    MediaStreamChoice, MediaStreamInfo, PlayMethod, PlaybackInfoOptions, PlaybackProgressInfo,
-    PlaybackStartInfo, PlaybackStopInfo, SelectionError, SelectionOptions, TICKS_PER_MILLISECOND,
-    UserItemData, select_media_source,
+    CancelToken, ItemQuery, JellyfinClient, JellyfinError, MAX_PLAYBACK_START_TICKS,
+    MediaSelection, MediaStreamChoice, MediaStreamInfo, Page, PlayMethod, PlaybackInfoOptions,
+    PlaybackProgressInfo, PlaybackStartInfo, PlaybackStopInfo, SelectionError, SelectionOptions,
+    TICKS_PER_MILLISECOND, UserItemData, select_media_source,
 };
 use crate::player::{
     LoadRequest, MAX_POSITION_MS, PlayerCommand, PlayerError, PlayerNotification, PlayerSession,
@@ -193,6 +193,29 @@ pub enum PlaybackCommand {
         /// Stream index, or `None` to disable subtitles.
         index: Option<i32>,
     },
+    /// Fetch a library list and publish it to the UI.
+    LoadLibrary {
+        /// Which list to fetch.
+        filter: LibraryFilter,
+    },
+    /// Retry the last library fetch.
+    RetryLibrary,
+    /// Report a source this build cannot play.
+    Unsupported {
+        /// Bounded machine-readable code.
+        code: String,
+        /// Bounded user-facing message.
+        message: String,
+    },
+}
+
+/// Library list requested by the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryFilter {
+    /// All playable video items.
+    Jellyfin,
+    /// The user's resumable items.
+    ContinueWatching,
 }
 
 /// One selectable audio or subtitle stream.
@@ -249,6 +272,20 @@ pub enum PlaybackUpdate {
         selected_audio: Option<i32>,
         /// Selected subtitle index.
         selected_subtitle: Option<i32>,
+    },
+    /// A library fetch completed.
+    LibraryReady {
+        /// Requested list.
+        filter: LibraryFilter,
+        /// Bounded item list.
+        items: Vec<PlaybackItem>,
+    },
+    /// A library fetch failed with a bounded message.
+    LibraryFailed {
+        /// Requested list.
+        filter: LibraryFilter,
+        /// Redacted message.
+        message: String,
     },
     /// Playback reached its natural end.
     Ended {
@@ -403,13 +440,19 @@ impl ProgressJournal {
 
     /// Record a failed snapshot. A newer sequence for the same play session
     /// replaces the older one, and the oldest entry is evicted at capacity.
-    pub fn record(&mut self, entry: ProgressEntry) {
-        if self
+    pub fn record(&mut self, mut entry: ProgressEntry) {
+        if let Some(existing) = self
             .entries
             .iter()
-            .any(|existing| same_key(existing, &entry) && existing.sequence >= entry.sequence)
+            .find(|existing| same_key(existing, &entry))
         {
-            return;
+            if existing.sequence > entry.sequence {
+                return;
+            }
+            // A replacement snapshot (including the same sequence after a
+            // failed retry) keeps the attempt budget and any later backoff.
+            entry.attempts = entry.attempts.max(existing.attempts);
+            entry.next_attempt = entry.next_attempt.max(existing.next_attempt);
         }
         self.entries.retain(|existing| !same_key(existing, &entry));
         self.entries.push_back(entry);
@@ -495,6 +538,7 @@ struct ActivePlayback {
     start_reported: bool,
     stop_reported: bool,
     last_progress_at: Instant,
+    next_progress_attempt: Option<Instant>,
 }
 
 impl ActivePlayback {
@@ -540,9 +584,17 @@ fn source_id(selection: &MediaSelection) -> Option<String> {
 #[derive(Debug)]
 struct FailedPlayback {
     request: PlayRequest,
-    position_ticks: u64,
+    /// Position captured at failure. `None` means playback had not started,
+    /// so a retry must keep the request's resume/start values.
+    position_ticks: Option<u64>,
     code: String,
     message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SubtitleIntent {
+    Preserve,
+    Set(Option<i32>),
 }
 
 /// Owns one Jellyfin client and one native player session.
@@ -557,6 +609,9 @@ pub struct PlaybackController {
     last_request: Option<PlayRequest>,
     last_item_id: Option<String>,
     last_failed: Option<FailedPlayback>,
+    last_library_filter: LibraryFilter,
+    last_generation: u64,
+    loads_sent: u64,
 }
 
 impl PlaybackController {
@@ -583,6 +638,9 @@ impl PlaybackController {
             last_request: None,
             last_item_id: None,
             last_failed: None,
+            last_library_filter: LibraryFilter::Jellyfin,
+            last_generation: 0,
+            loads_sent: 0,
         })
     }
 
@@ -602,6 +660,12 @@ impl PlaybackController {
     #[must_use]
     pub fn active_method(&self) -> Option<PlayMethod> {
         self.active.as_ref().map(|active| active.selection.method)
+    }
+
+    /// Adopted supervisor generation of the active playback.
+    #[must_use]
+    pub fn active_generation(&self) -> Option<u64> {
+        self.active.as_ref().and_then(|active| active.generation)
     }
 
     /// Retry journal, for diagnostics and tests.
@@ -676,6 +740,7 @@ impl PlaybackController {
         };
         load.validate()?;
         self.session.send(PlayerCommand::Load(load)).await?;
+        self.loads_sent = self.loads_sent.saturating_add(1);
 
         let active = ActivePlayback {
             user_id: self.user_id.clone(),
@@ -689,6 +754,7 @@ impl PlaybackController {
             start_reported: false,
             stop_reported: false,
             last_progress_at: Instant::now(),
+            next_progress_attempt: None,
             selection: selection.clone(),
         };
         self.active = Some(active);
@@ -780,6 +846,9 @@ impl PlaybackController {
         let mut updates = Vec::new();
         if self.active.as_ref().is_some_and(|active| {
             active.start_reported
+                && active
+                    .next_progress_attempt
+                    .is_none_or(|attempt| now >= attempt)
                 && now.saturating_duration_since(active.last_progress_at)
                     >= self.config.progress_interval
         }) {
@@ -797,13 +866,29 @@ impl PlaybackController {
         cancel: &CancelToken,
     ) -> Vec<PlaybackUpdate> {
         if let Some(generation) = notification_generation(&notification) {
-            let Some(active) = self.active.as_mut() else {
+            if self.active.is_none() {
+                return Vec::new();
+            }
+            let loading = matches!(
+                &notification,
+                PlayerNotification::State {
+                    state: PlayerState::Loading,
+                    ..
+                }
+            );
+            let Some(current) = self.active.as_ref().and_then(|active| active.generation) else {
+                if !loading || generation != self.loads_sent || generation <= self.last_generation {
+                    return Vec::new();
+                }
+                if let Some(active) = self.active.as_mut() {
+                    active.generation = Some(generation);
+                }
+                self.last_generation = generation;
+                // A Loading state carries no other UI transition.
                 return Vec::new();
             };
-            match active.generation {
-                None => active.generation = Some(generation),
-                Some(current) if current != generation => return Vec::new(),
-                Some(_) => {}
+            if current != generation {
+                return Vec::new();
             }
         }
         match notification {
@@ -847,8 +932,11 @@ impl PlaybackController {
                     active.duration_ticks = Some(ticks);
                 }
                 let update = position_update(active);
-                if now.saturating_duration_since(active.last_progress_at)
-                    >= self.config.progress_interval
+                if active
+                    .next_progress_attempt
+                    .is_none_or(|attempt| now >= attempt)
+                    && now.saturating_duration_since(active.last_progress_at)
+                        >= self.config.progress_interval
                 {
                     let mut updates = self.report_progress(false, now, cancel).await;
                     updates.push(update);
@@ -893,7 +981,7 @@ impl PlaybackController {
                 if let Some(request) = &self.last_request {
                     self.last_failed = Some(FailedPlayback {
                         request: request.clone(),
-                        position_ticks: active.position_ticks,
+                        position_ticks: Some(active.position_ticks),
                         code: code.clone(),
                         message: message.clone(),
                     });
@@ -923,7 +1011,7 @@ impl PlaybackController {
                 Err(error) => {
                     self.last_failed = Some(FailedPlayback {
                         request,
-                        position_ticks: 0,
+                        position_ticks: None,
                         code: error_code(&error),
                         message: Some(error.to_string()),
                     });
@@ -948,10 +1036,66 @@ impl PlaybackController {
             PlaybackCommand::Stop => self.stop(cancel).await,
             PlaybackCommand::Retry => self.retry(cancel).await,
             PlaybackCommand::NextEpisode => self.next_episode(cancel).await,
-            PlaybackCommand::SelectAudio { index } => self.renegotiate(index, None, cancel).await,
-            PlaybackCommand::SelectSubtitle { index } => {
-                self.renegotiate(None, index, cancel).await
+            PlaybackCommand::SelectAudio { index } => {
+                self.renegotiate(index, SubtitleIntent::Preserve, cancel)
+                    .await
             }
+            PlaybackCommand::SelectSubtitle { index } => {
+                self.renegotiate(None, SubtitleIntent::Set(index), cancel)
+                    .await
+            }
+            PlaybackCommand::LoadLibrary { filter } => self.load_library(filter, cancel).await,
+            PlaybackCommand::RetryLibrary => {
+                let filter = self.last_library_filter;
+                self.load_library(filter, cancel).await
+            }
+            PlaybackCommand::Unsupported { code, message } => {
+                let mut updates = self.stop(cancel).await;
+                updates.push(PlaybackUpdate::Failed {
+                    item_id: None,
+                    code,
+                    message: Some(message),
+                    retry_available: false,
+                });
+                updates
+            }
+        }
+    }
+
+    async fn load_library(
+        &mut self,
+        filter: LibraryFilter,
+        cancel: &CancelToken,
+    ) -> Vec<PlaybackUpdate> {
+        self.last_library_filter = filter;
+        let result = match filter {
+            LibraryFilter::Jellyfin => {
+                self.client
+                    .items(
+                        &ItemQuery::new().media_types(&["Video"]).page(Page::first()),
+                        cancel,
+                    )
+                    .await
+            }
+            LibraryFilter::ContinueWatching => self.client.resume(Page::first(), cancel).await,
+        };
+        match result {
+            Ok(result) => {
+                let items = result
+                    .items
+                    .into_iter()
+                    .map(|item| PlaybackItem {
+                        id: item.id,
+                        title: item.name.unwrap_or_else(|| "Untitled".to_string()),
+                    })
+                    .collect();
+                vec![PlaybackUpdate::LibraryReady { filter, items }]
+            }
+            Err(JellyfinError::Unauthorized) => vec![PlaybackUpdate::SessionExpired],
+            Err(error) => vec![PlaybackUpdate::LibraryFailed {
+                filter,
+                message: error.to_string(),
+            }],
         }
     }
 
@@ -962,8 +1106,10 @@ impl PlaybackController {
             }];
         };
         let mut request = failed.request.clone();
-        request.resume = false;
-        request.start_ticks = Some(failed.position_ticks);
+        if let Some(position_ticks) = failed.position_ticks {
+            request.resume = false;
+            request.start_ticks = Some(position_ticks);
+        }
         match self.play(request.clone(), cancel).await {
             Ok(updates) => updates,
             Err(error) => {
@@ -1002,7 +1148,7 @@ impl PlaybackController {
                     Err(error) => {
                         self.last_failed = Some(FailedPlayback {
                             request,
-                            position_ticks: 0,
+                            position_ticks: None,
                             code: error_code(&error),
                             message: Some(error.to_string()),
                         });
@@ -1031,7 +1177,7 @@ impl PlaybackController {
     async fn renegotiate(
         &mut self,
         audio: Option<i32>,
-        subtitle: Option<i32>,
+        subtitle: SubtitleIntent,
         cancel: &CancelToken,
     ) -> Vec<PlaybackUpdate> {
         let Some(active) = self.active.as_ref() else {
@@ -1039,25 +1185,26 @@ impl PlaybackController {
                 text: "Nothing is playing".to_string(),
             }];
         };
-        let mut request = PlayRequest {
+        let subtitle_stream_index = match subtitle {
+            SubtitleIntent::Preserve => active.selection.subtitle_stream_index,
+            SubtitleIntent::Set(index) => index,
+        };
+        let request = PlayRequest {
             item_id: active.item_id.clone(),
             title: active.title.clone(),
             resume: false,
             start_ticks: Some(active.position_ticks),
             audio_stream_index: audio.or(active.selection.audio_stream_index),
-            subtitle_stream_index: subtitle,
-            burn_in_subtitles: subtitle.is_some(),
+            subtitle_stream_index,
+            burn_in_subtitles: subtitle_stream_index.is_some(),
             media_source_id: source_id(&active.selection),
         };
-        if request.subtitle_stream_index.is_none() && subtitle.is_some() {
-            request.subtitle_stream_index = subtitle;
-        }
         match self.play(request.clone(), cancel).await {
             Ok(updates) => updates,
             Err(error) => {
                 self.last_failed = Some(FailedPlayback {
                     request,
-                    position_ticks: 0,
+                    position_ticks: None,
                     code: error_code(&error),
                     message: Some(error.to_string()),
                 });
@@ -1084,7 +1231,7 @@ impl PlaybackController {
             if let Some(request) = &self.last_request {
                 self.last_failed = Some(FailedPlayback {
                     request: request.clone(),
-                    position_ticks: active.position_ticks,
+                    position_ticks: Some(active.position_ticks),
                     code: "playback_failed".to_string(),
                     message: None,
                 });
@@ -1176,6 +1323,7 @@ impl PlaybackController {
                 if let Some(active) = self.active.as_mut() {
                     active.last_progress_at = now;
                     active.last_reported_ticks = position_ticks;
+                    active.next_progress_attempt = None;
                 }
                 self.journal
                     .acknowledge(&user, &item, session.as_deref(), sequence);
@@ -1188,6 +1336,9 @@ impl PlaybackController {
             Err(error) if retryable(&error) => {
                 let mut entry = entry;
                 entry.next_attempt = now + retry_delay(&error, self.config.progress_retry_delay);
+                if let Some(active) = self.active.as_mut() {
+                    active.next_progress_attempt = Some(entry.next_attempt);
+                }
                 self.journal.record(entry);
                 Vec::new()
             }
@@ -1240,6 +1391,7 @@ impl PlaybackController {
                     if let Some(active) = self.active.as_mut() {
                         active.last_progress_at = now;
                         active.last_reported_ticks = entry.position_ticks;
+                        active.next_progress_attempt = None;
                     }
                 }
                 Err(JellyfinError::Unauthorized) => {
@@ -1251,13 +1403,24 @@ impl PlaybackController {
                     entry.attempts = entry.attempts.saturating_add(1);
                     entry.next_attempt =
                         now + retry_delay(&error, self.config.progress_retry_delay);
+                    if let Some(active) = self.active.as_mut() {
+                        active.next_progress_attempt = Some(entry.next_attempt);
+                    }
                     if entry.attempts < self.config.max_progress_retries {
                         self.journal.record(entry);
                     } else {
                         self.journal.remove(entry.sequence);
+                        if let Some(active) = self.active.as_mut() {
+                            active.next_progress_attempt = None;
+                        }
                     }
                 }
-                Err(_) => self.journal.remove(entry.sequence),
+                Err(_) => {
+                    self.journal.remove(entry.sequence);
+                    if let Some(active) = self.active.as_mut() {
+                        active.next_progress_attempt = None;
+                    }
+                }
             }
         }
         updates
@@ -1323,11 +1486,7 @@ impl PlaybackController {
         let code = error.code().to_string();
         let message = Some(error.to_string());
         let item_id = self.active.as_ref().map(|active| active.item_id.clone());
-        let position_ticks = self
-            .active
-            .as_ref()
-            .map(|active| active.position_ticks)
-            .unwrap_or(0);
+        let position_ticks = self.active.as_ref().map(|active| active.position_ticks);
         if let Some(request) = self.last_request.clone() {
             self.last_failed = Some(FailedPlayback {
                 request,

@@ -22,10 +22,10 @@ pub use jellyfin::{
 };
 pub use model::{Action, AppState, Effect, Event, InputOrigin, Mode, Source, StateError};
 pub use playback::{
-    MAX_PROGRESS_AGE, MAX_PROGRESS_JOURNAL, MAX_PROGRESS_RETRIES, PlayRequest, PlaybackCommand,
-    PlaybackConfig, PlaybackController, PlaybackError, PlaybackItem, PlaybackUpdate, ProgressEntry,
-    ProgressJournal, RESUME_END_MARGIN_TICKS, RESUME_MIN_TICKS, TrackChoice, millis_from_ticks,
-    ticks_from_millis,
+    LibraryFilter, MAX_PROGRESS_AGE, MAX_PROGRESS_JOURNAL, MAX_PROGRESS_RETRIES, PlayRequest,
+    PlaybackCommand, PlaybackConfig, PlaybackController, PlaybackError, PlaybackItem,
+    PlaybackUpdate, ProgressEntry, ProgressJournal, RESUME_END_MARGIN_TICKS, RESUME_MIN_TICKS,
+    TrackChoice, millis_from_ticks, ticks_from_millis,
 };
 pub use player::{
     ChildFactory, CommandOutcome, LoadRequest, PlayerCommand, PlayerError, PlayerEvent,

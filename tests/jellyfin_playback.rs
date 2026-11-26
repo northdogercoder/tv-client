@@ -24,13 +24,13 @@ use tv_client::jellyfin::{
 };
 use tv_client::model::Source;
 use tv_client::playback::{
-    MAX_PROGRESS_AGE, PlayRequest, PlaybackCommand, PlaybackConfig, PlaybackController,
-    PlaybackUpdate, ProgressEntry, ProgressJournal, RESUME_MIN_TICKS, millis_from_ticks,
-    ticks_from_millis,
+    LibraryFilter, MAX_PROGRESS_AGE, PlayRequest, PlaybackCommand, PlaybackConfig,
+    PlaybackController, PlaybackUpdate, ProgressEntry, ProgressJournal, RESUME_MIN_TICKS,
+    millis_from_ticks, ticks_from_millis,
 };
 use tv_client::player::{
-    ChildCommand, ChildExit, ChildFactory, ChildMessage, PlayerError, PlayerSession,
-    SupervisedChild, SupervisorConfig,
+    ChildCommand, ChildExit, ChildFactory, ChildMessage, PlayerError, PlayerNotification,
+    PlayerSession, PlayerState, SupervisedChild, SupervisorConfig,
 };
 use tv_client::storage::Storage;
 use tv_client::ui::{Key, MediaItem, PlayerMenu, Screen, UiModel, UiOutcome, UiPlaybackCommand};
@@ -1200,6 +1200,528 @@ fn progress_journal_is_bounded_fresh_and_user_isolated() {
     assert_eq!(isolated.entries()[0].user_id, "user-2");
     isolated.acknowledge("user-2", "item-1", Some("play-1"), 8);
     assert!(isolated.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Resume, generation and track-change regressions.
+// ---------------------------------------------------------------------------
+
+async fn wait_for_command(commands: &Arc<Mutex<Vec<Value>>>, kind: &str) -> Value {
+    for _ in 0..100 {
+        if let Some(value) = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|value| value["type"].as_str() == Some(kind))
+            .cloned()
+        {
+            return value;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {kind} command");
+}
+
+async fn resume_case(played: bool, position_ticks: u64, expected_ms: u64) {
+    let handler = move |request: &MockRequest| match request.path() {
+        "/Users/AuthenticateByName" => MockResponse::json(200, auth_body()),
+        "/Items/item-1" => {
+            let mut item = direct_item(false);
+            item["RunTimeTicks"] = json!(6_000_000_000_u64);
+            item["UserData"] = json!({
+                "Played": played,
+                "PlayCount": 0,
+                "PlaybackPositionTicks": position_ticks,
+                "PlayedPercentage": 0.0
+            });
+            MockResponse::json(200, item)
+        }
+        "/Items/item-1/PlaybackInfo" => {
+            let mut response = direct_playback_info();
+            response["MediaSources"][0]["RunTimeTicks"] = json!(6_000_000_000_u64);
+            MockResponse::json(200, response)
+        }
+        "/Sessions/Playing" => stream_response(),
+        _ => MockResponse::empty(404),
+    };
+    let mut fixture = fixture(handler, PlaybackConfig::default(), 600_000).await;
+    let updates = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::Play(PlayRequest::new("item-1")),
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert!(
+        updates
+            .iter()
+            .any(|update| matches!(update, PlaybackUpdate::Method { .. })),
+        "resume case must negotiate: {updates:?}"
+    );
+    let load = wait_for_command(&fixture.fake.commands, "load").await;
+    assert_eq!(
+        load["start_position_ms"],
+        json!(expected_ms),
+        "played={played} position={position_ticks}"
+    );
+    let request = fixture
+        .server
+        .requests()
+        .into_iter()
+        .find(|request| request.path() == "/Items/item-1/PlaybackInfo")
+        .expect("PlaybackInfo request");
+    let body = request.json();
+    if expected_ms > 0 {
+        assert_eq!(
+            body["StartTimeTicks"],
+            json!(expected_ms * TICKS_PER_MILLISECOND)
+        );
+    } else {
+        assert!(body.get("StartTimeTicks").is_none());
+    }
+    fixture.cancel_handle.cancel();
+}
+
+#[tokio::test]
+async fn resume_positions_follow_played_min_and_end_bounds() {
+    // 10 s: below the 30 s minimum.
+    resume_case(false, 100_000_000, 0).await;
+    // Marked played always restarts.
+    resume_case(true, 300_000_000, 0).await;
+    // 30 s from the end of a 10 minute item: restart.
+    resume_case(false, 5_700_000_000, 0).await;
+    // 50 s into a 10 minute item: resume exactly.
+    resume_case(false, 500_000_000, 50_000).await;
+}
+
+#[tokio::test]
+async fn stale_idle_generation_never_stops_the_replacement() {
+    let mut fixture = fixture(standard_handler, PlaybackConfig::default(), 60_000).await;
+    let request = PlayRequest::new("item-1").from_start();
+    fixture
+        .controller
+        .play(request.clone(), &fixture.cancel)
+        .await
+        .expect("first play");
+    let now = Instant::now();
+    fixture
+        .controller
+        .handle_notification(
+            PlayerNotification::State {
+                generation: 1,
+                state: PlayerState::Loading,
+            },
+            now,
+            &fixture.cancel,
+        )
+        .await;
+    assert_eq!(fixture.controller.active_generation(), Some(1));
+
+    fixture
+        .controller
+        .play(request, &fixture.cancel)
+        .await
+        .expect("replacement play");
+    let stops_before = fixture
+        .server
+        .requests()
+        .iter()
+        .filter(|request| request.path() == "/Sessions/Playing/Stopped")
+        .count();
+
+    let updates = fixture
+        .controller
+        .handle_notification(
+            PlayerNotification::State {
+                generation: 1,
+                state: PlayerState::Loading,
+            },
+            now,
+            &fixture.cancel,
+        )
+        .await;
+    assert!(updates.is_empty());
+    assert_eq!(
+        fixture.controller.active_generation(),
+        None,
+        "stale Loading from the replaced load must not be adopted"
+    );
+
+    let updates = fixture
+        .controller
+        .handle_notification(
+            PlayerNotification::State {
+                generation: 1,
+                state: PlayerState::Idle,
+            },
+            now,
+            &fixture.cancel,
+        )
+        .await;
+    assert!(updates.is_empty(), "stale Idle must not emit: {updates:?}");
+    assert!(fixture.controller.active_item_id().is_some());
+
+    fixture
+        .controller
+        .handle_notification(
+            PlayerNotification::State {
+                generation: 2,
+                state: PlayerState::Loading,
+            },
+            now,
+            &fixture.cancel,
+        )
+        .await;
+    assert_eq!(fixture.controller.active_generation(), Some(2));
+    let updates = fixture
+        .controller
+        .handle_notification(
+            PlayerNotification::State {
+                generation: 1,
+                state: PlayerState::Idle,
+            },
+            now,
+            &fixture.cancel,
+        )
+        .await;
+    assert!(updates.is_empty());
+    assert_eq!(fixture.controller.active_generation(), Some(2));
+
+    let stops_after = fixture
+        .server
+        .requests()
+        .iter()
+        .filter(|request| request.path() == "/Sessions/Playing/Stopped")
+        .count();
+    assert_eq!(stops_before, stops_after, "stale Idle must not report stop");
+    fixture.cancel_handle.cancel();
+}
+
+#[tokio::test]
+async fn audio_change_preserves_the_selected_subtitle() {
+    let mut fixture = fixture(transcode_handler, PlaybackConfig::default(), 60_000).await;
+    let request = PlayRequest {
+        subtitle_stream_index: Some(2),
+        burn_in_subtitles: true,
+        ..PlayRequest::new("item-1").from_start()
+    };
+    fixture
+        .controller
+        .play(request, &fixture.cancel)
+        .await
+        .expect("first play");
+    fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::SelectAudio { index: Some(1) },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    let bodies: Vec<Value> = fixture
+        .server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path() == "/Items/item-1/PlaybackInfo")
+        .map(|request| request.json())
+        .collect();
+    assert_eq!(bodies.len(), 2, "audio change must renegotiate");
+    assert_eq!(bodies[1]["SubtitleStreamIndex"], json!(2));
+    assert_eq!(
+        bodies[1]["AlwaysBurnInSubtitleWhenTranscoding"],
+        json!(true)
+    );
+    assert_eq!(bodies[1]["AudioStreamIndex"], json!(1));
+    fixture.cancel_handle.cancel();
+}
+
+#[tokio::test]
+async fn subtitle_clear_disables_burn_in() {
+    let mut fixture = fixture(transcode_handler, PlaybackConfig::default(), 60_000).await;
+    fixture
+        .controller
+        .play(PlayRequest::new("item-1").from_start(), &fixture.cancel)
+        .await
+        .expect("first play");
+    fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::SelectSubtitle { index: None },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    let bodies: Vec<Value> = fixture
+        .server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path() == "/Items/item-1/PlaybackInfo")
+        .map(|request| request.json())
+        .collect();
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies[1].get("SubtitleStreamIndex").is_none());
+    assert_eq!(
+        bodies[1]["AlwaysBurnInSubtitleWhenTranscoding"],
+        json!(false)
+    );
+    fixture.cancel_handle.cancel();
+}
+
+fn transcode_handler(request: &MockRequest) -> MockResponse {
+    match (request.method.as_str(), request.path()) {
+        (_, "/Users/AuthenticateByName") => MockResponse::json(200, auth_body()),
+        (_, "/Items/item-1") => MockResponse::json(200, direct_item(true)),
+        (_, "/Items/item-1/PlaybackInfo") => MockResponse::json(200, transcode_playback_info()),
+        (_, "/Sessions/Playing")
+        | (_, "/Sessions/Playing/Progress")
+        | (_, "/Sessions/Playing/Stopped") => stream_response(),
+        _ => MockResponse::empty(404),
+    }
+}
+
+#[tokio::test]
+async fn retry_before_start_keeps_resume_position() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let handler = move |request: &MockRequest| match request.path() {
+        "/Users/AuthenticateByName" => MockResponse::json(200, auth_body()),
+        "/Items/item-1" => {
+            let mut item = direct_item(false);
+            item["RunTimeTicks"] = json!(6_000_000_000_u64);
+            item["UserData"] = json!({
+                "Played": false,
+                "PlayCount": 0,
+                "PlaybackPositionTicks": 500_000_000_u64,
+                "PlayedPercentage": 0.0
+            });
+            MockResponse::json(200, item)
+        }
+        "/Items/item-1/PlaybackInfo" => {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                MockResponse::empty(500)
+            } else {
+                let mut response = direct_playback_info();
+                response["MediaSources"][0]["RunTimeTicks"] = json!(6_000_000_000_u64);
+                MockResponse::json(200, response)
+            }
+        }
+        "/Sessions/Playing" => stream_response(),
+        _ => MockResponse::empty(404),
+    };
+    let mut fixture = fixture(handler, PlaybackConfig::default(), 600_000).await;
+    let first = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::Play(PlayRequest::new("item-1")),
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert!(
+        first
+            .iter()
+            .any(|update| matches!(update, PlaybackUpdate::Failed { .. }))
+    );
+    let retried = fixture
+        .controller
+        .handle_command(PlaybackCommand::Retry, Instant::now(), &fixture.cancel)
+        .await;
+    assert!(
+        retried
+            .iter()
+            .any(|update| matches!(update, PlaybackUpdate::Method { .. }))
+    );
+    let load = wait_for_command(&fixture.fake.commands, "load").await;
+    assert_eq!(load["start_position_ms"], json!(50_000));
+    let playback_bodies: Vec<Value> = fixture
+        .server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path() == "/Items/item-1/PlaybackInfo")
+        .map(|request| request.json())
+        .collect();
+    assert_eq!(playback_bodies[1]["StartTimeTicks"], json!(500_000_000_u64));
+    fixture.cancel_handle.cancel();
+}
+
+#[tokio::test]
+async fn retry_after_failure_keeps_backoff_attempts() {
+    let progress_calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&progress_calls);
+    let handler = move |request: &MockRequest| match request.path() {
+        "/Users/AuthenticateByName" => MockResponse::json(200, auth_body()),
+        "/Items/item-1" => MockResponse::json(200, direct_item(true)),
+        "/Items/item-1/PlaybackInfo" => MockResponse::json(200, direct_playback_info()),
+        "/Sessions/Playing" => stream_response(),
+        "/Sessions/Playing/Progress" => {
+            counter.fetch_add(1, Ordering::SeqCst);
+            MockResponse::empty(500)
+        }
+        _ => MockResponse::empty(404),
+    };
+    let config = PlaybackConfig {
+        progress_interval: Duration::from_secs(60),
+        progress_retry_delay: Duration::from_millis(50),
+        max_progress_retries: 5,
+        ..PlaybackConfig::default()
+    };
+    let mut fixture = fixture(handler, config, 60_000).await;
+    fixture
+        .controller
+        .play(PlayRequest::new("item-1").from_start(), &fixture.cancel)
+        .await
+        .expect("play");
+    fixture.controller.seek(20_000, &fixture.cancel).await;
+    let failed_at = Instant::now();
+    assert_eq!(progress_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.controller.journal().len(), 1);
+
+    // Before the backoff expires, a tick must not retry (or reset attempts).
+    fixture.controller.tick(failed_at, &fixture.cancel).await;
+    assert_eq!(progress_calls.load(Ordering::SeqCst), 1);
+    // First retry fails and increments attempts; the snapshot stays.
+    fixture
+        .controller
+        .tick(failed_at + Duration::from_millis(60), &fixture.cancel)
+        .await;
+    assert_eq!(progress_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.controller.journal().entries()[0].attempts, 1);
+    // Still inside the new backoff: no extra request.
+    fixture
+        .controller
+        .tick(failed_at + Duration::from_millis(70), &fixture.cancel)
+        .await;
+    assert_eq!(progress_calls.load(Ordering::SeqCst), 2);
+    fixture
+        .controller
+        .tick(failed_at + Duration::from_millis(120), &fixture.cancel)
+        .await;
+    assert_eq!(progress_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(fixture.controller.journal().entries()[0].attempts, 2);
+    fixture.cancel_handle.cancel();
+}
+
+#[tokio::test]
+async fn next_episode_starts_the_following_episode() {
+    let handler = |request: &MockRequest| match request.path() {
+        "/Users/AuthenticateByName" => MockResponse::json(200, auth_body()),
+        "/Items/item-1" => MockResponse::json(200, direct_item(true)),
+        "/Items/item-2" => MockResponse::json(
+            200,
+            json!({
+                "Id": "item-2",
+                "Name": "Second",
+                "Type": "Episode",
+                "RunTimeTicks": 600_000_000_u64,
+                "SeriesId": "series-1",
+                "IndexNumber": 2,
+                "ParentIndexNumber": 1,
+                "UserData": {"Played": false, "PlaybackPositionTicks": 0}
+            }),
+        ),
+        "/Shows/series-1/Episodes" => MockResponse::json(
+            200,
+            json!({"Items": [
+                {"Id": "item-1", "Name": "Pilot", "Type": "Episode"},
+                {"Id": "item-2", "Name": "Second", "Type": "Episode"}
+            ], "TotalRecordCount": 2}),
+        ),
+        "/Items/item-1/PlaybackInfo" | "/Items/item-2/PlaybackInfo" => {
+            MockResponse::json(200, direct_playback_info())
+        }
+        "/Sessions/Playing" => stream_response(),
+        _ => MockResponse::empty(404),
+    };
+    let mut fixture = fixture(handler, PlaybackConfig::default(), 60_000).await;
+    fixture
+        .controller
+        .play(PlayRequest::new("item-1").from_start(), &fixture.cancel)
+        .await
+        .expect("first episode");
+    fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::NextEpisode,
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert_eq!(fixture.controller.active_item_id(), Some("item-2"));
+    fixture.cancel_handle.cancel();
+}
+
+#[tokio::test]
+async fn library_command_reports_items_and_persistent_errors() {
+    let fail = Arc::new(AtomicBool::new(false));
+    let failing = Arc::clone(&fail);
+    let handler = move |request: &MockRequest| match request.path() {
+        "/Users/AuthenticateByName" => MockResponse::json(200, auth_body()),
+        "/Users/user-1/Items" => {
+            if failing.load(Ordering::SeqCst) {
+                MockResponse::empty(500)
+            } else {
+                MockResponse::json(
+                    200,
+                    json!({"Items": [
+                        {"Id": "item-1", "Name": "Pilot", "Type": "Episode"},
+                        {"Id": "item-2", "Name": "Second", "Type": "Episode"}
+                    ], "TotalRecordCount": 2}),
+                )
+            }
+        }
+        _ => MockResponse::empty(500),
+    };
+    let mut fixture = fixture(handler, PlaybackConfig::default(), 60_000).await;
+    let updates = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadLibrary {
+                filter: LibraryFilter::Jellyfin,
+            },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    let ready = updates
+        .iter()
+        .find_map(|update| match update {
+            PlaybackUpdate::LibraryReady { items, .. } => Some(items.clone()),
+            _ => None,
+        })
+        .expect("library ready");
+    assert_eq!(ready.len(), 2);
+    assert_eq!(ready[0].id, "item-1");
+    assert_eq!(ready[0].title, "Pilot");
+
+    fail.store(true, Ordering::SeqCst);
+    let failed = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::RetryLibrary,
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert!(
+        failed
+            .iter()
+            .any(|update| matches!(update, PlaybackUpdate::LibraryFailed { .. }))
+    );
+
+    fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::Unsupported {
+                code: "unsupported_source".to_string(),
+                message: "YouTube playback is not supported by this build".to_string(),
+            },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert_eq!(fixture.fake.spawns.load(Ordering::SeqCst), 0);
+    fixture.cancel_handle.cancel();
 }
 
 // ---------------------------------------------------------------------------

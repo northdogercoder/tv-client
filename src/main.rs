@@ -85,7 +85,7 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
     let handle = ui.handle();
 
     #[cfg(feature = "gstreamer-player")]
-    start_playback_thread(
+    let playback_thread = start_playback_thread(
         config.clone(),
         state_directory.to_path_buf(),
         command_rx,
@@ -102,9 +102,32 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
         tracing::warn!("native UI built without gstreamer-player; playback is disabled");
     }
 
-    ui.run()?;
+    let result = ui.run();
     shutdown.cancel();
+    #[cfg(feature = "gstreamer-player")]
+    join_playback_thread(playback_thread);
+    result?;
     Ok(())
+}
+
+/// Wait for the controller to finish its final Stop/progress/transcode
+/// release, without blocking the UI process forever.
+#[cfg(all(feature = "native-ui", feature = "gstreamer-player"))]
+fn join_playback_thread(handle: Option<std::thread::JoinHandle<()>>) {
+    use std::time::{Duration, Instant};
+
+    let Some(handle) = handle else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+    } else {
+        tracing::warn!("playback thread did not stop within 8 s");
+    }
 }
 
 /// Translate a local UI command into a controller command.
@@ -113,13 +136,17 @@ fn controller_command(
     command: &tv_client::ui::UiCommand,
 ) -> Option<tv_client::playback::PlaybackCommand> {
     use tv_client::model::{Action, Direction};
-    use tv_client::playback::{PlayRequest, PlaybackCommand};
-    use tv_client::ui::{UiCommand, UiPlaybackCommand};
+    use tv_client::playback::{LibraryFilter, PlayRequest, PlaybackCommand};
+    use tv_client::ui::{SourceFilter, UiCommand, UiPlaybackCommand};
 
     match command {
         UiCommand::Action(Action::PlayJellyfin { item_id }) => {
             Some(PlaybackCommand::Play(PlayRequest::new(item_id.clone())))
         }
+        UiCommand::Action(Action::PlayYoutube { .. }) => Some(PlaybackCommand::Unsupported {
+            code: "unsupported_source".to_string(),
+            message: "YouTube playback is not supported by this build".to_string(),
+        }),
         UiCommand::Action(Action::SetPaused { paused }) => Some(if *paused {
             PlaybackCommand::Pause
         } else {
@@ -142,10 +169,17 @@ fn controller_command(
         UiCommand::Playback(UiPlaybackCommand::SelectSubtitle { index }) => {
             Some(PlaybackCommand::SelectSubtitle { index: *index })
         }
-        UiCommand::Action(_)
-        | UiCommand::ApprovePairing { .. }
-        | UiCommand::Retry
-        | UiCommand::LoadLibrary { .. } => None,
+        UiCommand::Retry => Some(PlaybackCommand::RetryLibrary),
+        UiCommand::LoadLibrary { filter } => Some(match *filter {
+            SourceFilter::All | SourceFilter::Jellyfin => PlaybackCommand::LoadLibrary {
+                filter: LibraryFilter::Jellyfin,
+            },
+            SourceFilter::YouTube => PlaybackCommand::Unsupported {
+                code: "unsupported_source".to_string(),
+                message: "YouTube playback is not supported by this build".to_string(),
+            },
+        }),
+        UiCommand::Action(_) | UiCommand::ApprovePairing { .. } => None,
     }
 }
 
@@ -157,7 +191,7 @@ fn start_playback_thread(
     commands: tokio::sync::mpsc::Receiver<tv_client::playback::PlaybackCommand>,
     shutdown: tv_client::state::ShutdownSignal,
     ui: tv_client::ui::UiHandle,
-) {
+) -> Option<std::thread::JoinHandle<()>> {
     let thread = std::thread::Builder::new()
         .name("tv-playback".to_string())
         .spawn(move || {
@@ -179,6 +213,14 @@ fn start_playback_thread(
                     Ok(storage) => storage,
                     Err(error) => {
                         tracing::error!(%error, "cannot open playback storage");
+                        run_unavailable(
+                            commands,
+                            ui,
+                            shutdown,
+                            "jellyfin_unavailable",
+                            "Playback storage is unavailable",
+                        )
+                        .await;
                         return;
                     }
                 };
@@ -190,10 +232,15 @@ fn start_playback_thread(
                     Ok(client) => client,
                     Err(error) => {
                         tracing::warn!(%error, "Jellyfin is not configured; playback disabled");
-                        ui.apply_playback_update(playback_failure(
+                        ui.set_library_error("Jellyfin is not configured".to_string());
+                        run_unavailable(
+                            commands,
+                            ui,
+                            shutdown,
                             "jellyfin_unconfigured",
                             "Jellyfin is not configured",
-                        ));
+                        )
+                        .await;
                         return;
                     }
                 };
@@ -201,20 +248,28 @@ fn start_playback_thread(
                 match client.restore_session(&mut storage, &cancel).await {
                     Ok(true) => {}
                     Ok(false) => {
-                        ui.apply_playback_update(playback_failure(
+                        cancel_handle.cancel();
+                        run_unavailable(
+                            commands,
+                            ui,
+                            shutdown,
                             "jellyfin_sign_in",
                             "Jellyfin sign-in required",
-                        ));
-                        cancel_handle.cancel();
+                        )
+                        .await;
                         return;
                     }
                     Err(error) => {
                         tracing::warn!(%error, "Jellyfin session restore failed");
-                        ui.apply_playback_update(playback_failure(
+                        cancel_handle.cancel();
+                        run_unavailable(
+                            commands,
+                            ui,
+                            shutdown,
                             "jellyfin_unavailable",
                             "Jellyfin is unavailable",
-                        ));
-                        cancel_handle.cancel();
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -242,11 +297,15 @@ fn start_playback_thread(
                     Ok(factory) => factory,
                     Err(error) => {
                         tracing::warn!(%error, "native player binary is unavailable");
-                        ui.apply_playback_update(playback_failure(
+                        cancel_handle.cancel();
+                        run_unavailable(
+                            commands,
+                            ui,
+                            shutdown,
                             "player_unavailable",
                             "Native player is unavailable",
-                        ));
-                        cancel_handle.cancel();
+                        )
+                        .await;
                         return;
                     }
                 };
@@ -259,11 +318,15 @@ fn start_playback_thread(
                     Ok(session) => session,
                     Err(error) => {
                         tracing::warn!(%error, "cannot start the player supervisor");
-                        ui.apply_playback_update(playback_failure(
+                        cancel_handle.cancel();
+                        run_unavailable(
+                            commands,
+                            ui,
+                            shutdown,
                             "player_unavailable",
                             "Native player is unavailable",
-                        ));
-                        cancel_handle.cancel();
+                        )
+                        .await;
                         return;
                     }
                 };
@@ -275,11 +338,15 @@ fn start_playback_thread(
                     Ok(controller) => controller,
                     Err(error) => {
                         tracing::warn!(%error, "cannot start the playback controller");
-                        ui.apply_playback_update(playback_failure(
+                        cancel_handle.cancel();
+                        run_unavailable(
+                            commands,
+                            ui,
+                            shutdown,
                             "controller_unavailable",
                             "Playback controller is unavailable",
-                        ));
-                        cancel_handle.cancel();
+                        )
+                        .await;
                         return;
                     }
                 };
@@ -297,8 +364,42 @@ fn start_playback_thread(
                 cancel_handle.cancel();
             });
         });
-    if thread.is_err() {
-        tracing::error!("cannot spawn the playback thread");
+    match thread {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            tracing::error!(%error, "cannot spawn the playback thread");
+            None
+        }
+    }
+}
+
+#[cfg(all(feature = "native-ui", feature = "gstreamer-player"))]
+async fn run_unavailable(
+    mut commands: tokio::sync::mpsc::Receiver<tv_client::playback::PlaybackCommand>,
+    ui: tv_client::ui::UiHandle,
+    mut shutdown: tv_client::state::ShutdownSignal,
+    code: &'static str,
+    message: &'static str,
+) {
+    use tv_client::playback::PlaybackCommand;
+
+    ui.set_library_error(message.to_string());
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            command = commands.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                match command {
+                    PlaybackCommand::LoadLibrary { .. } | PlaybackCommand::RetryLibrary => {
+                        ui.set_library_error(message.to_string());
+                    }
+                    _ => ui.apply_playback_update(playback_failure(code, message)),
+                }
+            }
+        }
     }
 }
 

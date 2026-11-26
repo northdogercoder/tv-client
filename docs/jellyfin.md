@@ -203,8 +203,8 @@ path.
 | Native child H.264 direct/remux | NOT VERIFIED: the only real item negotiated Transcode |
 | Native child HEVC transcode | NOT VERIFIED |
 | Subtitle burn-in | NOT VERIFIED on the panel; selection is forced to transcode by the mock tests |
-| Resume | Not exercised against the real item; resume ticks and 30 s bounds are covered offline |
-| Network interruption | Not exercised against the real server; retry journal/freshness is covered offline |
+| Resume | PASS offline mock matrix: played, below 30 s, within 30 s of the end, and a normal 50 s resume all select the expected start position; the real server item was not resumed in this change |
+| Network interruption | Not exercised against the real server; retry journal/freshness/backoff is covered offline |
 
 The GStreamer-feature live test (`live_pi_playback_short_run`) initially gave up
 5 s after the child reported Tracks; that was a test-window bug. With the full
@@ -295,7 +295,9 @@ be committed, printed or included in test fixtures.
 scripted child cover the device-profile body, PlaybackInfo source selection,
 tick conversion and bounds, the start/progress/stop ordering, 401 and
 cancellation failures, cross-origin stream URLs and HTTP redirect rejection,
-progress retry freshness/user isolation, and transcode teardown. The two live
+progress retry freshness/user isolation/backoff, transcode teardown, stale load
+generations, resume positions (played, below minimum, near end and normal),
+audio/subtitle renegotiation and retry/next-episode commands. The two live
 tests are `#[ignore]`:
 
 ```sh
