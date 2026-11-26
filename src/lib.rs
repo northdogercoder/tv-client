@@ -5,11 +5,16 @@
 //! none of them carry an implementation in this baseline.
 
 pub mod config;
+pub mod jellyfin;
 pub mod model;
 pub mod state;
 pub mod storage;
 
 pub use config::ClientConfig;
+pub use jellyfin::{
+    BaseItem, CancelHandle, CancelToken, JellyfinClient, JellyfinError, Page, QueryResult, Session,
+    cancellation,
+};
 pub use model::{Action, AppState, Effect, Event, InputOrigin, Mode, Source, StateError};
 pub use state::{Reducer, event_channel, run_state_loop, shutdown_channel};
 pub use storage::{LastView, ProgressRecord, Storage, StorageError};
