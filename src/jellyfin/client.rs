@@ -383,6 +383,30 @@ impl JellyfinClient {
         Ok(())
     }
 
+    pub(crate) async fn post_json_empty<B: Serialize>(
+        &self,
+        url: Url,
+        body: &B,
+        cancel: &CancelToken,
+    ) -> Result<(), JellyfinError> {
+        let encoded = serde_json::to_vec(body).map_err(|_| JellyfinError::InvalidRequest)?;
+        let response = self
+            .send_raw(Method::POST, url, Some(encoded), cancel)
+            .await?;
+        let _ = read_body_limited(response, 64 * 1024, cancel).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_no_content(
+        &self,
+        url: Url,
+        cancel: &CancelToken,
+    ) -> Result<(), JellyfinError> {
+        let response = self.send_raw(Method::DELETE, url, None, cancel).await?;
+        let _ = read_body_limited(response, 64 * 1024, cancel).await?;
+        Ok(())
+    }
+
     pub(crate) async fn send_raw(
         &self,
         method: Method,

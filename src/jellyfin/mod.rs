@@ -36,6 +36,7 @@ mod error;
 mod image;
 mod library;
 mod models;
+mod playback;
 
 pub use auth::{QuickConnectInitiation, QuickConnectPoll};
 pub use cancel::{CancelHandle, CancelToken, cancellation};
@@ -50,5 +51,15 @@ pub use models::{
     AuthenticationResult, BaseItem, DEFAULT_IMAGE_HEIGHT, DEFAULT_IMAGE_WIDTH, ImageRequest,
     ImageType, ItemFilter, MAX_PAGE_SIZE, MAX_REQUESTED_IMAGE_DIMENSION, MAX_SEARCH_TERM_BYTES,
     MediaSourceInfo, MediaStreamInfo, PAGE_SIZE, Page, PlaybackInfoResponse, QueryResult,
-    SortOrder, UserDataUpdate, UserDto, UserItemData,
+    SortOrder, StreamUrl, UserDataUpdate, UserDto, UserItemData,
+};
+pub use playback::{
+    CodecProfile, DIRECT_PLAY_CONTAINER, DeviceProfile, DirectPlayProfile, MAX_AUDIO_CHANNELS,
+    MAX_FRAME_RATE, MAX_H264_LEVEL, MAX_PLAYBACK_START_TICKS, MAX_STREAMING_BITRATE,
+    MAX_VIDEO_HEIGHT, MAX_VIDEO_WIDTH, MediaSelection, MediaStreamChoice, PlayMethod,
+    PlaybackInfoOptions, PlaybackInfoRequest, PlaybackProgressInfo, PlaybackStartInfo,
+    PlaybackStopInfo, ProfileCondition, ProfileConditionProperty, ProfileConditionType,
+    ProfileType, START_STREAMING_BITRATE, SelectionError, SelectionOptions, SubtitleDeliveryMethod,
+    SubtitleProfile, TICKS_PER_MILLISECOND, TRANSCODE_CONTAINER, TranscodingProfile,
+    device_profile, select_media_source,
 };

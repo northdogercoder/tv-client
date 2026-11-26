@@ -9,6 +9,7 @@
 pub mod config;
 pub mod jellyfin;
 pub mod model;
+pub mod playback;
 pub mod player;
 pub mod state;
 pub mod storage;
@@ -20,6 +21,12 @@ pub use jellyfin::{
     cancellation,
 };
 pub use model::{Action, AppState, Effect, Event, InputOrigin, Mode, Source, StateError};
+pub use playback::{
+    LibraryFilter, MAX_PROGRESS_AGE, MAX_PROGRESS_JOURNAL, MAX_PROGRESS_RETRIES, PlayRequest,
+    PlaybackCommand, PlaybackConfig, PlaybackController, PlaybackError, PlaybackItem,
+    PlaybackUpdate, ProgressEntry, ProgressJournal, RESUME_END_MARGIN_TICKS, RESUME_MIN_TICKS,
+    TrackChoice, millis_from_ticks, ticks_from_millis,
+};
 pub use player::{
     ChildFactory, CommandOutcome, LoadRequest, PlayerCommand, PlayerError, PlayerEvent,
     PlayerFailure, PlayerMachine, PlayerNotification, PlayerRequest, PlayerSession, PlayerState,

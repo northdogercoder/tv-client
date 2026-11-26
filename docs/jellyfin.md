@@ -103,7 +103,114 @@ rejects zero or more than 200 items and is emitted as `StartIndex` and `Limit`.
 album IDs, artists, indexes, duration ticks, overview, image tags and user
 metadata. It deliberately has no `Path`, stream URL or transcoding URL fields.
 `PlaybackInfoResponse` exposes source identifiers, capabilities and stream
-descriptors, not URLs.
+descriptors, not file paths.
+
+## PlaybackInfo negotiation
+
+`JellyfinClient::playback_info_with` posts a typed
+`PlaybackInfoRequest` to `POST /Items/{itemId}/PlaybackInfo?UserId=...`. The
+body carries the user, maximum bitrate, resume ticks, optional stream/source
+selection and a device profile that describes only what the C006 player has
+proven on the target hardware:
+
+| Capability | Profile value |
+|---|---|
+| Direct-play container/codecs | `mp4`, H.264 8-bit SDR, AAC-LC stereo |
+| Direct-play bounds | 1920x1080, 30 fps, H.264 level 4.1 |
+| Transcode output | HLS, H.264 video, AAC stereo, MPEG-TS segments |
+| Streaming bitrate | starts at 6,000,000 bit/s, hard cap 10,000,000 bit/s |
+| Subtitles | server burn-in (`Method: Encode`) only |
+| Live streams | `AutoOpenLiveStream: false` |
+
+HEVC, AV1, VP9, HDR, 10-bit, interlaced, over-1080p, over-30 fps and
+non-AAC/multichannel audio therefore negotiate a transcode. The request has
+`EnableDirectPlay`, `EnableDirectStream`, `EnableTranscoding` and stream-copy
+flags enabled so Jellyfin can choose remux when the proven codecs fit, and
+`AlwaysBurnInSubtitleWhenTranscoding` when a subtitle stream is selected or
+burn-in is requested. A selected subtitle always forces a transcode because
+the native child does not render subtitle overlays.
+
+`select_media_source` (also in `jellyfin::playback`) scores direct play above
+remux above transcode, preserves server source order among equal scores, and
+returns a typed `SelectionError` when the server reports
+`NotAllowed`/`NoCompatibleStream`/`RateLimitExceeded` or no source can be used.
+A direct-play URL is built locally as
+`/Videos/{itemId}/stream?static=true&mediaSourceId=...&playSessionId=...` below
+the configured base path. Remux/transcode URLs must come from the server.
+
+`StreamUrl` keeps every server URL opaque (`Debug` prints
+`StreamUrl(<redacted>)`) and only resolves it when the scheme is HTTP(S), the
+origin equals the configured Jellyfin origin, and the path stays below the
+configured base path. `playback_info_with` enforces that allowlist for every
+URL in the response before the controller can load it; cross-origin or
+out-of-prefix values return `JellyfinError::UnexpectedRedirect`. Neither the
+client nor the controller rewrites a stream through a proxy or another host.
+
+## Controller, progress and ticks
+
+`playback::PlaybackController` owns one `JellyfinClient` and one C006
+`PlayerSession`. Starting an item:
+
+1. reads `GET /Items/{itemId}` and the embedded (or explicit) user data;
+2. resumes from `PlaybackPositionTicks` when the position is at least 30 s and
+   not within 30 s of the end, and is not marked played;
+3. negotiates PlaybackInfo and selects one compatible source;
+4. stops any previous playback, loads the child with an `Authorization`
+   header and a bounded start position, and reports
+   `POST /Sessions/Playing` once;
+5. reports `POST /Sessions/Playing/Progress` every 10 s, on pause/resume and
+   after a seek; and
+6. reports `POST /Sessions/Playing/Stopped` exactly once on back, stop,
+   natural end or failure, then releases the transcode.
+
+Jellyfin uses 100 ns ticks. Conversion is explicit and bounded:
+`ticks_from_millis` rejects positions beyond 24 hours and cannot overflow;
+`millis_from_ticks` floors to milliseconds and saturates at the 24 hour player
+bound. Server resume ticks are never passed to the child as a 64-bit tick
+value.
+
+Progress reporting is best effort but not lossy for transient failures. A
+failed snapshot that is retryable (timeout, network error, 429, HTTP 5xx)
+enters a bounded (16 entry) `ProgressJournal`. Entries carry the user, item,
+play session, sequence, timestamp and attempt count. A newer snapshot for the
+same play session replaces the older one; retries always send the freshest
+active position, never the stale snapshot; entries older than 120 s or with
+five failed attempts are dropped; and an acknowledged snapshot removes older
+entries for that play session. The journal is cleared on user change and on a
+401, so a token failure cannot leak one user's progress into another session.
+`/Sessions/Playing/Stopped` is sent once and is not journaled.
+
+Teardown is typed and idempotent: the controller sends the final Stopped
+report, sends `PlayerCommand::Stop` to the supervisor, clears journal entries
+for that play session and, for transcodes, makes a best-effort
+`DELETE /Videos/ActiveEncodings?deviceId=...&playSessionId=...`. Jellyfin 12.4
+does not list that endpoint in its OpenAPI document, so a 404/405 is treated as
+"not supported"; the documented Stopped report remains the primary release
+path. Shutdown, command-channel closure and player errors all take the same
+path.
+
+## Real Pi playback matrix
+
+> Environment: Raspberry Pi 3B, labwc 0.20.2, 1080p HDMI, GStreamer 1.26.2,
+> Rust 1.100.0, limited non-admin Jellyfin user. Runs were intentionally short;
+> no soak was performed. Credentials stayed in
+> `~/.config/tv-client/jellyfin-test.env`.
+
+| Check | Result |
+|---|---|
+| Live PlaybackInfo against Jellyfin 12.4.0 | PASS: first library video negotiated `Transcode` from source `a99f60bc456e7d5834792a3a046a2c1a`; start, progress and stopped reports all returned success |
+| Native child Transcode short run | **PASS**: 19.5 s on the Pi; position updates observed, pause/resume/stop exercised, controller reported `Transcode`. The panel-visible codec was not independently logged. |
+| Native child H.264 direct/remux | NOT VERIFIED: the only real item negotiated Transcode |
+| Native child HEVC transcode | NOT VERIFIED |
+| Subtitle burn-in | NOT VERIFIED on the panel; selection is forced to transcode by the mock tests |
+| Resume | PASS offline mock matrix: played, below 30 s, within 30 s of the end, and a normal 50 s resume all select the expected start position; the real server item was not resumed in this change |
+| Network interruption | Not exercised against the real server; retry journal/freshness/backoff is covered offline |
+
+The GStreamer-feature live test (`live_pi_playback_short_run`) initially gave up
+5 s after the child reported Tracks; that was a test-window bug. With the full
+45 s deadline it reached Position in 19.5 s with a panel-visible run. The
+negotiation/session-reporting test and the offline controller suite also pass.
+Direct-play/remux, HEVC and subtitle burn-in remain open.
 
 ## Artwork cache
 
@@ -181,3 +288,30 @@ The reference test server is Jellyfin 12.4.0 at `http://jellyfin:8096` with
 Quick Connect enabled and a limited non-admin user. Credentials live outside
 the repository in `~/.config/tv-client/jellyfin-test.env` (0600) and must never
 be committed, printed or included in test fixtures.
+
+### Playback tests
+
+`tests/jellyfin_playback.rs` is offline by default. Its local mock server and
+scripted child cover the device-profile body, PlaybackInfo source selection,
+tick conversion and bounds, the start/progress/stop ordering, 401 and
+cancellation failures, cross-origin stream URLs and HTTP redirect rejection,
+progress retry freshness/user isolation/backoff, transcode teardown, stale load
+generations, resume positions (played, below minimum, near end and normal),
+audio/subtitle renegotiation and retry/next-episode commands. The two live
+tests are `#[ignore]`:
+
+```sh
+# Negotiation and session reporting against the real 12.4 server.
+JELLYFIN_URL=http://jellyfin:8096 JELLYFIN_USER=test JELLYFIN_PASS=... \
+cargo test --locked --no-default-features --test jellyfin_playback -- --ignored \
+  live_jellyfin_playback_negotiation
+
+# Native child run on the Pi (needs the GStreamer feature and the active labwc
+# Wayland display); TV_LIVE_ITEM optionally selects one library item.
+XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 \
+  cargo test --features gstreamer-player --test jellyfin_playback -- --ignored \
+  live_pi_playback_short_run
+```
+
+Both read credentials only from the environment; no token or password appears
+in output, fixtures or panic messages.

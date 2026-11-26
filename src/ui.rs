@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::model::{
     Action, AppState, Direction, InputOrigin, Mode, Source, is_valid_item_id, is_valid_youtube_id,
 };
+use crate::playback::{LibraryFilter, PlaybackUpdate};
 
 /// Number of entries on the home screen.
 pub const HOME_ROW_COUNT: usize = 5;
@@ -52,6 +53,62 @@ impl Key {
             Self::Up | Self::Down | Self::Left | Self::Right | Self::Backspace
         )
     }
+}
+
+/// Maximum continue-watching entries retained by the home screen.
+pub const MAX_CONTINUE_WATCHING: usize = 8;
+/// Largest accepted continue-watching title.
+const MAX_RESUME_TITLE_CHARS: usize = 80;
+
+/// Controller command emitted by local player input.
+///
+/// These are deliberately separate from wire [`Action`] values: they need
+/// playback negotiation state that only the controller owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiPlaybackCommand {
+    /// Retry the last failed playback.
+    Retry,
+    /// Play the next episode of the current series.
+    NextEpisode,
+    /// Select an audio stream by index.
+    SelectAudio {
+        /// Stream index, or `None` for the server default.
+        index: Option<i32>,
+    },
+    /// Select or disable subtitles.
+    SelectSubtitle {
+        /// Stream index, or `None` to disable subtitles.
+        index: Option<i32>,
+    },
+}
+
+/// Player menu overlay currently owned by the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerMenu {
+    /// Subtitle track chooser.
+    Subtitles,
+    /// Audio track chooser.
+    Audio,
+}
+
+impl PlayerMenu {
+    /// Stable label used by the Slint overlay.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Subtitles => "Subtitles",
+            Self::Audio => "Audio",
+        }
+    }
+}
+
+/// One player track row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiTrack {
+    /// Stream index.
+    pub index: i32,
+    /// Display label.
+    pub label: String,
 }
 
 /// One input event, tagged with its trust boundary.
@@ -140,6 +197,13 @@ pub const fn source_label(source: Source) -> &'static str {
         Source::YouTube => "YouTube",
         Source::AirPlay => "AirPlay",
         Source::WebRtc => "WebRTC",
+    }
+}
+
+fn library_source_filter(filter: LibraryFilter) -> SourceFilter {
+    match filter {
+        LibraryFilter::Jellyfin => SourceFilter::Jellyfin,
+        LibraryFilter::ContinueWatching => SourceFilter::All,
     }
 }
 
@@ -292,6 +356,8 @@ pub enum UiOutcome {
     ApprovePairing { request_id: Uuid },
     /// Ask the owner to retry the current library load.
     Retry,
+    /// Ask the controller to act on the active playback.
+    Playback(UiPlaybackCommand),
     /// The prompt or search field was closed.
     Dismissed,
     /// The screen or focus changed without producing a reducer action.
@@ -374,11 +440,20 @@ impl RepeatThrottle {
 struct PlayerView {
     title: String,
     source: Option<Source>,
+    method: String,
     position_ms: u64,
     duration_ms: Option<u64>,
     paused: bool,
     loading: bool,
     error: Option<String>,
+    audio_tracks: Vec<UiTrack>,
+    subtitle_tracks: Vec<UiTrack>,
+    selected_audio: Option<i32>,
+    selected_subtitle: Option<i32>,
+    next_episode: Option<MediaItem>,
+    retry_available: bool,
+    menu: Option<PlayerMenu>,
+    menu_focus: usize,
 }
 
 impl Default for PlayerView {
@@ -386,11 +461,20 @@ impl Default for PlayerView {
         Self {
             title: "Nothing playing".to_owned(),
             source: None,
+            method: String::new(),
             position_ms: 0,
             duration_ms: None,
             paused: false,
             loading: false,
             error: None,
+            audio_tracks: Vec::new(),
+            subtitle_tracks: Vec::new(),
+            selected_audio: None,
+            selected_subtitle: None,
+            next_episode: None,
+            retry_available: false,
+            menu: None,
+            menu_focus: 0,
         }
     }
 }
@@ -510,6 +594,7 @@ pub struct UiModel {
     modal: Option<PairPrompt>,
     throttle: RepeatThrottle,
     resume: Option<MediaItem>,
+    continue_watching: Vec<MediaItem>,
 }
 
 impl Default for UiModel {
@@ -526,6 +611,7 @@ impl Default for UiModel {
             modal: None,
             throttle: RepeatThrottle::default(),
             resume: None,
+            continue_watching: Vec::new(),
         }
     }
 }
@@ -649,14 +735,46 @@ impl UiModel {
     }
 
     /// Resume item shown by the first home row.
+    ///
+    /// An explicitly supplied resume item wins; otherwise the first
+    /// continue-watching entry is offered.
     #[must_use]
     pub fn resume_item(&self) -> Option<&MediaItem> {
-        self.resume.as_ref()
+        self.resume
+            .as_ref()
+            .or_else(|| self.continue_watching.first())
     }
 
-    /// Set or clear the resume item.
+    /// Set or clear the explicit resume item.
     pub fn set_resume(&mut self, item: Option<MediaItem>) {
         self.resume = item;
+    }
+
+    /// Bounded continue-watching entries from the controller.
+    #[must_use]
+    pub fn continue_watching(&self) -> &[MediaItem] {
+        &self.continue_watching
+    }
+
+    /// Replace continue-watching entries, bounded and title-sanitized.
+    pub fn set_continue_watching(&mut self, items: Vec<MediaItem>) {
+        self.continue_watching = items
+            .into_iter()
+            .take(MAX_CONTINUE_WATCHING)
+            .map(|mut item| {
+                item.title = sanitize(&item.title, MAX_RESUME_TITLE_CHARS, "Continue watching");
+                item
+            })
+            .collect();
+        self.refresh_status();
+    }
+
+    /// Label for the resume row, or an empty string when nothing is queued.
+    #[must_use]
+    pub fn resume_title(&self) -> &str {
+        self.resume_item()
+            .map(|item| item.title.as_str())
+            .unwrap_or_default()
     }
 
     /// Player title.
@@ -669,6 +787,122 @@ impl UiModel {
     #[must_use]
     pub fn player_source_label(&self) -> &'static str {
         self.player.source.map(source_label).unwrap_or("--")
+    }
+
+    /// Negotiated play method text, for example `Direct play`.
+    #[must_use]
+    pub fn player_method(&self) -> &str {
+        &self.player.method
+    }
+
+    /// Audio tracks offered by the controller.
+    #[must_use]
+    pub fn audio_tracks(&self) -> &[UiTrack] {
+        &self.player.audio_tracks
+    }
+
+    /// Subtitle tracks offered by the controller.
+    #[must_use]
+    pub fn subtitle_tracks(&self) -> &[UiTrack] {
+        &self.player.subtitle_tracks
+    }
+
+    /// Selected audio stream index.
+    #[must_use]
+    pub const fn selected_audio(&self) -> Option<i32> {
+        self.player.selected_audio
+    }
+
+    /// Selected subtitle stream index.
+    #[must_use]
+    pub const fn selected_subtitle(&self) -> Option<i32> {
+        self.player.selected_subtitle
+    }
+
+    /// Next episode offered after a natural end.
+    #[must_use]
+    pub fn next_episode(&self) -> Option<&MediaItem> {
+        self.player.next_episode.as_ref()
+    }
+
+    /// Whether the error screen offers a retry.
+    #[must_use]
+    pub const fn retry_available(&self) -> bool {
+        self.player.retry_available
+    }
+
+    /// Open player track menu, if any.
+    #[must_use]
+    pub const fn player_menu(&self) -> Option<PlayerMenu> {
+        self.player.menu
+    }
+
+    /// Focused row inside the open track menu.
+    #[must_use]
+    pub const fn player_menu_focus(&self) -> usize {
+        self.player.menu_focus
+    }
+
+    /// Rows of the open menu. The first row disables subtitles when the menu
+    /// is the subtitle chooser.
+    #[must_use]
+    pub fn player_menu_rows(&self) -> Vec<UiTrack> {
+        let Some(menu) = self.player.menu else {
+            return Vec::new();
+        };
+        let tracks = match menu {
+            PlayerMenu::Subtitles => &self.player.subtitle_tracks,
+            PlayerMenu::Audio => &self.player.audio_tracks,
+        };
+        let mut rows = Vec::with_capacity(tracks.len() + 1);
+        if menu == PlayerMenu::Subtitles {
+            rows.push(UiTrack {
+                index: -1,
+                label: "Off".to_string(),
+            });
+        }
+        rows.extend(tracks.iter().cloned());
+        rows
+    }
+
+    /// Install tracks and selections reported by the controller.
+    pub fn set_player_tracks(
+        &mut self,
+        audio: Vec<UiTrack>,
+        subtitles: Vec<UiTrack>,
+        selected_audio: Option<i32>,
+        selected_subtitle: Option<i32>,
+    ) {
+        self.player.audio_tracks = audio;
+        self.player.subtitle_tracks = subtitles;
+        self.player.selected_audio = selected_audio;
+        self.player.selected_subtitle = selected_subtitle;
+        self.player.menu = None;
+        self.player.menu_focus = 0;
+        self.refresh_status();
+    }
+
+    /// Set the next episode offered by the controller.
+    pub fn set_next_episode(&mut self, item: Option<MediaItem>) {
+        self.player.next_episode = item;
+    }
+
+    /// Set whether the error state offers retry.
+    pub const fn set_retry_available(&mut self, available: bool) {
+        self.player.retry_available = available;
+    }
+
+    /// Set the negotiated play method label.
+    pub fn set_player_method(&mut self, method: &str) {
+        self.player.method = sanitize(method, 32, "");
+    }
+
+    /// Move the open track-menu focus.
+    pub fn set_player_menu_focus(&mut self, index: usize) {
+        let rows = self.player_menu_rows().len();
+        if rows > 0 {
+            self.player.menu_focus = index.min(rows - 1);
+        }
     }
 
     /// Whether playback is paused.
@@ -890,6 +1124,8 @@ impl UiModel {
                 }
                 self.player.loading = false;
                 self.player.error = None;
+                self.player.menu = None;
+                self.player.menu_focus = 0;
                 self.refresh_status();
             }
             Mode::Browsing => {
@@ -902,6 +1138,7 @@ impl UiModel {
                 self.screen = Screen::Player;
                 self.player.loading = true;
                 self.player.error = None;
+                self.player.menu = None;
                 self.refresh_status();
             }
             Mode::Playing | Mode::Paused => {
@@ -933,6 +1170,161 @@ impl UiModel {
                         .unwrap_or_else(|| "unknown playback error".to_owned()),
                 );
                 self.refresh_status();
+            }
+        }
+    }
+
+    /// Project a controller update onto the player screen.
+    ///
+    /// This performs no I/O; the controller runs on its own thread and posts
+    /// updates through [`UiHandle`] on the Slint event loop.
+    pub fn apply_playback_update(&mut self, update: &PlaybackUpdate) {
+        match update {
+            PlaybackUpdate::Loading { item_id, title } => {
+                self.screen = Screen::Player;
+                self.player.title = title.clone().unwrap_or_else(|| format!("Item {item_id}"));
+                self.player.source = Some(Source::Jellyfin);
+                self.player.method.clear();
+                self.player.position_ms = 0;
+                self.player.duration_ms = None;
+                self.player.paused = false;
+                self.player.loading = true;
+                self.player.error = None;
+                self.player.audio_tracks.clear();
+                self.player.subtitle_tracks.clear();
+                self.player.selected_audio = None;
+                self.player.selected_subtitle = None;
+                self.player.next_episode = None;
+                self.player.retry_available = false;
+                self.player.menu = None;
+                self.player_focus = 0;
+                self.status = format!("Opening {}", self.player.title);
+            }
+            PlaybackUpdate::Position {
+                item_id: _,
+                position_ms,
+                duration_ms,
+                paused,
+            } => {
+                self.screen = Screen::Player;
+                self.player.loading = false;
+                self.player.error = None;
+                self.player.position_ms = *position_ms;
+                self.player.duration_ms = *duration_ms;
+                self.player.paused = *paused;
+                self.refresh_status();
+            }
+            PlaybackUpdate::Method { method } => {
+                self.player.method = method.label().to_string();
+                self.refresh_status();
+            }
+            PlaybackUpdate::Tracks {
+                audio,
+                subtitles,
+                selected_audio,
+                selected_subtitle,
+            } => {
+                self.player.audio_tracks = audio
+                    .iter()
+                    .map(|track| UiTrack {
+                        index: track.index,
+                        label: sanitize(&track.label, 64, "Track"),
+                    })
+                    .collect();
+                self.player.subtitle_tracks = subtitles
+                    .iter()
+                    .map(|track| UiTrack {
+                        index: track.index,
+                        label: sanitize(&track.label, 64, "Track"),
+                    })
+                    .collect();
+                self.player.selected_audio = *selected_audio;
+                self.player.selected_subtitle = *selected_subtitle;
+                self.player.menu = None;
+                self.player.menu_focus = 0;
+            }
+            PlaybackUpdate::LibraryReady { filter, items } => {
+                if self.screen == Screen::Library {
+                    self.open_library(library_source_filter(*filter));
+                    self.set_library_items(
+                        items
+                            .iter()
+                            .map(|item| {
+                                MediaItem::new(
+                                    Source::Jellyfin,
+                                    item.id.clone(),
+                                    item.title.clone(),
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            PlaybackUpdate::LibraryFailed { filter, message } => {
+                if self.screen == Screen::Library {
+                    self.open_library(library_source_filter(*filter));
+                    self.set_library_error(message);
+                }
+            }
+            PlaybackUpdate::Ended {
+                item_id: _,
+                position_ms,
+                duration_ms,
+                next_episode,
+            } => {
+                self.screen = Screen::Player;
+                self.player.loading = false;
+                self.player.paused = false;
+                self.player.position_ms = *position_ms;
+                self.player.duration_ms = *duration_ms;
+                self.player.retry_available = false;
+                self.player.next_episode = next_episode.as_ref().map(|episode| {
+                    MediaItem::new(Source::Jellyfin, episode.id.clone(), episode.title.clone())
+                });
+                self.refresh_status();
+            }
+            PlaybackUpdate::Failed {
+                item_id: _,
+                code,
+                message,
+                retry_available,
+            } => {
+                self.screen = Screen::Player;
+                self.player.loading = false;
+                self.player.paused = false;
+                self.player.retry_available = *retry_available;
+                let detail = message.as_deref().unwrap_or(code);
+                self.player.error = Some(sanitize(detail, MAX_ERROR_CHARS, "playback failed"));
+                self.refresh_status();
+            }
+            PlaybackUpdate::Stopped { item_id: _ } => {
+                self.screen = Screen::Home;
+                self.player.title = "Nothing playing".to_string();
+                self.player.source = None;
+                self.player.method.clear();
+                self.player.position_ms = 0;
+                self.player.duration_ms = None;
+                self.player.paused = false;
+                self.player.loading = false;
+                self.player.error = None;
+                self.player.audio_tracks.clear();
+                self.player.subtitle_tracks.clear();
+                self.player.selected_audio = None;
+                self.player.selected_subtitle = None;
+                self.player.next_episode = None;
+                self.player.retry_available = false;
+                self.player.menu = None;
+                self.status = "Choose a source".to_string();
+            }
+            PlaybackUpdate::SessionExpired => {
+                self.screen = Screen::Player;
+                self.player.loading = false;
+                self.player.retry_available = false;
+                self.player.error = Some("Jellyfin session expired; sign in again".to_string());
+                self.refresh_status();
+            }
+            PlaybackUpdate::Message { text } => {
+                self.status = sanitize(text, MAX_ERROR_CHARS, "");
             }
         }
     }
@@ -1062,7 +1454,7 @@ impl UiModel {
         let row = HomeRow::ALL[self.home_focus.min(HOME_ROW_COUNT - 1)];
         match row {
             HomeRow::Resume => {
-                if let Some(item) = self.resume.clone() {
+                if let Some(item) = self.resume_item().cloned() {
                     self.play_item(&item)
                 } else {
                     self.status = "Nothing to resume".to_owned();
@@ -1204,6 +1596,15 @@ impl UiModel {
         self.player.paused = false;
         self.player.loading = true;
         self.player.error = None;
+        self.player.method.clear();
+        self.player.audio_tracks.clear();
+        self.player.subtitle_tracks.clear();
+        self.player.selected_audio = None;
+        self.player.selected_subtitle = None;
+        self.player.next_episode = None;
+        self.player.retry_available = false;
+        self.player.menu = None;
+        self.player.menu_focus = 0;
         self.player_focus = 0;
         self.status = format!("Opening {} ({})", item.title, item.source_label());
 
@@ -1286,6 +1687,9 @@ impl UiModel {
     }
 
     fn handle_player_key(&mut self, key: Key) -> UiOutcome {
+        if self.player.menu.is_some() {
+            return self.handle_player_menu_key(key);
+        }
         match key {
             Key::Up => {
                 self.player_focus = (self.player_focus + PLAYER_CONTROLS - 1) % PLAYER_CONTROLS;
@@ -1331,12 +1735,126 @@ impl UiModel {
         }
     }
 
+    fn handle_player_menu_key(&mut self, key: Key) -> UiOutcome {
+        let Some(menu) = self.player.menu else {
+            return UiOutcome::Ignored;
+        };
+        let rows = self.player_menu_rows();
+        if rows.is_empty() {
+            self.player.menu = None;
+            return self.navigated();
+        }
+        match key {
+            Key::Up | Key::Left => {
+                self.player.menu_focus = (self.player.menu_focus + rows.len() - 1) % rows.len();
+                self.navigated()
+            }
+            Key::Down | Key::Right => {
+                self.player.menu_focus = (self.player.menu_focus + 1) % rows.len();
+                self.navigated()
+            }
+            Key::Enter => {
+                let row = rows
+                    .get(self.player.menu_focus.min(rows.len() - 1))
+                    .cloned();
+                self.player.menu = None;
+                self.player.menu_focus = 0;
+                match (menu, row) {
+                    (PlayerMenu::Subtitles, Some(row)) => {
+                        self.player.selected_subtitle = (row.index >= 0).then_some(row.index);
+                        UiOutcome::Playback(UiPlaybackCommand::SelectSubtitle {
+                            index: (row.index >= 0).then_some(row.index),
+                        })
+                    }
+                    (PlayerMenu::Audio, Some(row)) => {
+                        self.player.selected_audio = Some(row.index);
+                        UiOutcome::Playback(UiPlaybackCommand::SelectAudio {
+                            index: Some(row.index),
+                        })
+                    }
+                    (_, None) => UiOutcome::Dismissed,
+                }
+            }
+            Key::Escape => {
+                self.player.menu = None;
+                self.player.menu_focus = 0;
+                UiOutcome::Dismissed
+            }
+            Key::Home => {
+                self.player.menu = None;
+                self.go_home();
+                UiOutcome::Action(Action::Navigate {
+                    direction: Direction::Home,
+                })
+            }
+            Key::Char(' ') => UiOutcome::Action(Action::SetPaused {
+                paused: !self.player.paused,
+            }),
+            Key::Backspace | Key::Char(_) => UiOutcome::Ignored,
+        }
+    }
+
     fn activate_player_control(&mut self) -> UiOutcome {
         match self.player_focus {
             0 => UiOutcome::Action(Action::SetPaused {
                 paused: !self.player.paused,
             }),
             1 => {
+                if self.player.subtitle_tracks.is_empty() {
+                    self.status = "No subtitles available".to_owned();
+                    return self.navigated();
+                }
+                self.player.menu = Some(PlayerMenu::Subtitles);
+                self.player.menu_focus = self
+                    .player
+                    .selected_subtitle
+                    .and_then(|selected| {
+                        self.player
+                            .subtitle_tracks
+                            .iter()
+                            .position(|track| track.index == selected)
+                            .map(|position| position + 1)
+                    })
+                    .unwrap_or(0);
+                self.refresh_status();
+                self.navigated()
+            }
+            2 => {
+                if self.player.audio_tracks.is_empty() {
+                    self.status = "No audio tracks available".to_owned();
+                    return self.navigated();
+                }
+                self.player.menu = Some(PlayerMenu::Audio);
+                self.player.menu_focus = self
+                    .player
+                    .selected_audio
+                    .and_then(|selected| {
+                        self.player
+                            .audio_tracks
+                            .iter()
+                            .position(|track| track.index == selected)
+                    })
+                    .unwrap_or(0);
+                self.refresh_status();
+                self.navigated()
+            }
+            3 => {
+                if self.player.next_episode.is_some() {
+                    UiOutcome::Playback(UiPlaybackCommand::NextEpisode)
+                } else {
+                    self.status = "No next episode".to_owned();
+                    self.navigated()
+                }
+            }
+            4 => {
+                if self.player.retry_available {
+                    UiOutcome::Playback(UiPlaybackCommand::Retry)
+                } else {
+                    self.status = "No retry available".to_owned();
+                    self.navigated()
+                }
+            }
+            5 => {
                 self.go_home();
                 UiOutcome::Action(Action::Stop)
             }
@@ -1451,6 +1969,8 @@ impl UiModel {
         self.screen = Screen::Home;
         self.library.searching = false;
         self.library.query.clear();
+        self.player.menu = None;
+        self.player.menu_focus = 0;
         self.status = "Choose a source".to_owned();
     }
 
@@ -1520,8 +2040,8 @@ impl UiModel {
     }
 }
 
-/// Number of player controls: pause, stop, back.
-const PLAYER_CONTROLS: usize = 3;
+/// Number of player controls: pause, subtitles, audio, next, retry, stop, back.
+const PLAYER_CONTROLS: usize = 7;
 
 /// Settings rows, in display order.
 pub const SETTINGS_ROWS: [&str; 4] = [
@@ -1602,8 +2122,8 @@ mod native {
     use uuid::Uuid;
 
     use super::{
-        Key, LoadState, MediaItem, PairChoice, Screen, UiInput, UiModel, UiOutcome, UiReject,
-        VERSION_LABEL, key_from_text, source_label,
+        Key, LoadState, MediaItem, PairChoice, PlayerMenu, Screen, UiInput, UiModel, UiOutcome,
+        UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, key_from_text, source_label,
     };
     use crate::model::Action;
 
@@ -1623,6 +2143,8 @@ mod native {
         Retry,
         /// The operator opened a library source; the controller should fetch it.
         LoadLibrary { filter: super::SourceFilter },
+        /// Act on the active playback without touching the network here.
+        Playback(UiPlaybackCommand),
     }
 
     /// Errors starting or running the native window.
@@ -1649,6 +2171,11 @@ mod native {
             self.post(move |model| model.apply_state(&state));
         }
 
+        /// Post one playback-controller update to the event loop.
+        pub fn apply_playback_update(&self, update: crate::playback::PlaybackUpdate) {
+            self.post(move |model| model.apply_playback_update(&update));
+        }
+
         /// Replace the library contents from a completed fetch.
         pub fn set_library_items(&self, items: Vec<MediaItem>) {
             self.post(move |model| model.set_library_items(items));
@@ -1662,6 +2189,44 @@ mod native {
         /// Report a bounded library fetch error.
         pub fn set_library_error(&self, message: String) {
             self.post(move |model| model.set_library_error(&message));
+        }
+
+        /// Replace the continue-watching row from the playback controller.
+        pub fn set_continue_watching(&self, items: Vec<MediaItem>) {
+            self.post(move |model| model.set_continue_watching(items));
+        }
+
+        /// Set or clear the explicit resume item.
+        pub fn set_resume_item(&self, item: Option<MediaItem>) {
+            self.post(move |model| model.set_resume(item));
+        }
+
+        /// Install the tracks offered by the playback controller.
+        pub fn set_player_tracks(
+            &self,
+            audio: Vec<UiTrack>,
+            subtitles: Vec<UiTrack>,
+            selected_audio: Option<i32>,
+            selected_subtitle: Option<i32>,
+        ) {
+            self.post(move |model| {
+                model.set_player_tracks(audio, subtitles, selected_audio, selected_subtitle);
+            });
+        }
+
+        /// Offer (or clear) the next episode.
+        pub fn set_next_episode(&self, item: Option<MediaItem>) {
+            self.post(move |model| model.set_next_episode(item));
+        }
+
+        /// Enable or disable the retry control.
+        pub fn set_retry_available(&self, available: bool) {
+            self.post(move |model| model.set_retry_available(available));
+        }
+
+        /// Set the negotiated play-method label.
+        pub fn set_player_method(&self, method: String) {
+            self.post(move |model| model.set_player_method(&method));
         }
 
         /// Present a wire pairing request for local confirmation.
@@ -1844,6 +2409,17 @@ mod native {
             let weak = window.as_weak();
             let model = Arc::clone(model);
             let on_command = Arc::clone(on_command);
+            window.on_track_activated(move |index| {
+                with_window(&weak, &model, |window, model| {
+                    model.set_player_menu_focus(index.max(0) as usize);
+                    handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
+                });
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let model = Arc::clone(model);
+            let on_command = Arc::clone(on_command);
             window.on_back_requested(move || {
                 with_window(&weak, &model, |window, model| {
                     handle_local_input(window, model, Key::Escape, start.elapsed(), &on_command);
@@ -1880,6 +2456,7 @@ mod native {
                 (**on_command)(UiCommand::ApprovePairing { request_id });
             }
             UiOutcome::Retry => (**on_command)(UiCommand::Retry),
+            UiOutcome::Playback(command) => (**on_command)(UiCommand::Playback(command)),
             UiOutcome::Rejected(UiReject::RemoteApprovalDenied) => {
                 tracing::warn!("remote input attempted to confirm a local action");
             }
@@ -1942,10 +2519,33 @@ mod native {
 
         window.set_player_title(model.player_title().into());
         window.set_player_source(model.player_source_label().into());
+        window.set_player_method(model.player_method().into());
         window.set_player_position(model.player_position_text().into());
         window.set_player_progress(model.player_progress());
         window.set_player_paused(model.player_paused());
         window.set_player_loading(model.player_loading());
+        window.set_resume_title(model.resume_title().into());
+        window.set_next_episode_available(model.next_episode().is_some());
+        window.set_retry_available(model.retry_available());
+        let menu = model.player_menu();
+        let selected_index = match menu {
+            Some(PlayerMenu::Subtitles) => model.selected_subtitle().unwrap_or(-1),
+            Some(PlayerMenu::Audio) => model.selected_audio().unwrap_or(i32::MIN),
+            None => i32::MIN,
+        };
+        let tracks: Vec<TrackRow> = model
+            .player_menu_rows()
+            .into_iter()
+            .map(|row| TrackRow {
+                label: row.label.as_str().into(),
+                index: row.index,
+                selected: row.index == selected_index,
+            })
+            .collect();
+        window.set_track_items(ModelRc::new(VecModel::from(tracks)));
+        window.set_track_menu_visible(menu.is_some());
+        window.set_track_menu_title(menu.map_or("", PlayerMenu::title).into());
+        window.set_track_focus(model.player_menu_focus() as i32);
         window.set_cast_state(model.cast_state().into());
         window.set_settings_version(VERSION_LABEL.into());
 

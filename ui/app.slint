@@ -8,7 +8,7 @@ import { CastScreen } from "cast.slint";
 import { HomeScreen } from "home.slint";
 import { LibraryScreen, MediaCard } from "library.slint";
 import { PairDialog } from "pair.slint";
-import { PlayerScreen } from "player.slint";
+import { PlayerScreen, TrackRow } from "player.slint";
 import { SettingsScreen } from "settings.slint";
 
 export component AppWindow inherits Window {
@@ -37,10 +37,18 @@ export component AppWindow inherits Window {
     in-out property <string> library-error-text;
     in-out property <string> player-title: "Nothing playing";
     in-out property <string> player-source: "--";
+    in-out property <string> player-method;
     in-out property <string> player-position: "0:00 / --:--";
     in-out property <float> player-progress: 0.0;
     in-out property <bool> player-paused: false;
     in-out property <bool> player-loading: false;
+    in-out property <string> resume-title;
+    in-out property <bool> next-episode-available: false;
+    in-out property <bool> retry-available: false;
+    in-out property <bool> track-menu-visible: false;
+    in-out property <string> track-menu-title;
+    in-out property <int> track-focus: 0;
+    in-out property <[TrackRow]> track-items;
     in-out property <string> cast-state: "No receiver attached";
     in-out property <string> settings-version;
     in-out property <bool> pair-visible: false;
@@ -53,6 +61,7 @@ export component AppWindow inherits Window {
     callback library-retry-requested();
     callback library-search-requested();
     callback player-control-activated(int);
+    callback track-activated(int);
     callback settings-activated(int);
     callback pair-choice-activated(int);
     callback back-requested();
@@ -97,6 +106,7 @@ export component AppWindow inherits Window {
             vertical-stretch: 1;
             base: root.base;
             focus-index: root.home-focus;
+            resume-title: root.resume-title;
             activated(index) => {
                 root.home-activated(index);
             }
@@ -130,13 +140,23 @@ export component AppWindow inherits Window {
             base: root.base;
             title: root.player-title;
             source: root.player-source;
+            method: root.player-method;
             position: root.player-position;
             progress: root.player-progress;
             paused: root.player-paused;
             loading: root.player-loading;
+            next-episode-available: root.next-episode-available;
+            retry-available: root.retry-available;
             focus-index: root.player-focus;
+            track-menu-visible: root.track-menu-visible;
+            track-menu-title: root.track-menu-title;
+            track-focus: root.track-focus;
+            track-items: root.track-items;
             control-activated(index) => {
                 root.player-control-activated(index);
+            }
+            track-activated(index) => {
+                root.track-activated(index);
             }
         }
 

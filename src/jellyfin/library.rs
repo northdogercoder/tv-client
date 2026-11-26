@@ -3,7 +3,6 @@
 //! All methods return typed metadata and opaque item identifiers. Stream URLs
 //! are never requested, parsed or stored.
 
-use serde::Serialize;
 use url::Url;
 
 use crate::jellyfin::JellyfinClient;
@@ -337,19 +336,54 @@ impl JellyfinClient {
         self.post_json(url, update, cancel).await
     }
 
-    /// Negotiate playback capabilities without exposing a stream URL.
-    pub async fn playback_info(
+    /// Read one item's metadata, including per-user resume state.
+    pub async fn item(
         &self,
         item_id: &str,
         cancel: &CancelToken,
-    ) -> Result<crate::jellyfin::models::PlaybackInfoResponse, JellyfinError> {
+    ) -> Result<BaseItem, JellyfinError> {
         if !crate::model::is_valid_item_id(item_id) {
             return Err(JellyfinError::InvalidItemId);
         }
         let user = self.user_id()?;
-        let mut url = self.endpoint(&["Items", item_id, "PlaybackInfo"])?;
-        url.query_pairs_mut().append_pair("UserId", user);
-        self.post_json(url, &EmptyBody {}, cancel).await
+        let mut url = self.endpoint(&["Items", item_id])?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("UserId", user);
+            query.append_pair("Fields", DEFAULT_FIELDS);
+        }
+        self.get_json(url, cancel).await
+    }
+
+    /// Find the episode that follows `item_id` in the same series.
+    ///
+    /// Returns `None` for non-episode items and for the final episode. The
+    /// lookup is confined to the configured server and the signed-in user.
+    pub async fn next_episode(
+        &self,
+        item_id: &str,
+        cancel: &CancelToken,
+    ) -> Result<Option<BaseItem>, JellyfinError> {
+        let current = self.item(item_id, cancel).await?;
+        if !current
+            .item_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("episode"))
+        {
+            return Ok(None);
+        }
+        let Some(series_id) = current.series_id.as_deref() else {
+            return Ok(None);
+        };
+        let page = Page::new(0, crate::jellyfin::MAX_PAGE_SIZE)?;
+        let episodes = self.episodes(series_id, None, page, cancel).await?;
+        let mut items = episodes.items.into_iter();
+        let Some(_) = items.position(|episode| episode.id == current.id) else {
+            return Ok(None);
+        };
+        // `position` consumes through the current episode, so the next value is
+        // the following episode.
+        Ok(items.next())
     }
 
     fn user_items_url(&self, suffix: &[&str]) -> Result<Url, JellyfinError> {
@@ -402,6 +436,3 @@ fn append_item_query(url: &mut Url, query: &ItemQuery) {
         pairs.append_pair("Fields", &query.fields.join(","));
     }
 }
-
-#[derive(Serialize)]
-struct EmptyBody {}
