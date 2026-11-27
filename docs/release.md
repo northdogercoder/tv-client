@@ -3,8 +3,8 @@
 This is the operator matrix for the packaged ARM64 kiosk. Rows below contain
 only measured evidence; unrun gates remain **NOT RUN**. The 0.1.13 artifact was
 built by the tag workflow, downloaded, checksum-verified and installed on the
-operator Pi. Rows R0, R2, R7 and R12 have operator evidence; the remaining rows are
-still unrun.
+operator Pi. Rows R0, R2, R7, R10 and R12 have operator evidence; R9 was waived short of
+the two-hour gate. The remaining rows are still unrun.
 
 The historical C010 result (local YouTube 720p30 under Cage/GLES: 2 dropped
 frames in 240) is an input to this matrix. It does not validate this artifact,
@@ -76,7 +76,7 @@ the SBOM: no credentials, config or state.
 | R7 | Offline Jellyfin / relay | Local UI shows a typed error without crashing; reconnect recovers without a restart | **PASS** (operator TV; network drop/recovery) |
 | R8 | Network relay and reconnect | Remote commands survive a short network loss or fail with a typed ack, then reconnect | **NOT RUN** |
 | R9 | Two-hour soak | 2 h of repeated playback has stable RSS/FD counts, no leaked mpv sockets and no orphan children | **NOT RUN** |
-| R10 | Rollback | Rollback selects the previous release atomically, preserves config/state bytes and restarts the kiosk | **NOT RUN** |
+| R10 | Rollback | Rollback selects the previous release atomically, preserves config/state bytes and restarts the kiosk | **PASS** (0.1.13→0.1.12→0.1.13; SHA256 OK) |
 | R11 | Crash backoff and tty2 recovery | Repeated kiosk exits back off to 60 s; tty2 allows local recovery without rebooting | **NOT RUN** |
 | R12 | mpv playback and pause-only OSC | Smooth dmabuf/v4l2m2m playback; bar appears only while paused and hides on resume; keyboard/remote controls remain usable | **PASS** (operator TV; 0.1.12/0.1.13) |
 
@@ -358,7 +358,8 @@ when the renderer is Cage/GLES and frame drops are comparable to the C010
 unsupported and keep the 720p-first policy.
 
 Evidence: `<format id, resolution, fps>`, `<hwdec-current and renderer>`,
-`<dropped/total frames>`, `<playback duration>`. Status: **NOT RUN**.
+`<dropped/total frames>`, `<playback duration>`. Status: **NOT RUN** — operator
+reported YouTube is not configured on the kiosk on 2026-11-27.
 
 ## R5: reboot x5
 
@@ -435,7 +436,7 @@ new command applies. Core local Jellyfin playback is not stopped by a cloud
 failure.
 
 Evidence: `<ack results before/during/after>`, `<reconnect timestamps>`.
-Status: **NOT RUN**.
+Status: **NOT RUN** — no paired remote was available on 2026-11-27.
 
 ## R9: two-hour soak
 
@@ -454,7 +455,14 @@ Pass requires bounded RSS/FD growth, no leaked mpv/LibMPV sockets, no orphan
 `mpv` or `tv-native-player` after each stop, and no service failure. C002's
 30-minute soak waiver does not make this row run.
 
-Evidence: `<samples table>`, `<leak observations>`. Status: **NOT RUN**.
+Operator waiver (2026-11-27): playback was stopped before two hours. Two
+samples were taken at 18:19 and 18:22: one `tv-client`, one `mpv`, no failed
+units. RSS moved from 82,456 KiB to 33,296 KiB; no FD series was captured.
+Several old `/tmp/tv-client-mpv-child-*` directories from earlier restarts were
+present, but no orphan `mpv`/`tv-native-player`. This is a waiver, not a pass;
+R9 remains NOT RUN.
+
+Evidence: `<operator waiver; short samples>`. Status: **WAIVED — NOT RUN**.
 
 ## R10: rollback
 
@@ -483,8 +491,14 @@ clears the database. If the newer binary migrated the database to a schema the o
 binary does not support, the older binary refuses to start with a typed error:
 reinstall the newer release instead of deleting `/var/lib/tv-client`.
 
-Evidence: `<list output>`, `<before/after sha256>`, `<symlink>`,
-`<journal after restart>`. Status: **NOT RUN**.
+Observed 2026-11-27: `--to 0.1.12` flipped the symlink atomically and
+restarted getty; `/etc/tv-client/client.toml`,
+`/var/lib/tv-client/client.toml` and `/var/lib/tv-client/client.db` all passed
+`sha256sum -c` after rollback. `--to 0.1.13` restored the final release; both
+release directories remain and the kiosk is running with one `cage` and one
+`tv-client`.
+
+Evidence: operator terminal output. Status: **PASS**.
 
 ## R11: crash backoff and tty2 recovery
 
@@ -528,8 +542,8 @@ Status: **NOT RUN**.
 | R6 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R7 | operator | 2026-11-27 | PASS | operator TV; network drop/recovery |
 | R8 | `<name>` | `<date>` | NOT RUN | `<link>` |
-| R9 | `<name>` | `<date>` | NOT RUN | `<link>` |
-| R10 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R9 | operator | 2026-11-27 | WAIVED | short soak; operator stopped before 2h |
+| R10 | operator | 2026-11-27 | PASS | operator terminal; SHA256 OK |
 | R11 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R12 | operator | 2026-11-27 | PASS | operator TV; 0.1.12/0.1.13 |
 
