@@ -1,11 +1,38 @@
-# Proposed configuration contract; C003 must implement these exact keys.
-# Replace values; set cloud_enabled=false until server is available.
+# Operator configuration template for /etc/tv-client/client.toml.
+#
+# The installer copies this file only when /etc/tv-client/client.toml does not
+# already exist. Unknown keys are rejected by the client, so keep this file in
+# sync with src/config.rs. Replace the placeholder hosts and enable cloud or
+# YouTube only after the matching gate in docs/release.md has passed.
+
 jellyfin_url = "https://jellyfin.YOUR-TAILNET.ts.net"
 server_url = "https://tv-control.YOUR-TAILNET.ts.net"
+
+# Cloud control, pairing and remote commands. Off until the control server is
+# validated; enabling it requires server_url above.
 cloud_enabled = false
+
+# YouTube discovery (server search). Requires server_url and an enrolled device.
 youtube_enabled = false
+
+# Local YouTube playback kill switch. Effective only when youtube_ytdlp_path is
+# an absolute, executable, operator-managed yt-dlp release. Turning this off is
+# the supported rollback for a broken extractor; no rebuild is needed.
+youtube_playback_enabled = false
+youtube_ytdlp_path = "/home/tvkiosk/.local/share/tv-client/yt-dlp/bin/yt-dlp"
+youtube_mpv_path = "/usr/bin/mpv"
+# Resolve-and-start budget in seconds, 10..=300.
+youtube_playback_timeout_secs = 60
+# "auto-safe" | "v4l2m2m" | "none". The accepted C010 720p30 Cage/GLES run
+# used v4l2m2m; auto-safe lets mpv fall back to software.
+youtube_hwdec = "auto-safe"
+
+# HDMI-CEC has no configuration key. The kernel CEC bridge is compiled into the
+# native-ui build and runs the system cec-ctl helper against /dev/cec0; see
+# docs/build.md and docs/input.md. The USB keyboard remains the fallback.
 airplay_enabled = false
 webrtc_enabled = false
+
 max_width = 1280
 max_height = 720
 max_fps = 30

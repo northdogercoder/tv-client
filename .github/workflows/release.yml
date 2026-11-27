@@ -1,0 +1,134 @@
+name: Release
+
+# Builds the deployable aarch64 Linux artifact on GitHub's native ARM64 runner.
+# Nothing is published, signed with a production key, or deployed by this
+# workflow. The attestation is keyless OIDC provenance for a tag build only.
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build-linux-arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustc --version
+          cargo --version
+
+      - name: Install native build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            jq \
+            libfontconfig1-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Build release binaries
+        run: cargo build --release --locked --features native-ui,gstreamer-player
+
+      - name: Verify AArch64 ELF and shared libraries
+        run: |
+          set -euo pipefail
+          for binary in tv-client tv-native-player; do
+            path="target/release/$binary"
+            test -x "$path"
+            file "$path"
+            file "$path" | grep -Eq 'ELF 64-bit LSB.*(ARM aarch64|AArch64)'
+            if ldd "$path" | tee "/tmp/ldd-$binary.txt" | grep -q 'not found'; then
+              cat "/tmp/ldd-$binary.txt"
+              echo "::error::$binary has unresolved shared libraries"
+              exit 1
+            fi
+          done
+
+      - name: Package release, SBOM, notices and checksums
+        id: package
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          test -n "$version"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+            scripts/package-release.sh --version "$version"
+
+      - name: Verify packaged tarball
+        run: |
+          set -euo pipefail
+          archive=$(find dist -maxdepth 1 -name 'tv-client-linux-arm64-*.tar.gz' -print -quit)
+          test -n "$archive"
+          actual=$(tar -tzf "$archive" | LC_ALL=C sort)
+          expected=$(printf '%s\n' NOTICES SBOM.cdx.json tv-client tv-native-player | LC_ALL=C sort)
+          if [[ "$actual" != "$expected" ]]; then
+            printf 'unexpected tarball contents:\n%s\n' "$actual"
+            exit 1
+          fi
+          (cd dist && sha256sum -c SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: tv-client-linux-arm64-${{ steps.package.outputs.version }}
+          path: |
+            dist/tv-client-linux-arm64-*.tar.gz
+            dist/NOTICES
+            dist/SBOM.cdx.json
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
+  attest:
+    name: attest-linux-arm64
+    # Keyless build provenance for tag builds only. Pull requests cannot reach
+    # this job, and no repository secret or production signing key is used.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download packaged release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: tv-client-linux-arm64-*
+          path: dist
+          merge-multiple: true
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/tv-client-linux-arm64-*.tar.gz
+            dist/NOTICES
+            dist/SBOM.cdx.json
+            dist/SHA256SUMS

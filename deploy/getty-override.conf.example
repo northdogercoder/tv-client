@@ -1,6 +1,16 @@
 # /etc/systemd/system/getty@tty1.service.d/override.conf
+#
+# Installed by scripts/install-release.sh. getty@tty1 runs the kiosk profile as
+# tvkiosk; tty2 remains an interactive recovery console with no autologin.
+[Unit]
+# The kiosk profile applies its own bounded backoff, so getty should not enter
+# a start-limit failure state after repeated display/GPU restarts.
+StartLimitIntervalSec=0
+
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin tvkiosk --noclear %I $TERM
 Restart=always
-RestartSec=3s
+RestartSec=5s
+TTYReset=yes
+TTYVHangup=yes

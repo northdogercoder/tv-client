@@ -118,8 +118,9 @@ CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
 Run it inside the active labwc session with `WAYLAND_DISPLAY=wayland-0` and
 `XDG_RUNTIME_DIR=/run/user/1000`. The chosen renderer is winit + FemtoVG
 (OpenGL/EGL); see [`design.md`](design.md). `SLINT_BACKEND=winit-femtovg` may be
-set explicitly to make the choice visible in diagnostics. Cage is installed on
-the Pi but is not the active session and is not used.
+set explicitly to make the choice visible in diagnostics. Cage was installed on
+the Pi but was not the active session at the C004/C010 baseline; the C013 kiosk
+session uses Cage on the DRM backend (see [`release.md`](release.md)).
 
 The Slint feature adds a large dependency graph. Do not build it in `/tmp` on
 the Pi (453 MiB tmpfs); use `~` as above. If the Pi runs out of memory, stop
@@ -158,10 +159,13 @@ The labwc session is **not** a supported YouTube playback renderer on the Pi
 1080p30 with both `vo=gpu` and `vo=wlshm`; the drops are compositor/present
 side, not network or decoder drops. Do not tune the client around labwc.
 
-C013 will run the kiosk under **Cage**, and C004 UI behavior must be
-revalidated there (fullscreen, focus, input, teardown). C010 hardware
-acceptance is local 720p30 under Cage with the GLES2 renderer; 1080p30 is
-explicitly unsupported on the Pi 3B.
+C013 runs the kiosk under **Cage**, and C004 UI behavior must be revalidated
+there (fullscreen, focus, input, teardown). C010 hardware acceptance is local
+720p30 under Cage with the GLES2 renderer; 1080p30 is explicitly unsupported on
+the Pi 3B. The deployed session is defined by
+`deploy/kiosk-profile.sh.example` (`WLR_RENDERER=gles2`, `unset WLR_BACKENDS`)
+and `deploy/getty-override.conf.example`; `scripts/install-release.sh` installs
+both and keeps `/etc/tv-client` and `/var/lib/tv-client` persistent.
 
 Nested validation from an existing Wayland/labwc session:
 
@@ -293,6 +297,80 @@ request with `permissions: contents: read`. It checks out the repository with
 `bash scripts/check.sh`. CI uses no secrets and no steps beyond those two, so
 it exercises exactly the same gate as a local run.
 
+## ARM64 release build
+
+The deployable artifact is built by `.github/workflows/release.yml` on the
+native GitHub-hosted **`ubuntu-24.04-arm`** runner. The workflow runs for `v*`
+tags, pull requests and manual dispatch; it is not run by the C013 executor.
+Every action is pinned to a full 40-character commit SHA. The top-level
+permission is `contents: read`. The separate attest job is tag-only
+(`startsWith(github.ref, 'refs/tags/v')`) and adds `id-token: write` and
+`attestations: write` for keyless provenance. No repository secret or
+production signing key is used, and pull requests cannot reach the attest job.
+
+The build installs the pinned Rust 1.100.0 toolchain from
+`rust-toolchain.toml`, plus `libfontconfig1-dev`, `libxkbcommon-dev`,
+`pkg-config`, `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev` and
+`jq`, then builds exactly:
+
+```sh
+cargo build --release --locked --features native-ui,gstreamer-player
+```
+
+No cross-compilation from x86_64 is supported. The release artifact must be
+produced on an aarch64 Debian/Ubuntu build host with the same native features;
+the headless gate is not a substitute.
+
+The job verifies both ELF files and their shared libraries before packaging:
+
+```sh
+file target/release/tv-client target/release/tv-native-player
+ldd target/release/tv-client
+ldd target/release/tv-native-player
+```
+
+`file` must report `ARM aarch64` (the workflow accepts the `AArch64` spelling)
+and `ldd` must not report `not found`. Packaging is performed by
+`scripts/package-release.sh` and normalises the archive metadata:
+
+```sh
+version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+  scripts/package-release.sh --version "$version"
+```
+
+The tarball **`tv-client-linux-arm64-<version>.tar.gz`** contains exactly the
+two binaries at its root plus `NOTICES` and `SBOM.cdx.json`.
+`SHA256SUMS` is written next to it, and `NOTICES`/`SBOM.cdx.json` are also
+copied to `dist/` for direct inspection. `SBOM.cdx.json` is CycloneDX 1.5
+generated from `cargo metadata --locked --format-version 1`; `NOTICES` lists
+every crate with its declared license and the project's GPL-3.0-only notice.
+The release job also verifies that the tar root contains exactly those four
+entries and that `sha256sum -c SHA256SUMS` passes for the tarball, notices and
+SBOM.
+
+Local equivalent on an ARM64 Debian 13 host (the package install is an operator
+action, not part of `scripts/check.sh`):
+
+```sh
+sudo apt-get install --yes --no-install-recommends \
+  libfontconfig1-dev libxkbcommon-dev pkg-config \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev jq
+cargo build --release --locked --features native-ui,gstreamer-player
+scripts/package-release.sh --version "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+```
+
+For an individual toolchain check, `scripts/package-release.sh --print-name
+VERSION` prints the artifact name without running cargo, and `--inventory
+METADATA OUTDIR` regenerates `SBOM.cdx.json` and `NOTICES` from a saved
+`cargo metadata` document.
+
+No release artifact has been produced from the C013 worktree. The workflow
+exists and is policy-tested by `tests/release.rs`, but the artifact and its
+attestation are **NOT BUILT**; [`release.md`](release.md) records that status
+and the unrun operator matrix. Do not infer AArch64 behaviour from an x86_64
+build.
+
 ## Raspberry Pi target (aarch64)
 
 Verified on the lab target, a Raspberry Pi 3 Model B Rev 1.2 running Debian 13
@@ -316,9 +394,11 @@ approval and was not started; the active session remained labwc.
   `v4l2h264dec`, `waylandsink`, `kmssink`, `playbin3`, `alsasink` and
   `pulsesink` elements are installed.
 - `gcc` 14.2.0 and `pkg-config` are available for linking.
-- `cage` 0.3.1 is installed but is not used. The active console session is
-  labwc 0.20.2 on tty1, with `XDG_RUNTIME_DIR=/run/user/1000` and
-  `WAYLAND_DISPLAY=wayland-0`.
+- `cage` 0.3.1 is installed. At the C004/C010 lab baseline it was not started
+  and the console session was labwc 0.20.2 on tty1, with
+  `XDG_RUNTIME_DIR=/run/user/1000` and `WAYLAND_DISPLAY=wayland-0`. The C013
+  kiosk session is Cage; see
+  [`release.md`](release.md) for the unrun installation and reboot gates.
 - `cec-ctl` 1.30.1 is installed. `cec-ctl --list-devices` reports
   `vc4_hdmi (vc4-hdmi): /dev/cec0`; the device is `crw-rw---- root:video` and
   `anders` is in the `video` group. Follow mode works without root; monitor
