@@ -3,6 +3,12 @@
 
 // Ten-foot launcher window. Design base is 1280x720 (16:9); `base` grows to
 // 1080 at a 1080p fullscreen window, and every size below is derived from it.
+//
+// The window is framed explicitly instead of using one root layout: the
+// header and footer have fixed heights and the screen host gets exactly the
+// space between them. A screen can therefore never push the footer down; any
+// content that does not fit is clipped inside the host and each screen scales
+// its own `base` to the host height.
 
 import { CastScreen } from "cast.slint";
 import { HomeScreen } from "home.slint";
@@ -20,6 +26,12 @@ export component AppWindow inherits Window {
     background: #0b0e13;
 
     property <length> base: Math.min(root.width * 9 / 16, root.height);
+    // Symmetric overscan inset: `ui_safe_area_percent` percent of the short
+    // edge is removed from every side. It is zero by default. The frame keeps
+    // the header, screen host and footer aligned at any nonzero value.
+    property <length> safe-inset: root.base * root.safe-area-percent / 100;
+    property <length> header-height: root.base / 10;
+    property <length> footer-height: root.base / 18;
 
     in-out property <int> screen: 0;
     in-out property <string> status-text: "Choose a source";
@@ -62,7 +74,7 @@ export component AppWindow inherits Window {
     in-out property <string> settings-error;
     in-out property <string> settings-quick-code;
     in-out property <string> jellyfin-user;
-    in-out property <int> safe-area-percent: 3;
+    in-out property <int> safe-area-percent: 0;
     in-out property <bool> pair-visible: false;
     in-out property <string> pair-message;
     in-out property <int> pair-choice: 0;
@@ -76,17 +88,23 @@ export component AppWindow inherits Window {
     callback player-control-activated(int);
     callback track-activated(int);
     callback settings-activated(int);
+    callback settings-caret-requested(int, float);
     callback pair-choice-activated(int);
     callback back-requested();
 
-    VerticalLayout {
-        // Overscan inset: the panel may crop the outer few percent. The
-        // configured percentage of the short edge keeps the bottom status
-        // strip and every focused row inside the visible area.
-        padding: root.base * root.safe-area-percent / 100;
+    // The safe-area frame. At percent 0 it is the whole window.
+    frame := Rectangle {
+        x: root.safe-inset;
+        y: root.safe-inset;
+        width: root.width - 2 * root.safe-inset;
+        height: root.height - 2 * root.safe-inset;
+        background: transparent;
 
         Rectangle {
-            height: root.base / 10;
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: root.header-height;
             background: #141a22;
 
             HorizontalLayout {
@@ -120,96 +138,132 @@ export component AppWindow inherits Window {
             }
         }
 
-        if root.screen == 0 : HomeScreen {
-            vertical-stretch: 1;
-            base: root.base;
-            focus-index: root.home-focus;
-            resume-title: root.resume-title;
-            activated(index) => {
-                root.home-activated(index);
-            }
-        }
+        // Exactly the space between the fixed header and footer. Screens are
+        // clipped here, so their contents cannot move the footer. Each screen
+        // receives a `base` derived from this host height, which makes rows
+        // compact proportionally at 720p and 1080p.
+        //
+        // 1280x720: base 720, header 72, footer 40, host 608.
+        // 1920x1080: base 1080, header 108, footer 60, host 912.
+        screen-host := Rectangle {
+            x: 0;
+            y: root.header-height;
+            width: parent.width;
+            height: parent.height - root.header-height - root.footer-height;
+            clip: true;
 
-        if root.screen == 1 : LibraryScreen {
-            vertical-stretch: 1;
-            base: root.base;
-            focus-index: root.library-focus;
-            items: root.library-items;
-            filter-label: root.filter-label;
-            query: root.query;
-            search-active: root.search-active;
-            loading: root.library-loading;
-            empty: root.library-empty;
-            error: root.library-error;
-            error-text: root.library-error-text;
-            next-page-available: root.next-page-available;
-            activated(index) => {
-                root.library-activated(index);
+            if root.screen == 0 : HomeScreen {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                base: Math.min(root.base, screen-host.height);
+                focus-index: root.home-focus;
+                resume-title: root.resume-title;
+                activated(index) => {
+                    root.home-activated(index);
+                }
             }
-            retry-requested() => {
-                root.library-retry-requested();
-            }
-            search-requested() => {
-                root.library-search-requested();
-            }
-            more-requested() => {
-                root.library-more-requested();
-            }
-        }
 
-        if root.screen == 2 : PlayerScreen {
-            vertical-stretch: 1;
-            base: root.base;
-            title: root.player-title;
-            source: root.player-source;
-            method: root.player-method;
-            position: root.player-position;
-            progress: root.player-progress;
-            paused: root.player-paused;
-            loading: root.player-loading;
-            next-episode-available: root.next-episode-available;
-            retry-available: root.retry-available;
-            focus-index: root.player-focus;
-            track-menu-visible: root.track-menu-visible;
-            track-menu-title: root.track-menu-title;
-            track-focus: root.track-focus;
-            track-items: root.track-items;
-            control-activated(index) => {
-                root.player-control-activated(index);
+            if root.screen == 1 : LibraryScreen {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                base: Math.min(root.base, screen-host.height);
+                focus-index: root.library-focus;
+                items: root.library-items;
+                filter-label: root.filter-label;
+                query: root.query;
+                search-active: root.search-active;
+                loading: root.library-loading;
+                empty: root.library-empty;
+                error: root.library-error;
+                error-text: root.library-error-text;
+                next-page-available: root.next-page-available;
+                activated(index) => {
+                    root.library-activated(index);
+                }
+                retry-requested() => {
+                    root.library-retry-requested();
+                }
+                search-requested() => {
+                    root.library-search-requested();
+                }
+                more-requested() => {
+                    root.library-more-requested();
+                }
             }
-            track-activated(index) => {
-                root.track-activated(index);
-            }
-        }
 
-        if root.screen == 3 : SettingsScreen {
-            vertical-stretch: 1;
-            base: root.base;
-            focus-index: root.settings-focus;
-            version: root.settings-version;
-            rows-left: root.settings-left;
-            rows-right: root.settings-right;
-            editing: root.settings-editing;
-            edit-value: root.settings-edit-value;
-            message: root.settings-message;
-            error: root.settings-error;
-            quick-code: root.settings-quick-code;
-            activated(index) => {
-                root.settings-activated(index);
+            if root.screen == 2 : PlayerScreen {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                base: Math.min(root.base, screen-host.height);
+                title: root.player-title;
+                source: root.player-source;
+                method: root.player-method;
+                position: root.player-position;
+                progress: root.player-progress;
+                paused: root.player-paused;
+                loading: root.player-loading;
+                next-episode-available: root.next-episode-available;
+                retry-available: root.retry-available;
+                focus-index: root.player-focus;
+                track-menu-visible: root.track-menu-visible;
+                track-menu-title: root.track-menu-title;
+                track-focus: root.track-focus;
+                track-items: root.track-items;
+                control-activated(index) => {
+                    root.player-control-activated(index);
+                }
+                track-activated(index) => {
+                    root.track-activated(index);
+                }
             }
-        }
 
-        if root.screen == 4 : CastScreen {
-            vertical-stretch: 1;
-            base: root.base;
-            state: root.cast-state;
-            back-requested() => {
-                root.back-requested();
+            if root.screen == 3 : SettingsScreen {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                base: Math.min(root.base, screen-host.height);
+                focus-index: root.settings-focus;
+                version: root.settings-version;
+                rows-left: root.settings-left;
+                rows-right: root.settings-right;
+                editing: root.settings-editing;
+                edit-value: root.settings-edit-value;
+                message: root.settings-message;
+                error: root.settings-error;
+                quick-code: root.settings-quick-code;
+                activated(index) => {
+                    root.settings-activated(index);
+                }
+                caret-requested(index, fraction) => {
+                    root.settings-caret-requested(index, fraction);
+                }
+            }
+
+            if root.screen == 4 : CastScreen {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                base: Math.min(root.base, screen-host.height);
+                state: root.cast-state;
+                back-requested() => {
+                    root.back-requested();
+                }
             }
         }
 
         Rectangle {
-            height: root.base / 18;
+            x: 0;
+            y: parent.height - root.footer-height;
+            width: parent.width;
+            height: root.footer-height;
             background: #0e131a;
 
             HorizontalLayout {

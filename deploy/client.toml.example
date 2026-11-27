@@ -46,6 +46,9 @@ artwork_cache_bytes = 134217728
 share_titles = false
 
 # Overscan-safe inset around the UI, in whole percent of the short edge
-# (0..=10, default 3). Increase it if the panel crops the bottom status strip;
-# decrease it to use more of the screen. Applied at startup and after restart.
-ui_safe_area_percent = 3
+# (0..=10, default 0). Zero uses the whole window. A nonzero value removes the
+# same percentage from every edge; the fixed header, screen host and footer
+# stay aligned and screens compact into the remaining height instead of moving
+# the footer. Increase it only if the panel crops edge content. Applied at
+# startup and after restart.
+ui_safe_area_percent = 0

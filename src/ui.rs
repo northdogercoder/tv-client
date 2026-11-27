@@ -18,7 +18,7 @@ use crate::model::{
     Action, AppState, Direction, InputOrigin, Mode, Source, is_valid_item_id, is_valid_youtube_id,
 };
 use crate::playback::{LibraryFilter, PlaybackUpdate};
-use crate::settings::{SettingsEvent, SettingsForm, SettingsRowView};
+use crate::settings::{RowKind, SettingsEvent, SettingsForm, SettingsRowView};
 
 /// Number of entries on the home screen.
 pub const HOME_ROW_COUNT: usize = 5;
@@ -820,6 +820,24 @@ impl UiModel {
         self.settings.edit_value()
     }
 
+    /// Edit buffer with a caret marker for the declarative field.
+    #[must_use]
+    pub fn settings_edit_display(&self) -> String {
+        self.settings.edit_display()
+    }
+
+    /// Caret position as a char index in [`Self::settings_edit_value`].
+    #[must_use]
+    pub const fn settings_caret(&self) -> usize {
+        self.settings.caret()
+    }
+
+    /// Row that owns the edit buffer, if any.
+    #[must_use]
+    pub const fn settings_editing_index(&self) -> Option<usize> {
+        self.settings.editing_index()
+    }
+
     /// Settings status message.
     #[must_use]
     pub fn settings_message(&self) -> &str {
@@ -1343,6 +1361,14 @@ impl UiModel {
         if direction == Direction::Select && self.screen == Screen::Settings {
             return UiOutcome::Ignored;
         }
+        // A remote action may end a local edit (Back), but it must never move
+        // the caret or change the edit buffer. Local keyboard/CEC owns that.
+        if self.screen == Screen::Settings
+            && self.settings.editing()
+            && direction != Direction::Back
+        {
+            return UiOutcome::Ignored;
+        }
         let key = match direction {
             Direction::Up => Key::Up,
             Direction::Down => Key::Down,
@@ -1375,6 +1401,69 @@ impl UiModel {
     /// Set settings focus, clamped to the row list.
     pub fn set_settings_focus(&mut self, index: usize) {
         self.settings.set_focus(index);
+    }
+
+    /// Activate a settings row from a pointer click.
+    ///
+    /// A click on the same text row keeps the edit open; a click on another
+    /// row commits the current edit first. A rejected edit keeps the field
+    /// open instead of silently moving focus, so a pointer cannot discard an
+    /// invalid value.
+    pub fn settings_pointer_activate(&mut self, index: usize) -> UiOutcome {
+        let index = index.min(crate::settings::SETTINGS_ROW_COUNT - 1);
+        if self.settings.editing() {
+            let editing = self.settings.editing_index().unwrap_or(index);
+            if editing == index && self.settings.focused_row().kind() == RowKind::Text {
+                return self.navigated();
+            }
+            let event = self.settings.handle_key(Key::Enter);
+            if matches!(event, SettingsEvent::Rejected) {
+                return self.navigated();
+            }
+        }
+        self.settings.set_focus(index);
+        let event = self.settings.handle_key(Key::Enter);
+        self.settings_outcome(event, None)
+    }
+
+    /// Focus a text row from a pointer click and place the caret.
+    ///
+    /// `fraction` is the click position from the left (`0.0`) to the right
+    /// (`1.0`) edge of the value field. Clicking a different row commits the
+    /// previous edit first; a rejected edit keeps its field open.
+    pub fn settings_pointer_caret(&mut self, index: usize, fraction: f32) -> UiOutcome {
+        let index = index.min(crate::settings::SETTINGS_ROW_COUNT - 1);
+        if self.settings.editing() {
+            let editing = self.settings.editing_index().unwrap_or(index);
+            if editing == index {
+                self.settings.set_focus(index);
+                self.settings.place_caret_fraction(fraction);
+                return self.navigated();
+            }
+            let event = self.settings.handle_key(Key::Enter);
+            if matches!(event, SettingsEvent::Rejected) {
+                return self.navigated();
+            }
+        }
+        self.settings.set_focus(index);
+        let event = self.settings.handle_key(Key::Enter);
+        if matches!(&event, SettingsEvent::Editing) {
+            self.settings.place_caret_fraction(fraction);
+            self.navigated()
+        } else {
+            self.settings_outcome(event, None)
+        }
+    }
+
+    /// Move the settings caret to the end of the edit buffer (native End key).
+    ///
+    /// Returns `false` outside the settings edit mode so the caller can ignore
+    /// the key without changing screens.
+    pub fn settings_caret_to_end(&mut self) -> bool {
+        if self.screen != Screen::Settings {
+            return false;
+        }
+        self.settings.caret_to_end()
     }
 
     /// Set player control focus, clamped to the control row.
@@ -2681,21 +2770,34 @@ impl UiModel {
             return UiOutcome::CancelQuickConnect;
         }
         let event = self.settings.handle_key(key);
-        let direction = match key {
-            Key::Up => Some(Direction::Up),
-            Key::Down => Some(Direction::Down),
-            Key::Left => Some(Direction::Left),
-            Key::Right => Some(Direction::Right),
-            Key::Enter | Key::Escape | Key::Home | Key::Backspace | Key::Char(_) => None,
-        };
+        self.settings_outcome(event, Some(key))
+    }
+
+    /// Map a settings event to a launcher outcome.
+    ///
+    /// `key` is present only for keyboard input: navigation keys are forwarded
+    /// as wire navigation actions, while pointer and caret updates stay local.
+    fn settings_outcome(&mut self, event: SettingsEvent, key: Option<Key>) -> UiOutcome {
         match event {
-            SettingsEvent::Navigated => match direction {
-                Some(direction) => UiOutcome::Action(Action::Navigate { direction }),
-                None => self.navigated(),
+            SettingsEvent::Navigated => match key {
+                Some(Key::Up) => UiOutcome::Action(Action::Navigate {
+                    direction: Direction::Up,
+                }),
+                Some(Key::Down) => UiOutcome::Action(Action::Navigate {
+                    direction: Direction::Down,
+                }),
+                Some(Key::Left) => UiOutcome::Action(Action::Navigate {
+                    direction: Direction::Left,
+                }),
+                Some(Key::Right) => UiOutcome::Action(Action::Navigate {
+                    direction: Direction::Right,
+                }),
+                _ => self.navigated(),
             },
-            SettingsEvent::Editing | SettingsEvent::Edited | SettingsEvent::Rejected => {
-                self.navigated()
-            }
+            SettingsEvent::Editing
+            | SettingsEvent::Edited
+            | SettingsEvent::CaretMoved
+            | SettingsEvent::Rejected => self.navigated(),
             SettingsEvent::StartPairing => UiOutcome::StartPairing,
             SettingsEvent::StartJellyfinSignIn => UiOutcome::JellyfinSignIn,
             SettingsEvent::SignOutJellyfin => UiOutcome::JellyfinSignOut,
@@ -3307,6 +3409,16 @@ mod native {
                 let model = Arc::clone(&model);
                 let on_command = Arc::clone(&on_command);
                 window.on_key_pressed(move |text, repeat| {
+                    // Slint reports End as a private-use key. It is local-only
+                    // and has meaning only while a settings field is edited.
+                    if text.as_str() == "\u{F72B}" {
+                        with_window(&weak, &model, |window, model| {
+                            if model.settings_caret_to_end() {
+                                refresh(window, model);
+                            }
+                        });
+                        return;
+                    }
                     let Some(key) = crate::input::key_from_text(text.as_str()) else {
                         return;
                     };
@@ -3444,8 +3556,21 @@ mod native {
             let on_command = Arc::clone(on_command);
             window.on_settings_activated(move |index| {
                 with_window(&weak, &model, |window, model| {
-                    model.set_settings_focus(index.max(0) as usize);
-                    handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
+                    let outcome = model.settings_pointer_activate(index.max(0) as usize);
+                    dispatch(&on_command, outcome);
+                    refresh(window, model);
+                });
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let model = Arc::clone(model);
+            let on_command = Arc::clone(on_command);
+            window.on_settings_caret_requested(move |index, fraction| {
+                with_window(&weak, &model, |window, model| {
+                    let outcome = model.settings_pointer_caret(index.max(0) as usize, fraction);
+                    dispatch(&on_command, outcome);
+                    refresh(window, model);
                 });
             });
         }
@@ -3678,7 +3803,7 @@ mod native {
         window.set_settings_left(ModelRc::new(VecModel::from(left_rows)));
         window.set_settings_right(ModelRc::new(VecModel::from(right_rows)));
         window.set_settings_editing(model.settings_editing());
-        window.set_settings_edit_value(model.settings_edit_value().into());
+        window.set_settings_edit_value(model.settings_edit_display().into());
         window.set_settings_message(model.settings_message().into());
         window.set_settings_error(model.settings_error().unwrap_or("").into());
         window.set_settings_quick_code(model.settings_quick_code().unwrap_or("").into());
