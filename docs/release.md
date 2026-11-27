@@ -3,7 +3,7 @@
 This is the operator matrix for the packaged ARM64 kiosk. Rows below contain
 only measured evidence; unrun gates remain **NOT RUN**. The 0.1.13 artifact was
 built by the tag workflow, downloaded, checksum-verified and installed on the
-operator Pi. Rows R0, R2 and R12 have operator evidence; the remaining rows are
+operator Pi. Rows R0, R2, R7 and R12 have operator evidence; the remaining rows are
 still unrun.
 
 The historical C010 result (local YouTube 720p30 under Cage/GLES: 2 dropped
@@ -73,7 +73,7 @@ the SBOM: no credentials, config or state.
 | R4 | YouTube search and playback | Search returns results; local 720p30 under Cage/GLES plays without sustained stutter; 1080p30 is reported unsupported | **NOT RUN** |
 | R5 | Reboot x5 | Five consecutive boots reach the kiosk with exactly one `cage` and one `tv-client`, no duplicate or stale process | **NOT RUN** |
 | R6 | Safe power-loss | After the documented safe procedure the database opens, config is intact, kiosk recovers | **NOT RUN** |
-| R7 | Offline Jellyfin / relay | Local UI shows a typed error without crashing; reconnect recovers without a restart | **NOT RUN** |
+| R7 | Offline Jellyfin / relay | Local UI shows a typed error without crashing; reconnect recovers without a restart | **PASS** (operator TV; network drop/recovery) |
 | R8 | Network relay and reconnect | Remote commands survive a short network loss or fail with a typed ack, then reconnect | **NOT RUN** |
 | R9 | Two-hour soak | 2 h of repeated playback has stable RSS/FD counts, no leaked mpv sockets and no orphan children | **NOT RUN** |
 | R10 | Rollback | Rollback selects the previous release atomically, preserves config/state bytes and restarts the kiosk | **NOT RUN** |
@@ -526,7 +526,7 @@ Status: **NOT RUN**.
 | R4 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R5 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R6 | `<name>` | `<date>` | NOT RUN | `<link>` |
-| R7 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R7 | operator | 2026-11-27 | PASS | operator TV; network drop/recovery |
 | R8 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R9 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R10 | `<name>` | `<date>` | NOT RUN | `<link>` |
