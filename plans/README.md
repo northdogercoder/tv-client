@@ -14,10 +14,10 @@ Greenfield backlog, 2026-11-25. All rows begin TODO; no application code exists 
 | [C008](008-input.md) | Unify keyboard, HDMI-CEC and physical input provenance | P1 | M | HIGH | C004, C006 | DONE |
 | [C009](009-cloud-device.md) | Implement enrollment, pairing and remote command client | P1 | L | MED | C003, C004, C008 | DONE |
 | [C010](010-youtube.md) | Implement YouTube discovery and native local playback | P1 | L | HIGH | C006, C008, C009 | DONE |
-| [C011](011-airplay.md) | Add opt-in LAN AirPlay mirroring | P2 | M | HIGH | C006, C008, C004 | TODO |
-| [C012](012-webrtc.md) | Add optional browser screen sharing receiver | P3 | L | HIGH | C006, C008, C009 | TODO |
-| [C013](013-release.md) | Package, deploy and recover the Pi kiosk | P1 | L | HIGH | C007, C008, C009, C010 | BLOCKED (artifact/hardware NOT RUN) |
-| [C014](014-settings.md) | Add on-device settings, writable config and Jellyfin Quick Connect | P1 | L | HIGH | C004, C005, C009, C010 | TODO |
+| [C011](011-airplay.md) | Add opt-in LAN AirPlay mirroring | P2 | M | HIGH | C006, C008, C004 | IN PROGRESS (module) |
+| [C012](012-webrtc.md) | Add optional browser screen sharing receiver | P3 | L | HIGH | C006, C008, C009 | IN PROGRESS (module; S009 external) |
+| [C013](013-release.md) | Package, deploy and recover the Pi kiosk | P1 | L | HIGH | C007, C008, C009, C010 | BLOCKED (hardware matrix partial) |
+| [C014](014-settings.md) | Add on-device settings, writable config and Jellyfin Quick Connect | P1 | L | HIGH | C004, C005, C009, C010 | IN PROGRESS |
 
 ## Dependency notes
 
@@ -39,6 +39,9 @@ Status: TODO / IN PROGRESS / DONE / BLOCKED (reason) / REJECTED (rationale). Mar
 - **C009 DONE 2026-11-26**: merged in `a5ed6d6` from `advisor/c009-cloud-device` @ `533aa4f`; reviewer APPROVE after two revisions; 28 cloud + 24 cloud-lib tests, combined clippy; enrollment/pairing/device WS/remote actions wired. **Live 2026-11-27:** one-use token minted, device enrolled, `/v1/device/config` + `/v1/youtube/search` PASS (10 items + page 2, 401 unauth); pairing/remote session NOT RUN; test device revoked.
 - **C010 DONE 2026-11-26**: merged in `bf4a3ad` from `advisor/c010-youtube` @ `be41709`; reviewer APPROVE after two revisions; 23 YouTube + 40 lib tests, combined clippy; accepted Pi gate **720p30 under Cage/GLES** (2/240 drops), 1080p unsupported, labwc FAIL, BBB 480p30 smooth; C013 kiosk uses Cage. **Live search PASS 2026-11-27** (10 items + continuation); C004 direct-Cage revalidation PASS via installed 0.1.0 kiosk; bottom overscan and read-only Settings fed C014.
 - **C013 BLOCKED 2026-11-27**: code merged in `e74bd3b` from `advisor/c013-release` @ `92dbb66`; reviewer APPROVE as code. ARM64 artifact **BUILT + attested** (workflow `45916540369`), checksums/AArch64/SBOM verified, installed as **0.1.0**; R1–R4 PASS (artifact, install, kiosk visible after VT switch, tvkiosk no sudo/SSH, persistent state/config). R5–R11 (5 reboots, rollback, offline/relay, YouTube panel, 2h soak) **NOT RUN**; C014 will produce 0.1.1 and require reinstall. Gate flake fix `4306780` retries transient extractor spawns; five consecutive full gates pass.
+- **C011 IN PROGRESS 2026-11-27**: bound at `6f06424`; module phase launched in `advisor/c011-airplay` (`src/cast/airplay.rs`, tests, docs). Pi verified UxPlay 1.71 + Avahi; no sender/Mac proof yet; UI/main integration and network-isolation acceptance pending. C012 module remains disjoint; shared files not touched.
+- **C012 IN PROGRESS 2026-11-27**: bound at `6f06424`; module phase launched in `advisor/c012-webrtc` (consent/SDP/ICE state machine + pipeline contract). Pi has GStreamer 1.26.2 `webrtcbin` and Chromium; S009 server signaling and real browser offer remain external gates, so final joint DONE is BLOCKED until integration.
+- **C014 IN PROGRESS 2026-11-27**: worktree `advisor/c014-settings`; writable 0600 state config, editable Settings, Quick Connect, overscan safe area, installer display-manager/tty1 handling. Settings suite and independent review running; merge/release 0.1.1 pending.
 - **Repository public**: switched to public 2026-11-25 after a history scan found no credentials; GitHub-hosted arm64 runners (`ubuntu-24.04-arm`) are available for C013.
 - **C010 amended 2026-11-25**: server owns YouTube API search/browse only; Pi playback uses yt-dlp + libmpv + ffmpeg. Chromium/IFrame, player tickets, the server player bridge and server-side download/relay are removed/rejected. The TV is 1080p: target H.264 1080p30, fall back to 720p30; 1080p60 hardware-decodes with v4l2m2m but currently desyncs, so do not offer it. Measure a working renderer (Wayland/OpenGL/wlshm); Vulkan/libplacebo is not assumed. The distro yt-dlp is unreliable; a managed version/update policy, client kill switch and typed extractor-unavailable state are required. Depends on C006's exclusive supervisor, C008 input and C009 device auth. `HANDOFF.md` is the live cross-repo contract; re-read it before C010 dispatch.
 
