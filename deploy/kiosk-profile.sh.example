@@ -13,6 +13,13 @@ if [ "$(tty)" = /dev/tty1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
   unset WLR_BACKENDS
   export SLINT_BACKEND=winit-femtovg
 
+  # The kiosk account has no PulseAudio or PipeWire session, so the native
+  # player must open the HDMI card through ALSA directly. Card 0 is the Pi's
+  # `vc4hdmi` device; change TV_AUDIO_DEVICE if the audio is routed elsewhere.
+  # An unset value keeps `autoaudiosink` for generic desktop use.
+  export TV_AUDIO_SINK=alsa
+  export TV_AUDIO_DEVICE=hw:0,0
+
   # Login PAM must supply XDG_RUNTIME_DIR and an active seat. Do not guess a
   # runtime directory: a wrong one starts a broken Wayland session.
   if [ -z "${XDG_RUNTIME_DIR:-}" ]; then

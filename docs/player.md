@@ -35,7 +35,10 @@ UI / reducer ──PlayerCommand──▶ supervisor task ──JSON line──�
   They are never placed in argv, environment variables, filenames or logs.
 - The child writes protocol events to stdout and no diagnostic data to stdout.
   Its stderr is discarded by the parent (`Stdio::null()`); GStreamer's own
-  debug output therefore cannot leak a token into the parent's log.
+  debug output therefore cannot leak a token into the parent's log. The child
+  still emits its own static, secret-free lines to stderr and `/dev/log`
+  (`journalctl -t tv-native-player`), so a foreground run and the kiosk journal
+  both record the selected audio sink and degraded capabilities.
 
 ## Wire protocol
 
@@ -76,6 +79,8 @@ With authentication (the value is redacted here and in all `Debug` output):
 | `ended` | — | Natural end of stream. |
 | `error` | `code`, optional `message` | Failure. `code` is a bounded token; `message` is redacted by both sides. |
 | `tracks` | optional `video`, `audio`, `subtitle` | Selected stream descriptions, diagnostics only. |
+| `stopped` | — | The user stopped playback on the native surface (Esc/Back). The child exits; the parent returns to the launcher instead of reporting a failure. |
+| `degraded` | `code`, optional `message` | A capability is missing but playback continues, for example `input_unavailable` or `audio_unavailable`. `code` is bounded; `message` is redacted by both sides. |
 
 ## State machine
 
@@ -127,23 +132,47 @@ Teardown is idempotent: repeating `Stop` produces no notification and no new
 child. A subsequent `load` starts a fresh child with the next generation.
 
 The child exits on `stop`, stdin EOF (parent died) or the normal `SIGTERM`
-disposition. `Back`/`Esc` is parent-routed (C008); the child does not read the
-keyboard and has no window-manager shortcuts of its own.
+disposition. `Esc`/`Back` on the fullscreen player sends `stopped` and then
+exits; the supervisor reads the child's stdout to EOF before delivering the
+exit notification, so the intentional-stop event is never overtaken by
+`child_exited`. The launcher therefore reappears with no failure toast and no
+remaining child process. A subsequent `load` starts a fresh child with the
+next generation.
 
 ## Decoder and sink selection
 
 `tv-native-player` creates `playbin3` and requests:
 
-- video: `waylandsink` (explicit, so a missing Wayland display fails visibly
-  instead of silently falling back to a CPU sink);
-- audio: `pulsesink`, falling back to `autoaudiosink` only if `pulsesink` is
-  unavailable.
+- video: a `queue ! videoconvert ! textoverlay ! waylandsink` bin when the
+  overlay probe succeeds, otherwise a plain `waylandsink` (explicit, so a
+  missing Wayland display fails visibly instead of silently falling back to a
+  CPU sink);
+- audio: an ordered plan derived from `TV_AUDIO_SINK`/`TV_AUDIO_DEVICE`. The
+  kiosk profile selects `alsasink device=hw:0,0`, then `alsasink
+  device=default`, then `autoaudiosink`. With neither variable set the plan is
+  just `autoaudiosink`, so a generic desktop keeps its detected server. An
+  ALSA candidate whose `/dev/snd/controlC<N>` is absent is skipped, and a
+  sink that errors before or during playback advances to the next candidate
+  (bounded by the list). The last candidate is a silent `fakesink`, so a
+  missing HDMI device cannot turn video playback into a failure.
+
+The chosen plan and sink are logged without secrets and appear in `ready` as
+`sink: "waylandsink+textoverlay; audio=alsasink device=hw:0,0"`. The child
+reads `/dev/input/event*` directly (non-exclusive, never grabbed): Esc/Back
+stops and exits, Space toggles pause, Left/Right seek 10 s, Up/Down change the
+volume by 5. Only key presses are mapped; releases, repeats and unknown codes
+are ignored. The on-screen hint is the `textoverlay` text and updates on
+pause/seek/volume. Without the `input` group the child reports
+`input_unavailable` with `permission denied` and shows that in the overlay.
+HDMI-CEC presses continue to arrive through the parent's CEC bridge; mouse
+control is not implemented because the waylandsink surface has no widgets.
 
 `playbin3` selects the decoder by rank. On the Raspberry Pi 3B, the installed
 `v4l2h264dec` has rank `primary + 1` (257), above software decoders, and is
 selected for H.264. The child listens to `element-setup` and records the first
 video and audio decoder factory names; the `ready` event reports them. The sink
-name is reported as `waylandsink`.
+field combines the video label (`waylandsink` or `waylandsink+textoverlay`) and
+the selected audio sink label, bounded to 120 bytes.
 
 The child does not fabricate a decoder name when none was observed. On a host
 without `v4l2h264dec` the reported decoder will be whichever factory GStreamer
@@ -220,6 +249,10 @@ and audio always have exactly one owner.
 
 > These measurements are short hardware smoke checks, not a soak test. The
 > operator was watching the TV; each run was limited to one 20 s fixture.
+> They were taken before the ALSA/evdev change and used the PulseAudio sink.
+> The current `alsasink device=hw:0,0` path, the `textoverlay` hint, evdev
+> controls, the local-stop exit and the `input` group change are **NOT RUN**
+> on hardware; only the feature-independent headless tests cover them.
 
 Environment: Raspberry Pi 3 Model B Rev 1.2, Debian 13 (trixie), kernel
 `6.18.39+rpt-rpi-v8`, GStreamer 1.26.2, Rust 1.100.0, dev profile with

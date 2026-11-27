@@ -13,8 +13,8 @@ use tv_client::player::{
     ChildCommand, ChildExit, ChildFactory, ChildMessage, CommandOutcome, LoadRequest,
     MAX_LINE_BYTES, MAX_POSITION_MS, PlayerCommand, PlayerError, PlayerEvent, PlayerMachine,
     PlayerNotification, PlayerRequest, PlayerSession, PlayerState, SupervisedChild,
-    SupervisorConfig, decode_event_line, decode_request_line, encode_event, encode_request,
-    read_bounded_line,
+    SupervisorConfig, audio, controls, decode_event_line, decode_request_line, encode_event,
+    encode_request, read_bounded_line,
 };
 
 #[derive(Clone)]
@@ -30,6 +30,8 @@ enum Behavior {
     },
     ExitOnLoad,
     EndAfterReady,
+    /// Play, then stop from the native surface and exit like the real child.
+    StoppedByUser,
     MalformedOnLoad,
     RequireVolume,
 }
@@ -141,6 +143,27 @@ fn fake_child(behavior: Behavior, exits: Arc<AtomicUsize>) -> SupervisedChild {
                                 )
                                 .await;
                                 send_event(&message_tx, PlayerEvent::Ended).await;
+                            }
+                            Behavior::StoppedByUser => {
+                                send_event(
+                                    &message_tx,
+                                    PlayerEvent::Ready {
+                                        decoder: None,
+                                        sink: None,
+                                    },
+                                )
+                                .await;
+                                send_event(
+                                    &message_tx,
+                                    PlayerEvent::Position {
+                                        position_ms: load.start_position_ms.unwrap_or(0),
+                                        duration_ms: Some(60_000),
+                                    },
+                                )
+                                .await;
+                                send_event(&message_tx, PlayerEvent::Stopped).await;
+                                send_exit(&message_tx, &exits).await;
+                                return;
                             }
                             Behavior::Silent => {}
                             Behavior::MalformedOnLoad => {
@@ -869,6 +892,267 @@ async fn ending_tears_down_the_child_and_reports_ended() {
             state: PlayerState::Ended
         })
     ));
+}
+
+#[test]
+fn audio_plan_prefers_alsa_for_the_kiosk_and_keeps_a_desktop_default() {
+    // A generic desktop has no configuration and keeps GStreamer's detection.
+    let plan = audio::AudioSinkPlan::from_values(None, None);
+    assert_eq!(plan.candidates().len(), 1);
+    assert_eq!(plan.candidates()[0].factory(), "autoaudiosink");
+    assert!(plan.warning().is_none());
+
+    // The kiosk asks for the deterministic HDMI path, then the host ALSA
+    // default, then GStreamer's auto-detection.
+    let plan = audio::AudioSinkPlan::from_values(Some("alsa"), None);
+    let factories: Vec<_> = plan
+        .candidates()
+        .iter()
+        .map(audio::AudioSinkSpec::factory)
+        .collect();
+    assert_eq!(factories, ["alsasink", "alsasink", "autoaudiosink"]);
+    assert_eq!(plan.candidates()[0].device(), Some("hw:0,0"));
+    assert_eq!(plan.candidates()[1].device(), Some("default"));
+    assert!(plan.describe().contains("hw:0,0"));
+    assert!(plan.warning().is_none());
+
+    let plan = audio::AudioSinkPlan::from_values(Some("ALSA"), Some(" plughw:1,3 "));
+    assert_eq!(plan.candidates()[0].device(), Some("plughw:1,3"));
+
+    // A device with a newline or other unsafe bytes must never reach GStreamer
+    // or a log line; the safe HDMI default is used instead.
+    let plan = audio::AudioSinkPlan::from_values(Some("alsa"), Some("hw:0,0\ninjected"));
+    assert_eq!(plan.candidates()[0].device(), Some("hw:0,0"));
+
+    let plan = audio::AudioSinkPlan::from_values(Some("bogus"), None);
+    assert_eq!(plan.warning(), Some("unknown_audio_sink"));
+    assert_eq!(plan.candidates()[0].factory(), "autoaudiosink");
+
+    let plan = audio::AudioSinkPlan::from_values(Some("pulse"), None);
+    let factories: Vec<_> = plan
+        .candidates()
+        .iter()
+        .map(audio::AudioSinkSpec::factory)
+        .collect();
+    assert_eq!(factories, ["pulsesink", "autoaudiosink"]);
+
+    assert_eq!(audio::silent_fallback().factory(), "fakesink");
+}
+
+#[test]
+fn alsa_device_card_parsing_is_exact() {
+    assert_eq!(audio::alsa_card("hw:0,0"), Some(0));
+    assert_eq!(audio::alsa_card("plughw:2,7"), Some(2));
+    assert_eq!(audio::alsa_card("default"), None);
+    assert_eq!(audio::alsa_card("hw:CARD=vc4hdmi,DEV=0"), None);
+    assert_eq!(audio::alsa_card(""), None);
+}
+
+#[test]
+fn evdev_key_mapping_is_bounded_and_ignores_releases() {
+    use controls::KeyAction;
+
+    assert_eq!(
+        controls::map_key(controls::KEY_ESC, 1),
+        Some(KeyAction::Stop)
+    );
+    assert_eq!(
+        controls::map_key(controls::KEY_BACK, 1),
+        Some(KeyAction::Stop)
+    );
+    assert_eq!(
+        controls::map_key(controls::KEY_SPACE, 1),
+        Some(KeyAction::TogglePause)
+    );
+    assert_eq!(
+        controls::map_key(controls::KEY_PLAYPAUSE, 1),
+        Some(KeyAction::TogglePause)
+    );
+    assert_eq!(
+        controls::map_key(controls::KEY_LEFT, 1),
+        Some(KeyAction::SeekBackward)
+    );
+    assert_eq!(
+        controls::map_key(controls::KEY_RIGHT, 1),
+        Some(KeyAction::SeekForward)
+    );
+    assert_eq!(
+        controls::map_key(controls::KEY_UP, 1),
+        Some(KeyAction::VolumeUp)
+    );
+    assert_eq!(
+        controls::map_key(controls::KEY_DOWN, 1),
+        Some(KeyAction::VolumeDown)
+    );
+    // Releases, kernel repeats and unknown codes are ignored, never executed.
+    assert_eq!(controls::map_key(controls::KEY_ESC, 0), None);
+    assert_eq!(controls::map_key(controls::KEY_ESC, 2), None);
+    assert_eq!(controls::map_key(29_999, 1), None);
+}
+
+#[test]
+fn evdev_records_are_parsed_only_as_full_key_presses() {
+    use controls::KeyAction;
+
+    let mut record = [0u8; controls::EVDEV_EVENT_BYTES];
+    let tail = record.len() - 8;
+    record[tail..tail + 2].copy_from_slice(&controls::EVDEV_KEY.to_ne_bytes());
+    record[tail + 2..tail + 4].copy_from_slice(&controls::KEY_SPACE.to_ne_bytes());
+    record[tail + 4..].copy_from_slice(&1i32.to_ne_bytes());
+    assert_eq!(controls::parse_evdev(&record), Some(KeyAction::TogglePause));
+
+    record[tail + 4..].copy_from_slice(&0i32.to_ne_bytes());
+    assert_eq!(controls::parse_evdev(&record), None, "release ignored");
+
+    record[tail..tail + 2].copy_from_slice(&0u16.to_ne_bytes());
+    record[tail + 4..].copy_from_slice(&1i32.to_ne_bytes());
+    assert_eq!(
+        controls::parse_evdev(&record),
+        None,
+        "non-key event ignored"
+    );
+
+    assert_eq!(controls::parse_evdev(&record[..record.len() - 1]), None);
+}
+
+#[test]
+fn seek_volume_and_hint_stay_inside_the_protocol_bounds() {
+    assert_eq!(controls::seek_target(5_000, Some(60_000), true), 15_000);
+    assert_eq!(controls::seek_target(5_000, Some(60_000), false), 0);
+    assert_eq!(controls::seek_target(59_000, Some(60_000), true), 60_000);
+    assert_eq!(
+        controls::seek_target(MAX_POSITION_MS - 1_000, None, true),
+        MAX_POSITION_MS
+    );
+
+    assert_eq!(controls::volume_step(0, false), 0);
+    assert_eq!(controls::volume_step(100, true), 100);
+    assert_eq!(controls::volume_step(50, true), 55);
+    assert_eq!(controls::volume_step(50, false), 45);
+
+    let hint = controls::hint_text(true, "");
+    assert!(hint.contains("ESC"));
+    assert!(hint.contains("SPACE"));
+    let unavailable = controls::hint_text(false, "permission denied");
+    assert!(unavailable.contains("unavailable"));
+    assert!(unavailable.contains("permission denied"));
+
+    // Status text cannot inject extra lines or grow without bound.
+    let injected = controls::hint_text(true, "one\nsecond\nthird");
+    assert!(injected.lines().count() <= 2);
+    let huge = controls::hint_text(true, &"z".repeat(4_096));
+    assert!(huge.len() <= controls::MAX_HINT_BYTES);
+}
+
+#[test]
+fn degraded_and_stopped_events_are_typed_and_never_fail() {
+    let mut machine = PlayerMachine::new();
+    machine
+        .apply_command(load("file:///tmp/local-stop.mp4"))
+        .expect("load accepted");
+    let generation = machine.generation();
+    machine
+        .apply_event(
+            generation,
+            PlayerEvent::Ready {
+                decoder: None,
+                sink: None,
+            },
+        )
+        .expect("ready accepted");
+    assert_eq!(machine.state(), PlayerState::Playing);
+
+    let notes = machine
+        .apply_event(
+            generation,
+            PlayerEvent::Degraded {
+                code: "input_unavailable".to_string(),
+                message: Some("permission denied".to_string()),
+            },
+        )
+        .expect("degraded accepted");
+    assert!(matches!(
+        notes.as_slice(),
+        [PlayerNotification::Degraded { code, .. }] if code == "input_unavailable"
+    ));
+    assert_eq!(machine.state(), PlayerState::Playing);
+    assert!(machine.failure().is_none());
+
+    let notes = machine
+        .apply_event(generation, PlayerEvent::Stopped)
+        .expect("stopped accepted");
+    assert!(matches!(
+        notes.as_slice(),
+        [PlayerNotification::State {
+            state: PlayerState::Idle,
+            ..
+        }]
+    ));
+    assert_eq!(machine.state(), PlayerState::Idle);
+    assert!(machine.failure().is_none());
+    assert!(
+        machine
+            .apply_event(generation, PlayerEvent::Stopped)
+            .expect("second stopped accepted")
+            .is_empty(),
+        "a repeated stop must not emit another notification"
+    );
+}
+
+#[test]
+fn stopped_and_degraded_event_lines_round_trip_with_bounded_text() {
+    assert_eq!(
+        decode_event_line("{\"type\":\"stopped\"}").expect("stopped decodes"),
+        PlayerEvent::Stopped
+    );
+    let degraded = decode_event_line(
+        "{\"type\":\"degraded\",\"code\":\"audio_unavailable\",\"message\":\"no device\"}",
+    )
+    .expect("degraded decodes");
+    match degraded {
+        PlayerEvent::Degraded { code, message } => {
+            assert_eq!(code, "audio_unavailable");
+            assert_eq!(message.as_deref(), Some("no device"));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    assert!(decode_event_line("{\"type\":\"degraded\",\"code\":\"bad code\"}").is_err());
+
+    let redacted = decode_event_line(
+        "{\"type\":\"degraded\",\"code\":\"input_unavailable\",\"message\":\"open http://x/y?token=SECRET failed\"}",
+    )
+    .expect("degraded decodes");
+    let text = format!("{redacted:?}");
+    assert!(!text.contains("SECRET"), "degraded detail leaked: {text}");
+    assert!(!text.contains("token="), "degraded detail leaked: {text}");
+}
+
+#[tokio::test]
+async fn local_stop_returns_to_the_launcher_without_a_failure() {
+    let mut factory = FakeFactory::new([Behavior::StoppedByUser]);
+    let mut session =
+        PlayerSession::start(factory_proxy(&mut factory), config(), 8, 64).expect("session starts");
+    session
+        .send(load("file:///tmp/local-stop.mp4"))
+        .await
+        .expect("load");
+
+    expect_state(&mut session, PlayerState::Loading).await;
+    expect_state(&mut session, PlayerState::Playing).await;
+    // The child sends `stopped` and exits. The parent must treat that as a
+    // clean return to the launcher, not as `child_exited`.
+    expect_state(&mut session, PlayerState::Idle).await;
+    let quiet = tokio::time::timeout(Duration::from_millis(300), session.next()).await;
+    assert!(
+        quiet.is_err(),
+        "local stop produced an extra notification: {quiet:?}"
+    );
+
+    let machine = session.shutdown().await.expect("clean shutdown");
+    assert_eq!(machine.state(), PlayerState::Idle);
+    assert!(machine.failure().is_none());
+    assert_eq!(factory.exits(), 1);
 }
 
 #[test]
