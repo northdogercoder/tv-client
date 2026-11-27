@@ -245,10 +245,21 @@ fn release_workflow_pins_actions_and_never_uses_secrets() {
         "fork pull requests must not run with a write-capable trigger"
     );
     assert!(
-        !workflow.contains("contents: write"),
-        "the release workflow does not need contents: write"
+        workflow.contains("permissions:\n  contents: read"),
+        "the top-level workflow permission must stay read-only"
     );
-    assert!(workflow.contains("permissions:\n  contents: read"));
+    assert!(
+        workflow.contains("publish:\n    name: publish-github-release"),
+        "tag builds must publish a GitHub Release"
+    );
+    assert!(
+        workflow.contains("permissions:\n      contents: write"),
+        "only the tag-only publish job needs contents: write"
+    );
+    assert!(
+        workflow.contains("if: startsWith(github.ref, 'refs/tags/v')"),
+        "publishing must be restricted to tags"
+    );
     assert!(workflow.contains("id-token: write"));
     assert!(workflow.contains("attestations: write"));
     assert!(
@@ -1141,7 +1152,11 @@ fn release_inventory_is_cyclonedx_and_lists_licenses() {
 #[test]
 fn native_player_hardware_path_is_configured_and_documented_as_unrun() {
     let profile = read("deploy/kiosk-profile.sh.example");
-    for needle in ["TV_AUDIO_SINK=alsa", "TV_AUDIO_DEVICE=hw:0,0"] {
+    for needle in [
+        "TV_AUDIO_SINK=alsa",
+        "TV_AUDIO_DEVICE=hw:0,0",
+        "TV_PLAYER_OVERLAY=off",
+    ] {
         assert!(
             profile.contains(needle),
             "kiosk profile is missing {needle:?}"

@@ -27,9 +27,30 @@ copy values from a plan or a previous release.
 | Install date | `<YYYY-MM-DD>` |
 | Operator | `<name>` |
 
-Status: **NOT BUILT**. The workflow exists at `.github/workflows/release.yml`;
-it was not dispatched, pushed or run by C013. No checksum, ELF inspection or
-attestation result is recorded here.
+Status: **0.1.0 and 0.1.1 built, attested and installed; 0.1.2 is building.**
+The tag workflow at `.github/workflows/release.yml` builds on
+`ubuntu-24.04-arm`, verifies the AArch64 ELF, packages the SBOM/NOTICES and
+checksums, attests provenance, then publishes a GitHub Release for tag builds
+only. Pull-request builds never publish and have read-only permissions.
+
+## GitHub Releases
+
+For each `v*` tag the `publish-github-release` job creates the release with:
+
+- `tv-client-linux-arm64-<version>.tar.gz`
+- `NOTICES`, `SBOM.cdx.json`, `SHA256SUMS`
+
+Verify before installing:
+
+```sh
+gh release download v<version> --pattern 'tv-client-linux-arm64-*' --pattern 'SHA256SUMS'
+sha256sum -c SHA256SUMS
+gh attestation verify tv-client-linux-arm64-<version>.tar.gz --repo northdogercoder/tv-client
+```
+
+The publish job is tag-gated and the only job with `contents: write`; it never
+runs for pull requests. The tarball contains only the two binaries, NOTICES and
+the SBOM: no credentials, config or state.
 
 ## Lab target
 
@@ -220,7 +241,9 @@ target and **no Pi hardware was used**:
 - **NOT RUN** — HDMI audio through `alsasink device=hw:0,0` as `tvkiosk`.
 - **NOT RUN** — ALSA fallback order (`hw:0,0`, then `default`, then
   `autoaudiosink`, then a silent `fakesink`) with the HDMI card absent.
-- **NOT RUN** — `textoverlay` hint visible over video at 720p30.
+- **NOT RUN** — optional `TV_PLAYER_OVERLAY=on` hint visible at 720p30; the
+  default is off because the overlay's per-frame `videoconvert` made playback
+  choppy on the Pi 3B.
 - **NOT RUN** — evdev Esc/Back stop, Space pause, Left/Right seek and Up/Down
   volume; no child process remains and the launcher returns without a failure.
 - **NOT RUN** — the `input_unavailable` degraded state when `tvkiosk` is not in
@@ -229,9 +252,9 @@ target and **no Pi hardware was used**:
   and the reinstall that applies the new profile.
 
 A generic desktop keeps `autoaudiosink`; only `deploy/kiosk-profile.sh.example`
-sets `TV_AUDIO_SINK=alsa` and `TV_AUDIO_DEVICE=hw:0,0`. Set
-`TV_PLAYER_OVERLAY=off` to disable the hint. Verification commands to run on
-the Pi after reinstall (status **NOT RUN**):
+sets `TV_AUDIO_SINK=alsa` and `TV_AUDIO_DEVICE=hw:0,0`. The kiosk profile also
+sets `TV_PLAYER_OVERLAY=off`; set `on` only for OSD experiments. Verification
+commands to run on the Pi after reinstall (status **NOT RUN**):
 
 ```sh
 id -nG tvkiosk
@@ -248,9 +271,9 @@ evidence.
 
 HDMI-CEC remote keys still travel through the parent's CEC bridge; mouse
 control is not implemented on the waylandsink surface. Both are limitations,
-not verified features. The `textoverlay` bin inserts a `videoconvert` copy per
-frame, so 720p30 frame headroom with the hint enabled is **NOT RUN** on
-hardware; `TV_PLAYER_OVERLAY=off` falls back to the plain `waylandsink` path.
+not verified features. The opt-in `textoverlay` bin inserts a `videoconvert`
+copy per frame and made 0.1.2 video a slideshow on the Pi 3B; 0.1.3 defaults
+to the plain `waylandsink` path and keeps keyboard controls.
 
 ## R3: pairing and cloud control
 
