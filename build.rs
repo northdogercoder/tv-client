@@ -7,10 +7,11 @@
 use std::path::Path;
 
 /// Declarative UI sources, relative to the package root.
-const UI_SOURCES: [&str; 7] = [
+const UI_SOURCES: [&str; 8] = [
     "ui/app.slint",
     "ui/cast.slint",
     "ui/home.slint",
+    "ui/jellyfin.slint",
     "ui/library.slint",
     "ui/pair.slint",
     "ui/player.slint",

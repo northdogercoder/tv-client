@@ -18,9 +18,9 @@ use url::Url;
 use crate::jellyfin::{
     ArtworkClass, BrowseItem, CachedArtwork, CancelToken, ImageRequest, ImageType, ItemQuery,
     JellyfinClient, JellyfinError, LibraryEntry, MAX_PLAYBACK_START_TICKS, MediaSelection,
-    MediaStreamChoice, MediaStreamInfo, Page, PlayMethod, PlaybackInfoOptions, PlaybackProgressInfo,
-    PlaybackStartInfo, PlaybackStopInfo, SelectionError, SelectionOptions, TICKS_PER_MILLISECOND,
-    UserItemData, select_media_source,
+    MediaStreamChoice, MediaStreamInfo, Page, PlayMethod, PlaybackInfoOptions,
+    PlaybackProgressInfo, PlaybackStartInfo, PlaybackStopInfo, SelectionError, SelectionOptions,
+    TICKS_PER_MILLISECOND, UserItemData, select_media_source,
 };
 use crate::player::{
     LoadRequest, MAX_POSITION_MS, PlayerCommand, PlayerError, PlayerNotification, PlayerSession,
@@ -1174,7 +1174,10 @@ impl PlaybackController {
                 item_id,
                 tag,
                 class,
-            } => self.load_artwork(&item_id, tag.as_deref(), class, cancel).await,
+            } => {
+                self.load_artwork(&item_id, tag.as_deref(), class, cancel)
+                    .await
+            }
             PlaybackCommand::Unsupported { code, message } => {
                 let mut updates = self.stop(cancel).await;
                 updates.push(PlaybackUpdate::Failed {
@@ -1245,11 +1248,7 @@ impl PlaybackController {
         start_index: u32,
         cancel: &CancelToken,
     ) -> Vec<PlaybackUpdate> {
-        match self
-            .client
-            .browse(library_id, start_index, cancel)
-            .await
-        {
+        match self.client.browse(library_id, start_index, cancel).await {
             Ok(result) => {
                 let items: Vec<BrowseItem> = result
                     .items
@@ -1257,10 +1256,10 @@ impl PlaybackController {
                     .take(crate::jellyfin::BROWSE_PAGE_SIZE as usize)
                     .map(BrowseItem::from_base_item)
                     .collect();
-                let next = start_index.saturating_add(
-                    u32::try_from(items.len()).unwrap_or(u32::MAX),
-                );
-                let next_start = if !items.is_empty() && u64::from(next) < result.total_record_count {
+                let next =
+                    start_index.saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
+                let next_start = if !items.is_empty() && u64::from(next) < result.total_record_count
+                {
                     Some(next)
                 } else {
                     None
@@ -1296,12 +1295,8 @@ impl PlaybackController {
                 class,
             })];
         };
-        let request = match ImageRequest::with_class(
-            item_id,
-            ImageType::Primary,
-            Some(tag),
-            class,
-        ) {
+        let request = match ImageRequest::with_class(item_id, ImageType::Primary, Some(tag), class)
+        {
             Ok(request) => request,
             Err(error) => {
                 return vec![PlaybackUpdate::Browse(BrowseUpdate::ArtworkFailed {
@@ -1311,7 +1306,9 @@ impl PlaybackController {
                 })];
             }
         };
-        let Self { client, storage, .. } = self;
+        let Self {
+            client, storage, ..
+        } = self;
         let Some(storage) = storage.as_mut() else {
             return vec![PlaybackUpdate::Browse(BrowseUpdate::ArtworkFailed {
                 item_id: item_id.to_owned(),

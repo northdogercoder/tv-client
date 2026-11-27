@@ -705,7 +705,9 @@ async fn browse_query_is_parent_scoped_fielded_and_bounded() {
     assert_eq!(query.get("Limit").map(String::as_str), Some("24"));
     assert_eq!(query.get("Recursive").map(String::as_str), Some("true"));
     assert!(
-        requests.iter().all(|request| !request.target.contains("http")),
+        requests
+            .iter()
+            .all(|request| !request.target.contains("http")),
         "requests stay on the configured path"
     );
 }
@@ -814,11 +816,9 @@ async fn per_class_artwork_caps_reject_oversized_payloads() {
         "/Users/AuthenticateByName" => auth_response(),
         "/Items/wide/Images/Primary" => MockResponse::bytes(200, "image/png", png(321, 480)),
         "/Items/tall/Images/Primary" => MockResponse::bytes(200, "image/png", png(1280, 721)),
-        "/Items/big/Images/Primary" => MockResponse::bytes(
-            200,
-            "image/png",
-            vec![0_u8; 2 * 1024 * 1024 + 1],
-        ),
+        "/Items/big/Images/Primary" => {
+            MockResponse::bytes(200, "image/png", vec![0_u8; 2 * 1024 * 1024 + 1])
+        }
         _ => MockResponse::empty(404),
     });
     let directory = temp_dir();

@@ -9,21 +9,36 @@
 //! Remote wire actions and local physical input are distinct input paths. A
 //! remote action can never approve the local confirmation prompt.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::time::Duration;
 
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::jellyfin::{ArtworkClass, BrowseItem, CachedArtwork, LibraryEntry};
 use crate::model::{
     Action, AppState, Direction, InputOrigin, Mode, Source, is_valid_item_id, is_valid_youtube_id,
 };
-use crate::playback::{LibraryFilter, PlaybackUpdate};
+use crate::playback::{BrowseUpdate, LibraryFilter, PlaybackUpdate};
 use crate::settings::{RowKind, SettingsEvent, SettingsForm, SettingsRowView};
 
 /// Number of entries on the home screen.
 pub const HOME_ROW_COUNT: usize = 5;
 /// Maximum number of library entries retained by the view model.
 pub const MAX_LIBRARY_ITEMS: usize = 64;
+/// Maximum number of Jellyfin library views retained by the browse model.
+pub const MAX_JELLYFIN_LIBRARIES: usize = 32;
+/// Fixed column count of the Jellyfin library tile grid.
+pub const JELLYFIN_LIBRARY_COLUMNS: usize = 4;
+/// Fixed column count of the Jellyfin poster grid.
+pub const JELLYFIN_POSTER_COLUMNS: usize = 5;
+/// Maximum poster requests issued for one item page.
+pub const MAX_POSTER_REQUESTS_PER_PAGE: usize = 24;
+/// Maximum artwork entries retained for the active library.
+pub const MAX_JELLYFIN_ARTWORK: usize = MAX_LIBRARY_ITEMS + 1;
+/// Short error shown when the Jellyfin session is no longer valid.
+pub const SESSION_EXPIRED_MESSAGE: &str = "Jellyfin session expired; sign in again";
 /// Maximum search query length in characters.
 pub const MAX_QUERY_CHARS: usize = 48;
 /// Maximum error text length in characters.
@@ -171,6 +186,9 @@ pub enum Screen {
     Player,
     Settings,
     Cast,
+    JellyfinLibraries,
+    JellyfinItems,
+    Preview,
 }
 
 impl Screen {
@@ -183,6 +201,9 @@ impl Screen {
             Self::Player => 2,
             Self::Settings => 3,
             Self::Cast => 4,
+            Self::JellyfinLibraries => 5,
+            Self::JellyfinItems => 6,
+            Self::Preview => 7,
         }
     }
 }
@@ -393,9 +414,43 @@ pub enum UiReject {
     Unavailable,
 }
 
+/// Typed Jellyfin browse request emitted by local navigation.
+///
+/// The view model only names opaque item IDs, server-supplied image tags and a
+/// size class. It never stores or emits a server URL, access token or stream
+/// path; the controller resolves these values through its authenticated client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiBrowseCommand {
+    /// Fetch the user's top-level library views.
+    LoadLibraries,
+    /// Fetch one bounded item page below a library view.
+    LoadItems {
+        /// Opaque library (view) identifier used as the parent.
+        library_id: String,
+        /// Zero-based first item index.
+        start_index: u32,
+    },
+    /// Fetch one cached poster or preview image.
+    LoadArtwork {
+        /// Opaque item identifier.
+        item_id: String,
+        /// Server image tag, when the item supplied one.
+        tag: Option<String>,
+        /// Requested size class.
+        class: ArtworkClass,
+    },
+}
+
 /// Result of feeding one input event to the view model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiOutcome {
+    /// Request a Jellyfin browse or artwork fetch.
+    Browse(UiBrowseCommand),
+    /// Play one validated Jellyfin item from the preview screen.
+    PlayJellyfin {
+        /// Opaque item identifier.
+        item_id: String,
+    },
     /// Send this protocol action to the reducer.
     Action(Action),
     /// Approve a pending pairing request from local input.
@@ -733,6 +788,205 @@ impl LibraryView {
     }
 }
 
+/// Identity of one cached artwork variant inside the browse view.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ArtworkKey {
+    item_id: String,
+    class: ArtworkClass,
+}
+
+impl ArtworkKey {
+    fn new(item_id: &str, class: ArtworkClass) -> Self {
+        Self {
+            item_id: item_id.to_owned(),
+            class,
+        }
+    }
+}
+
+/// Jellyfin browse screens: libraries, one library's poster grid, and preview.
+///
+/// The view stores opaque IDs, bounded metadata and local cache paths only.
+/// Artwork is requested through `pending_browse` so a controller update can
+/// trigger bounded poster fetches without giving the controller UI policy.
+#[derive(Debug, Clone)]
+struct JellyfinView {
+    libraries: Vec<LibraryEntry>,
+    libraries_load: LoadState,
+    library_focus: usize,
+    library_selected: Option<String>,
+    items: Vec<BrowseItem>,
+    items_load: LoadState,
+    items_library_id: Option<String>,
+    items_focus: usize,
+    items_selected: Option<String>,
+    items_start: u32,
+    items_next_start: Option<u32>,
+    items_total: u64,
+    preview: Option<BrowseItem>,
+    preview_focus: usize,
+    artwork: BTreeMap<ArtworkKey, Option<CachedArtwork>>,
+    artwork_requested: BTreeSet<ArtworkKey>,
+    pending_browse: Vec<UiBrowseCommand>,
+    artwork_epoch: u64,
+}
+
+impl Default for JellyfinView {
+    fn default() -> Self {
+        Self {
+            libraries: Vec::new(),
+            libraries_load: LoadState::Idle,
+            library_focus: 0,
+            library_selected: None,
+            items: Vec::new(),
+            items_load: LoadState::Idle,
+            items_library_id: None,
+            items_focus: 0,
+            items_selected: None,
+            items_start: 0,
+            items_next_start: None,
+            items_total: 0,
+            preview: None,
+            preview_focus: 0,
+            artwork: BTreeMap::new(),
+            artwork_requested: BTreeSet::new(),
+            pending_browse: Vec::new(),
+            artwork_epoch: 0,
+        }
+    }
+}
+
+impl JellyfinView {
+    fn item_slots(&self) -> usize {
+        self.items.len() + if self.next_page_available() { 1 } else { 0 }
+    }
+
+    fn next_page_available(&self) -> bool {
+        self.items_next_start.is_some() && self.items.len() < MAX_LIBRARY_ITEMS
+    }
+
+    fn refresh_library_selection(&mut self) {
+        if self.libraries.is_empty() {
+            self.library_focus = 0;
+            self.library_selected = None;
+            return;
+        }
+        let position = self
+            .library_selected
+            .as_ref()
+            .and_then(|id| self.libraries.iter().position(|library| &library.id == id))
+            .unwrap_or_else(|| self.library_focus.min(self.libraries.len() - 1));
+        self.library_focus = position;
+        self.library_selected = Some(self.libraries[position].id.clone());
+    }
+
+    fn refresh_item_selection(&mut self) {
+        let slots = self.item_slots();
+        if slots == 0 {
+            self.items_focus = 0;
+            self.items_selected = None;
+            return;
+        }
+        let position = self
+            .items_selected
+            .as_ref()
+            .and_then(|id| {
+                self.items
+                    .iter()
+                    .position(|item| &item.id == id)
+                    .or_else(|| self.next_page_available().then_some(self.items.len()))
+            })
+            .unwrap_or_else(|| self.items_focus.min(slots - 1));
+        self.items_focus = position;
+        self.items_selected = self.items.get(position).map(|item| item.id.clone());
+    }
+
+    fn selected_library(&self) -> Option<&LibraryEntry> {
+        self.libraries.get(self.library_focus)
+    }
+
+    fn selected_item(&self) -> Option<&BrowseItem> {
+        self.items.get(self.items_focus)
+    }
+
+    fn on_more_slot(&self) -> bool {
+        self.next_page_available() && self.items_focus == self.items.len()
+    }
+
+    fn poster_path(&self, item_id: &str) -> Option<&Path> {
+        self.artwork
+            .get(&ArtworkKey::new(item_id, ArtworkClass::Poster))
+            .and_then(Option::as_ref)
+            .map(CachedArtwork::path)
+    }
+
+    fn preview_path(&self, item_id: &str) -> Option<&Path> {
+        self.artwork
+            .get(&ArtworkKey::new(item_id, ArtworkClass::Preview))
+            .and_then(Option::as_ref)
+            .map(CachedArtwork::path)
+            .or_else(|| self.poster_path(item_id))
+    }
+
+    fn truncate_artwork(&mut self) {
+        while self.artwork.len() > MAX_JELLYFIN_ARTWORK {
+            let Some(oldest) = self.artwork.keys().next().cloned() else {
+                break;
+            };
+            self.artwork.remove(&oldest);
+        }
+    }
+
+    fn clear_artwork(&mut self) {
+        self.artwork.clear();
+        self.artwork_requested.clear();
+        self.artwork_epoch = self.artwork_epoch.wrapping_add(1);
+    }
+
+    fn queue(&mut self, command: UiBrowseCommand) {
+        // One page of posters plus a preview fits comfortably; the cap only
+        // protects against a pathological controller update sequence.
+        if self.pending_browse.len() < MAX_JELLYFIN_ARTWORK {
+            self.pending_browse.push(command);
+        }
+    }
+
+    fn queue_artwork(&mut self, item: &BrowseItem, class: ArtworkClass) {
+        let key = ArtworkKey::new(&item.id, class);
+        if !self.artwork_requested.insert(key.clone()) {
+            return;
+        }
+        if self.artwork.len() >= MAX_JELLYFIN_ARTWORK {
+            self.truncate_artwork();
+        }
+        let tag = item.primary_tag.as_deref().filter(|tag| {
+            !tag.is_empty() && tag.len() <= 128 && !tag.chars().any(char::is_control)
+        });
+        match tag {
+            Some(tag) => self.queue(UiBrowseCommand::LoadArtwork {
+                item_id: item.id.clone(),
+                tag: Some(tag.to_owned()),
+                class,
+            }),
+            None => {
+                self.artwork.insert(key, None);
+                self.truncate_artwork();
+            }
+        }
+    }
+
+    fn request_page_artwork(&mut self, first: usize, page_len: usize) {
+        let end = first.saturating_add(page_len).min(self.items.len());
+        for (requested, index) in (first..end).enumerate() {
+            if requested >= MAX_POSTER_REQUESTS_PER_PAGE {
+                break;
+            }
+            let item = self.items[index].clone();
+            self.queue_artwork(&item, ArtworkClass::Poster);
+        }
+    }
+}
+
 /// Complete UI-local state. This type is always compiled and Slint-free.
 #[derive(Debug, Clone)]
 pub struct UiModel {
@@ -752,6 +1006,7 @@ pub struct UiModel {
     resume: Option<MediaItem>,
     continue_watching: Vec<MediaItem>,
     youtube_request_id: u64,
+    jellyfin: JellyfinView,
 }
 
 impl Default for UiModel {
@@ -773,6 +1028,7 @@ impl Default for UiModel {
             resume: None,
             continue_watching: Vec::new(),
             youtube_request_id: 0,
+            jellyfin: JellyfinView::default(),
         }
     }
 }
@@ -1007,6 +1263,208 @@ impl UiModel {
     #[must_use]
     pub fn stored_item_count(&self) -> usize {
         self.library.items.len()
+    }
+
+    /// Jellyfin library views currently held by the browse model.
+    #[must_use]
+    pub fn jellyfin_libraries(&self) -> &[LibraryEntry] {
+        &self.jellyfin.libraries
+    }
+
+    /// Load state of the Jellyfin library grid.
+    #[must_use]
+    pub fn jellyfin_libraries_load(&self) -> &LoadState {
+        &self.jellyfin.libraries_load
+    }
+
+    /// Focused library tile index.
+    #[must_use]
+    pub const fn jellyfin_library_focus(&self) -> usize {
+        self.jellyfin.library_focus
+    }
+
+    /// Selected library identifier, when one is focused.
+    #[must_use]
+    pub fn jellyfin_selected_library_id(&self) -> Option<&str> {
+        self.jellyfin.library_selected.as_deref()
+    }
+
+    /// Selected poster item identifier; `None` on the More slot or an empty grid.
+    #[must_use]
+    pub fn jellyfin_selected_item_id(&self) -> Option<&str> {
+        self.jellyfin.items_selected.as_deref()
+    }
+
+    /// Next page start reported by the last items response.
+    #[must_use]
+    pub const fn jellyfin_next_start(&self) -> Option<u32> {
+        self.jellyfin.items_next_start
+    }
+
+    /// Name of the library whose items are shown, when known.
+    #[must_use]
+    pub fn jellyfin_library_name(&self) -> &str {
+        self.jellyfin
+            .items_library_id
+            .as_ref()
+            .and_then(|id| {
+                self.jellyfin
+                    .libraries
+                    .iter()
+                    .find(|library| &library.id == id)
+            })
+            .map(|library| library.name.as_str())
+            .unwrap_or("Jellyfin")
+    }
+
+    /// Poster-grid items currently held by the browse model.
+    #[must_use]
+    pub fn jellyfin_items(&self) -> &[BrowseItem] {
+        &self.jellyfin.items
+    }
+
+    /// Load state of the poster grid.
+    #[must_use]
+    pub fn jellyfin_items_load(&self) -> &LoadState {
+        &self.jellyfin.items_load
+    }
+
+    /// Focused poster slot. The value equals `items().len()` when the
+    /// focusable More tile is selected.
+    #[must_use]
+    pub const fn jellyfin_item_focus(&self) -> usize {
+        self.jellyfin.items_focus
+    }
+
+    /// Number of focusable poster slots, including an available More tile.
+    #[must_use]
+    pub fn jellyfin_item_slots(&self) -> usize {
+        self.jellyfin.item_slots()
+    }
+
+    /// Total matching items reported by the server.
+    #[must_use]
+    pub const fn jellyfin_total(&self) -> u64 {
+        self.jellyfin.items_total
+    }
+
+    /// Whether an explicit More page can be requested.
+    #[must_use]
+    pub fn jellyfin_next_page_available(&self) -> bool {
+        self.jellyfin.next_page_available()
+    }
+
+    /// Current preview item, if the preview screen was opened.
+    #[must_use]
+    pub fn jellyfin_preview(&self) -> Option<&BrowseItem> {
+        self.jellyfin.preview.as_ref()
+    }
+
+    /// Focused preview action: 0 is Play, 1 is Back.
+    #[must_use]
+    pub const fn jellyfin_preview_focus(&self) -> usize {
+        self.jellyfin.preview_focus
+    }
+
+    /// Local poster cache path for one item, when artwork is ready.
+    ///
+    /// This is never a server URL; it is a file produced by the bounded
+    /// artwork cache.
+    #[must_use]
+    pub fn jellyfin_poster_path(&self, item_id: &str) -> Option<&Path> {
+        self.jellyfin.poster_path(item_id)
+    }
+
+    /// Local preview cache path for the current preview item.
+    #[must_use]
+    pub fn jellyfin_preview_path(&self) -> Option<&Path> {
+        self.jellyfin
+            .preview
+            .as_ref()
+            .and_then(|item| self.jellyfin.preview_path(&item.id))
+    }
+
+    /// Epoch incremented whenever cached artwork paths are discarded.
+    ///
+    /// The native bridge clears its decoded-image cache when this changes.
+    #[must_use]
+    pub const fn artwork_epoch(&self) -> u64 {
+        self.jellyfin.artwork_epoch
+    }
+
+    /// Browse requests queued by controller updates.
+    #[must_use]
+    pub fn pending_browse_requests(&self) -> &[UiBrowseCommand] {
+        &self.jellyfin.pending_browse
+    }
+
+    /// Drain browse requests queued by controller updates.
+    pub fn take_browse_requests(&mut self) -> Vec<UiBrowseCommand> {
+        std::mem::take(&mut self.jellyfin.pending_browse)
+    }
+
+    /// Drop every browse and artwork value, including local image paths.
+    ///
+    /// Called on sign-out and session expiry so a later user cannot see the
+    /// previous account's library or decoded posters. The bridge observes the
+    /// epoch and discards its decoded images too.
+    pub fn clear_jellyfin_browse(&mut self) {
+        self.jellyfin.libraries.clear();
+        self.jellyfin.libraries_load = LoadState::Idle;
+        self.jellyfin.library_selected = None;
+        self.jellyfin.library_focus = 0;
+        self.jellyfin.items.clear();
+        self.jellyfin.items_load = LoadState::Idle;
+        self.jellyfin.items_library_id = None;
+        self.jellyfin.items_selected = None;
+        self.jellyfin.items_focus = 0;
+        self.jellyfin.items_start = 0;
+        self.jellyfin.items_next_start = None;
+        self.jellyfin.items_total = 0;
+        self.jellyfin.preview = None;
+        self.jellyfin.preview_focus = 0;
+        self.jellyfin.pending_browse.clear();
+        self.jellyfin.clear_artwork();
+        if matches!(
+            self.screen,
+            Screen::JellyfinLibraries | Screen::JellyfinItems | Screen::Preview
+        ) {
+            self.screen = Screen::Home;
+            self.status = "Choose a source".to_owned();
+        }
+    }
+
+    /// Select one library tile; returns whether the slot exists.
+    pub fn select_jellyfin_library(&mut self, index: usize) -> bool {
+        let Some(library) = self.jellyfin.libraries.get(index) else {
+            return false;
+        };
+        self.jellyfin.library_focus = index;
+        self.jellyfin.library_selected = Some(library.id.clone());
+        true
+    }
+
+    /// Select one poster slot, including the More slot when available.
+    pub fn select_jellyfin_item(&mut self, index: usize) -> bool {
+        if index >= self.jellyfin.item_slots() {
+            return false;
+        }
+        self.jellyfin.items_focus = index;
+        self.jellyfin.items_selected = self.jellyfin.items.get(index).map(|item| item.id.clone());
+        true
+    }
+
+    /// Focus the More tile, if one is offered.
+    pub fn select_jellyfin_more(&mut self) -> bool {
+        if !self.jellyfin.next_page_available() {
+            return false;
+        }
+        self.select_jellyfin_item(self.jellyfin.items.len())
+    }
+
+    /// Set the focused preview action (0 Play, 1 Back).
+    pub fn set_jellyfin_preview_focus(&mut self, index: usize) {
+        self.jellyfin.preview_focus = index.min(1);
     }
 
     /// Resume item shown by the first home row.
@@ -1317,7 +1775,11 @@ impl UiModel {
             }
         } else {
             match self.screen {
-                Screen::Library | Screen::Settings => Mode::Browsing,
+                Screen::Library
+                | Screen::Settings
+                | Screen::JellyfinLibraries
+                | Screen::JellyfinItems
+                | Screen::Preview => Mode::Browsing,
                 Screen::Cast => Mode::Casting,
                 Screen::Home | Screen::Player => Mode::Home,
             }
@@ -1485,6 +1947,139 @@ impl UiModel {
     /// Focus one visible library item.
     pub fn select_library(&mut self, index: usize) -> bool {
         self.library.select(index)
+    }
+
+    /// Open the Jellyfin library grid from Home.
+    ///
+    /// The old text `Library` screen remains the YouTube entry point; Jellyfin
+    /// now has its own typed browse flow.
+    pub fn open_jellyfin_libraries(&mut self) -> UiOutcome {
+        self.screen = Screen::JellyfinLibraries;
+        self.jellyfin.libraries_load = LoadState::Loading;
+        self.jellyfin.library_selected = None;
+        self.jellyfin.library_focus = 0;
+        self.jellyfin.preview = None;
+        self.jellyfin.preview_focus = 0;
+        self.refresh_status();
+        UiOutcome::Browse(UiBrowseCommand::LoadLibraries)
+    }
+
+    /// Apply one typed browse or artwork update from the controller.
+    pub fn apply_browse_update(&mut self, update: &BrowseUpdate) {
+        match update {
+            BrowseUpdate::LibrariesReady { libraries } => {
+                self.jellyfin.libraries = libraries
+                    .iter()
+                    .filter(|library| is_valid_item_id(&library.id))
+                    .take(MAX_JELLYFIN_LIBRARIES)
+                    .cloned()
+                    .collect();
+                self.jellyfin.libraries_load = if self.jellyfin.libraries.is_empty() {
+                    LoadState::Empty
+                } else {
+                    LoadState::Ready
+                };
+                self.jellyfin.refresh_library_selection();
+            }
+            BrowseUpdate::LibrariesFailed { message } => {
+                self.jellyfin.libraries_load = LoadState::Error {
+                    message: sanitize(message, MAX_ERROR_CHARS, "libraries failed"),
+                };
+                self.jellyfin.libraries.clear();
+                self.jellyfin.library_selected = None;
+                self.jellyfin.library_focus = 0;
+            }
+            BrowseUpdate::ItemsReady {
+                library_id,
+                items,
+                total,
+                next_start,
+            } => {
+                if self.jellyfin.items_library_id.as_deref() != Some(library_id.as_str()) {
+                    // A late page from a library the user already left.
+                    return;
+                }
+                let items: Vec<BrowseItem> = items
+                    .iter()
+                    .filter(|item| is_valid_item_id(&item.id))
+                    .cloned()
+                    .collect();
+                let page_len = items.len();
+                let start_index = self.jellyfin.items_start;
+                if start_index == 0 {
+                    self.jellyfin.items.clear();
+                }
+                let page_first = self.jellyfin.items.len();
+                self.jellyfin.items.extend(items);
+                self.jellyfin.items.truncate(MAX_LIBRARY_ITEMS);
+                self.jellyfin.items_start =
+                    start_index.saturating_add(u32::try_from(page_len).unwrap_or(u32::MAX));
+                self.jellyfin.items_total = *total;
+                self.jellyfin.items_next_start = *next_start;
+                self.jellyfin.items_load = if self.jellyfin.items.is_empty() {
+                    LoadState::Empty
+                } else {
+                    LoadState::Ready
+                };
+                self.jellyfin.refresh_item_selection();
+                self.jellyfin.request_page_artwork(page_first, page_len);
+            }
+            BrowseUpdate::ItemsFailed {
+                library_id,
+                message,
+            } => {
+                if self.jellyfin.items_library_id.as_deref() == Some(library_id.as_str()) {
+                    self.jellyfin.items_load = LoadState::Error {
+                        message: sanitize(message, MAX_ERROR_CHARS, "items failed"),
+                    };
+                    if self.jellyfin.items.is_empty() {
+                        self.jellyfin.items_selected = None;
+                        self.jellyfin.items_focus = 0;
+                    }
+                }
+            }
+            BrowseUpdate::ArtworkReady {
+                item_id,
+                class,
+                artwork,
+            } => {
+                if !is_valid_item_id(item_id) {
+                    return;
+                }
+                let key = ArtworkKey::new(item_id, *class);
+                self.jellyfin.artwork.insert(key, Some(artwork.clone()));
+                self.jellyfin.truncate_artwork();
+            }
+            BrowseUpdate::ArtworkMissing { item_id, class }
+            | BrowseUpdate::ArtworkFailed { item_id, class, .. } => {
+                if !is_valid_item_id(item_id) {
+                    return;
+                }
+                self.jellyfin
+                    .artwork
+                    .insert(ArtworkKey::new(item_id, *class), None);
+                self.jellyfin.truncate_artwork();
+            }
+            BrowseUpdate::SessionExpired => {
+                let was_browsing = matches!(
+                    self.screen,
+                    Screen::JellyfinLibraries | Screen::JellyfinItems | Screen::Preview
+                );
+                self.clear_jellyfin_browse();
+                if was_browsing {
+                    self.screen = Screen::JellyfinLibraries;
+                    self.jellyfin.libraries_load = LoadState::Error {
+                        message: SESSION_EXPIRED_MESSAGE.to_owned(),
+                    };
+                }
+            }
+        }
+        if matches!(
+            self.screen,
+            Screen::JellyfinLibraries | Screen::JellyfinItems | Screen::Preview
+        ) {
+            self.refresh_status();
+        }
     }
 
     /// Open a library filter.
@@ -1857,6 +2452,7 @@ impl UiModel {
     /// updates through [`UiHandle`] on the Slint event loop.
     pub fn apply_playback_update(&mut self, update: &PlaybackUpdate) {
         match update {
+            PlaybackUpdate::Browse(browse) => self.apply_browse_update(browse),
             PlaybackUpdate::Loading { item_id, title } => {
                 self.screen = Screen::Player;
                 self.player.title = title.clone().unwrap_or_else(|| format!("Item {item_id}"));
@@ -2002,10 +2598,11 @@ impl UiModel {
                 self.status = "Choose a source".to_string();
             }
             PlaybackUpdate::SessionExpired => {
+                self.clear_jellyfin_browse();
                 self.screen = Screen::Player;
                 self.player.loading = false;
                 self.player.retry_available = false;
-                self.player.error = Some("Jellyfin session expired; sign in again".to_string());
+                self.player.error = Some(SESSION_EXPIRED_MESSAGE.to_string());
                 self.refresh_status();
             }
             PlaybackUpdate::Message { text } => {
@@ -2228,6 +2825,9 @@ impl UiModel {
             Screen::Player => self.handle_player_key(key),
             Screen::Settings => self.handle_settings_key(key),
             Screen::Cast => self.handle_cast_key(key),
+            Screen::JellyfinLibraries => self.handle_jellyfin_libraries_key(key),
+            Screen::JellyfinItems => self.handle_jellyfin_items_key(key),
+            Screen::Preview => self.handle_preview_key(key),
         }
     }
 
@@ -2310,12 +2910,7 @@ impl UiModel {
                     self.navigated()
                 }
             }
-            HomeRow::Jellyfin => {
-                self.open_library(SourceFilter::Jellyfin);
-                UiOutcome::Action(Action::Navigate {
-                    direction: Direction::Select,
-                })
-            }
+            HomeRow::Jellyfin => self.open_jellyfin_libraries(),
             HomeRow::YouTube => {
                 self.open_library(SourceFilter::YouTube);
                 UiOutcome::Action(Action::Navigate {
@@ -2447,6 +3042,258 @@ impl UiModel {
                 };
                 self.play_item(&item)
             }
+        }
+    }
+
+    fn handle_jellyfin_libraries_key(&mut self, key: Key) -> UiOutcome {
+        match key {
+            Key::Escape => {
+                self.go_home();
+                self.navigated()
+            }
+            Key::Home => {
+                self.go_home();
+                UiOutcome::Action(Action::Navigate {
+                    direction: Direction::Home,
+                })
+            }
+            Key::Enter => self.activate_jellyfin_library(),
+            Key::Up | Key::Down | Key::Left | Key::Right => {
+                let slots = self.jellyfin.libraries.len();
+                if let Some(next) = grid_focus(
+                    self.jellyfin.library_focus,
+                    slots,
+                    JELLYFIN_LIBRARY_COLUMNS,
+                    key,
+                ) {
+                    self.jellyfin.library_focus = next;
+                    self.jellyfin.library_selected = self
+                        .jellyfin
+                        .libraries
+                        .get(next)
+                        .map(|library| library.id.clone());
+                }
+                self.refresh_status();
+                UiOutcome::Action(Action::Navigate {
+                    direction: direction_for_key(key),
+                })
+            }
+            Key::Backspace | Key::Char(_) => UiOutcome::Ignored,
+        }
+    }
+
+    fn handle_jellyfin_items_key(&mut self, key: Key) -> UiOutcome {
+        match key {
+            Key::Escape => {
+                self.screen = Screen::JellyfinLibraries;
+                self.refresh_status();
+                self.navigated()
+            }
+            Key::Home => {
+                self.go_home();
+                UiOutcome::Action(Action::Navigate {
+                    direction: Direction::Home,
+                })
+            }
+            Key::Enter => self.activate_jellyfin_item(),
+            Key::Up | Key::Down | Key::Left | Key::Right => {
+                let slots = self.jellyfin.item_slots();
+                if let Some(next) = grid_focus(
+                    self.jellyfin.items_focus,
+                    slots,
+                    JELLYFIN_POSTER_COLUMNS,
+                    key,
+                ) {
+                    self.select_jellyfin_item(next);
+                }
+                self.refresh_status();
+                UiOutcome::Action(Action::Navigate {
+                    direction: direction_for_key(key),
+                })
+            }
+            Key::Backspace | Key::Char(_) => UiOutcome::Ignored,
+        }
+    }
+
+    fn handle_preview_key(&mut self, key: Key) -> UiOutcome {
+        match key {
+            Key::Escape => {
+                self.screen = Screen::JellyfinItems;
+                self.refresh_status();
+                self.navigated()
+            }
+            Key::Home => {
+                self.go_home();
+                UiOutcome::Action(Action::Navigate {
+                    direction: Direction::Home,
+                })
+            }
+            Key::Enter => self.activate_preview(),
+            Key::Left | Key::Right | Key::Up | Key::Down => {
+                self.jellyfin.preview_focus = if self.jellyfin.preview_focus == 0 {
+                    1
+                } else {
+                    0
+                };
+                self.refresh_status();
+                UiOutcome::Action(Action::Navigate {
+                    direction: direction_for_key(key),
+                })
+            }
+            Key::Backspace | Key::Char(_) => UiOutcome::Ignored,
+        }
+    }
+
+    fn activate_jellyfin_library(&mut self) -> UiOutcome {
+        match self.jellyfin.libraries_load.clone() {
+            LoadState::Loading | LoadState::Idle => {
+                self.status = "Still loading Jellyfin libraries".to_owned();
+                UiOutcome::Ignored
+            }
+            LoadState::Empty => {
+                self.status = "No Jellyfin libraries".to_owned();
+                UiOutcome::Ignored
+            }
+            LoadState::Error { .. } => {
+                self.jellyfin.libraries_load = LoadState::Loading;
+                self.status = "Retrying Jellyfin libraries".to_owned();
+                UiOutcome::Browse(UiBrowseCommand::LoadLibraries)
+            }
+            LoadState::Ready => {
+                let Some(library) = self.jellyfin.selected_library().cloned() else {
+                    return UiOutcome::Rejected(UiReject::NoSelection);
+                };
+                if !is_valid_item_id(&library.id) {
+                    self.status = "Invalid Jellyfin library identifier".to_owned();
+                    return UiOutcome::Rejected(UiReject::InvalidItem);
+                }
+                self.open_jellyfin_items(&library)
+            }
+        }
+    }
+
+    fn open_jellyfin_items(&mut self, library: &LibraryEntry) -> UiOutcome {
+        if self.jellyfin.items_library_id.as_deref() != Some(library.id.as_str()) {
+            self.jellyfin.clear_artwork();
+        }
+        self.jellyfin.pending_browse.clear();
+        self.jellyfin.items_library_id = Some(library.id.clone());
+        self.jellyfin.items.clear();
+        self.jellyfin.items_load = LoadState::Loading;
+        self.jellyfin.items_start = 0;
+        self.jellyfin.items_next_start = None;
+        self.jellyfin.items_total = 0;
+        self.jellyfin.items_focus = 0;
+        self.jellyfin.items_selected = None;
+        self.jellyfin.preview = None;
+        self.jellyfin.preview_focus = 0;
+        self.screen = Screen::JellyfinItems;
+        self.refresh_status();
+        UiOutcome::Browse(UiBrowseCommand::LoadItems {
+            library_id: library.id.clone(),
+            start_index: 0,
+        })
+    }
+
+    /// Retry the page that failed on the poster grid.
+    pub fn retry_jellyfin_items(&mut self) -> UiOutcome {
+        let Some(library_id) = self.jellyfin.items_library_id.clone() else {
+            return UiOutcome::Rejected(UiReject::NoSelection);
+        };
+        let start_index = self.jellyfin.items_start;
+        self.jellyfin.items_load = LoadState::Loading;
+        self.status = "Retrying Jellyfin items".to_owned();
+        UiOutcome::Browse(UiBrowseCommand::LoadItems {
+            library_id,
+            start_index,
+        })
+    }
+
+    fn activate_jellyfin_item(&mut self) -> UiOutcome {
+        if matches!(&self.jellyfin.items_load, LoadState::Loading) && self.jellyfin.items.is_empty()
+        {
+            self.status = "Still loading Jellyfin items".to_owned();
+            return UiOutcome::Ignored;
+        }
+        if matches!(&self.jellyfin.items_load, LoadState::Error { .. })
+            && self.jellyfin.items.is_empty()
+        {
+            return self.retry_jellyfin_items();
+        }
+        if self.jellyfin.on_more_slot() {
+            if matches!(&self.jellyfin.items_load, LoadState::Loading) {
+                self.status = "Still loading Jellyfin items".to_owned();
+                return UiOutcome::Ignored;
+            }
+            let Some(start_index) = self.jellyfin.items_next_start else {
+                self.status = "No more items".to_owned();
+                return UiOutcome::Ignored;
+            };
+            let Some(library_id) = self.jellyfin.items_library_id.clone() else {
+                return UiOutcome::Rejected(UiReject::NoSelection);
+            };
+            self.jellyfin.items_load = LoadState::Loading;
+            self.jellyfin.items_start = start_index;
+            self.status = "Loading more items".to_owned();
+            return UiOutcome::Browse(UiBrowseCommand::LoadItems {
+                library_id,
+                start_index,
+            });
+        }
+        let Some(item) = self.jellyfin.selected_item().cloned() else {
+            return UiOutcome::Rejected(UiReject::NoSelection);
+        };
+        if !is_valid_item_id(&item.id) {
+            self.status = "Invalid Jellyfin item identifier".to_owned();
+            return UiOutcome::Rejected(UiReject::InvalidItem);
+        }
+        self.jellyfin.preview = Some(item.clone());
+        self.jellyfin.preview_focus = 0;
+        self.screen = Screen::Preview;
+        self.refresh_status();
+        let key = ArtworkKey::new(&item.id, ArtworkClass::Preview);
+        let fresh = !self.jellyfin.artwork_requested.contains(&key);
+        let tag = item.primary_tag.as_deref().filter(|tag| {
+            !tag.is_empty() && tag.len() <= 128 && !tag.chars().any(char::is_control)
+        });
+        if fresh {
+            self.jellyfin.artwork_requested.insert(key);
+            if tag.is_none() {
+                self.jellyfin
+                    .artwork
+                    .insert(ArtworkKey::new(&item.id, ArtworkClass::Preview), None);
+                self.jellyfin.truncate_artwork();
+            }
+        }
+        match tag.filter(|_| fresh) {
+            Some(tag) => UiOutcome::Browse(UiBrowseCommand::LoadArtwork {
+                item_id: item.id,
+                tag: Some(tag.to_owned()),
+                class: ArtworkClass::Preview,
+            }),
+            None => self.navigated(),
+        }
+    }
+
+    fn activate_preview(&mut self) -> UiOutcome {
+        if self.jellyfin.preview_focus == 1 {
+            self.screen = Screen::JellyfinItems;
+            self.refresh_status();
+            return self.navigated();
+        }
+        let Some(item) = self.jellyfin.preview.clone() else {
+            return UiOutcome::Rejected(UiReject::NoSelection);
+        };
+        if !is_valid_item_id(&item.id) {
+            self.status = "Invalid Jellyfin item identifier".to_owned();
+            return UiOutcome::Rejected(UiReject::InvalidItem);
+        }
+        let media = MediaItem::new(Source::Jellyfin, item.id.clone(), item.title.clone());
+        match self.play_item(&media) {
+            UiOutcome::Action(Action::PlayJellyfin { item_id }) => {
+                UiOutcome::PlayJellyfin { item_id }
+            }
+            other => other,
         }
     }
 
@@ -2874,6 +3721,9 @@ impl UiModel {
             Screen::Player => self.player_focus,
             Screen::Settings => self.settings.focus(),
             Screen::Cast => 0,
+            Screen::JellyfinLibraries => self.jellyfin.library_focus,
+            Screen::JellyfinItems => self.jellyfin.items_focus,
+            Screen::Preview => self.jellyfin.preview_focus,
         }
     }
 
@@ -2898,6 +3748,39 @@ impl UiModel {
             }
             Screen::Settings => "Settings".to_owned(),
             Screen::Cast => self.cast_state.clone(),
+            Screen::JellyfinLibraries => match &self.jellyfin.libraries_load {
+                LoadState::Idle | LoadState::Loading => "Loading Jellyfin libraries".to_owned(),
+                LoadState::Empty => "No Jellyfin libraries".to_owned(),
+                LoadState::Error { message } => {
+                    format!("Jellyfin libraries could not load: {message}")
+                }
+                LoadState::Ready => {
+                    format!("{} Jellyfin libraries", self.jellyfin.libraries.len())
+                }
+            },
+            Screen::JellyfinItems => {
+                let name = self.jellyfin_library_name();
+                match &self.jellyfin.items_load {
+                    LoadState::Idle | LoadState::Loading => {
+                        format!("Loading {name}")
+                    }
+                    LoadState::Empty => format!("No items in {name}"),
+                    LoadState::Error { message } => {
+                        format!("{name} could not load: {message}")
+                    }
+                    LoadState::Ready => {
+                        format!(
+                            "{} items in {name} ({} total)",
+                            self.jellyfin.items.len(),
+                            self.jellyfin.items_total
+                        )
+                    }
+                }
+            }
+            Screen::Preview => match &self.jellyfin.preview {
+                Some(item) => format!("Preview: {}", item.title),
+                None => "Preview".to_owned(),
+            },
         };
     }
 
@@ -2950,6 +3833,48 @@ pub fn key_from_text(text: &str) -> Option<Key> {
     Key::from_input(crate::input::key_from_text(text)?)
 }
 
+/// Next focus index for a fixed-column grid, wrapping at every edge.
+fn grid_focus(current: usize, slots: usize, columns: usize, key: Key) -> Option<usize> {
+    if slots == 0 || columns == 0 {
+        return None;
+    }
+    let current = current.min(slots - 1);
+    match key {
+        Key::Left => Some((current + slots - 1) % slots),
+        Key::Right => Some((current + 1) % slots),
+        Key::Up => {
+            if current < columns {
+                let last_row_start = ((slots - 1) / columns) * columns;
+                Some((last_row_start + current % columns).min(slots - 1))
+            } else {
+                Some(current - columns)
+            }
+        }
+        Key::Down => {
+            let next = current.saturating_add(columns);
+            if next < slots {
+                Some(next)
+            } else {
+                Some((current % columns).min(slots - 1))
+            }
+        }
+        Key::Enter | Key::Escape | Key::Home | Key::Backspace | Key::Char(_) => None,
+    }
+}
+
+fn direction_for_key(key: Key) -> Direction {
+    match key {
+        Key::Up => Direction::Up,
+        Key::Down => Direction::Down,
+        Key::Left => Direction::Left,
+        Key::Right => Direction::Right,
+        Key::Enter => Direction::Select,
+        Key::Escape => Direction::Back,
+        Key::Home => Direction::Home,
+        Key::Backspace | Key::Char(_) => Direction::Select,
+    }
+}
+
 fn format_time(milliseconds: u64) -> String {
     let seconds = milliseconds / 1_000;
     format!("{}:{:02}", seconds / 60, seconds % 60)
@@ -2988,8 +3913,9 @@ mod native {
     use uuid::Uuid;
 
     use super::{
-        Key, LoadState, MediaItem, PairChoice, PlayerMenu, Screen, SettingsRowView, UiInput,
-        UiModel, UiOutcome, UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, source_label,
+        JELLYFIN_LIBRARY_COLUMNS, JELLYFIN_POSTER_COLUMNS, Key, LoadState, MediaItem, PairChoice,
+        PlayerMenu, Screen, SettingsRowView, UiBrowseCommand, UiInput, UiModel, UiOutcome,
+        UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, is_valid_item_id, source_label,
     };
     use crate::model::Action;
 
@@ -3035,6 +3961,8 @@ mod native {
         YoutubeCancel,
         /// Act on the active playback without touching the network here.
         Playback(UiPlaybackCommand),
+        /// Fetch Jellyfin browse data or one cached artwork image.
+        Browse(UiBrowseCommand),
     }
 
     /// Errors starting or running the native window.
@@ -3097,8 +4025,23 @@ mod native {
         }
 
         /// Post one playback-controller update to the event loop.
+        ///
+        /// Browse updates can queue bounded artwork fetches; they are drained
+        /// here on the event loop and forwarded through the same command sink
+        /// as local input, so the bridge never performs network I/O itself.
         pub fn apply_playback_update(&self, update: crate::playback::PlaybackUpdate) {
-            self.post(move |model| model.apply_playback_update(&update));
+            let on_command = Arc::clone(&self.on_command);
+            self.post(move |model| {
+                model.apply_playback_update(&update);
+                for request in model.take_browse_requests() {
+                    (*on_command)(UiCommand::Browse(request));
+                }
+            });
+        }
+
+        /// Drop all Jellyfin browse metadata and local image paths.
+        pub fn clear_jellyfin_browse(&self) {
+            self.post(UiModel::clear_jellyfin_browse);
         }
 
         /// Replace the library contents from a completed fetch.
@@ -3511,6 +4454,75 @@ mod native {
             let weak = window.as_weak();
             let model = Arc::clone(model);
             let on_command = Arc::clone(on_command);
+            window.on_jellyfin_library_activated(move |index| {
+                with_window(&weak, &model, |window, model| {
+                    if model.select_jellyfin_library(index.max(0) as usize) {
+                        handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
+                    }
+                });
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let model = Arc::clone(model);
+            let on_command = Arc::clone(on_command);
+            window.on_jellyfin_library_retry_requested(move || {
+                with_window(&weak, &model, |window, model| {
+                    handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
+                });
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let model = Arc::clone(model);
+            let on_command = Arc::clone(on_command);
+            window.on_jellyfin_item_activated(move |index| {
+                with_window(&weak, &model, |window, model| {
+                    if model.select_jellyfin_item(index.max(0) as usize) {
+                        handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
+                    }
+                });
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let model = Arc::clone(model);
+            let on_command = Arc::clone(on_command);
+            window.on_jellyfin_items_retry_requested(move || {
+                with_window(&weak, &model, |window, model| {
+                    let outcome = model.retry_jellyfin_items();
+                    dispatch(&on_command, outcome);
+                    refresh(window, model);
+                });
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let model = Arc::clone(model);
+            let on_command = Arc::clone(on_command);
+            window.on_jellyfin_more_requested(move || {
+                with_window(&weak, &model, |window, model| {
+                    if model.select_jellyfin_more() {
+                        handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
+                    }
+                });
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let model = Arc::clone(model);
+            let on_command = Arc::clone(on_command);
+            window.on_jellyfin_preview_activated(move |index| {
+                with_window(&weak, &model, |window, model| {
+                    model.set_jellyfin_preview_focus(index.max(0) as usize);
+                    handle_local_input(window, model, Key::Enter, start.elapsed(), &on_command);
+                });
+            });
+        }
+        {
+            let weak = window.as_weak();
+            let model = Arc::clone(model);
+            let on_command = Arc::clone(on_command);
             window.on_library_more_requested(move || {
                 with_window(&weak, &model, |window, model| {
                     let outcome = model.youtube_more();
@@ -3646,10 +4658,17 @@ mod native {
         if let Some(filter) = model.pending_library_load(was_loading) {
             (**on_command)(UiCommand::LoadLibrary { filter });
         }
+        for request in model.take_browse_requests() {
+            (**on_command)(UiCommand::Browse(request));
+        }
     }
 
     fn dispatch(on_command: &CommandSink, outcome: UiOutcome) {
         match outcome {
+            UiOutcome::Browse(command) => (**on_command)(UiCommand::Browse(command)),
+            UiOutcome::PlayJellyfin { item_id } => {
+                (**on_command)(UiCommand::Action(Action::PlayJellyfin { item_id }));
+            }
             UiOutcome::Action(action) => (**on_command)(UiCommand::Action(action)),
             UiOutcome::ApprovePairing { request_id } => {
                 (**on_command)(UiCommand::ApprovePairing { request_id });
@@ -3711,6 +4730,111 @@ mod native {
         action(&window, &mut model);
     }
 
+    const IMAGE_CACHE_LIMIT: usize = 64;
+
+    #[derive(Default)]
+    struct CachedImages {
+        epoch: u64,
+        entries: std::collections::BTreeMap<std::path::PathBuf, slint::Image>,
+        order: std::collections::VecDeque<std::path::PathBuf>,
+    }
+
+    thread_local! {
+        static CACHED_IMAGES: std::cell::RefCell<CachedImages> =
+            std::cell::RefCell::new(CachedImages::default());
+    }
+
+    /// Load one local cache path into a Slint image.
+    ///
+    /// Only paths produced by the artwork cache reach this function; no server
+    /// URL is ever decoded here and no network request is made. A missing or
+    /// corrupt file becomes an empty image, which renders as the placeholder.
+    fn cached_image(epoch: u64, path: Option<&std::path::Path>) -> slint::Image {
+        CACHED_IMAGES.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.epoch != epoch {
+                cache.entries.clear();
+                cache.order.clear();
+                cache.epoch = epoch;
+            }
+            let Some(path) = path else {
+                return slint::Image::default();
+            };
+            if let Some(image) = cache.entries.get(path) {
+                return image.clone();
+            }
+            let image = slint::Image::load_from_path(path).unwrap_or_default();
+            if cache.entries.len() >= IMAGE_CACHE_LIMIT
+                && let Some(evicted) = cache.order.pop_front()
+            {
+                cache.entries.remove(&evicted);
+            }
+            cache.order.push_back(path.to_path_buf());
+            cache.entries.insert(path.to_path_buf(), image.clone());
+            image
+        })
+    }
+
+    fn library_rows(model: &UiModel) -> Vec<LibraryRow> {
+        let libraries = model.jellyfin_libraries();
+        libraries
+            .chunks(JELLYFIN_LIBRARY_COLUMNS)
+            .enumerate()
+            .map(|(row, chunk)| {
+                let tiles: Vec<LibraryTile> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, library)| {
+                        let index = row * JELLYFIN_LIBRARY_COLUMNS + offset;
+                        LibraryTile {
+                            title: library.name.as_str().into(),
+                            subtitle: library
+                                .collection_type
+                                .as_deref()
+                                .unwrap_or("Library")
+                                .into(),
+                            index: index as i32,
+                            focused: index == model.jellyfin_library_focus(),
+                        }
+                    })
+                    .collect();
+                LibraryRow {
+                    tiles: ModelRc::new(VecModel::from(tiles)),
+                }
+            })
+            .collect()
+    }
+
+    fn poster_rows(model: &UiModel) -> Vec<PosterRow> {
+        let items = model.jellyfin_items();
+        let epoch = model.artwork_epoch();
+        items
+            .chunks(JELLYFIN_POSTER_COLUMNS)
+            .enumerate()
+            .map(|(row, chunk)| {
+                let cards: Vec<PosterCard> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, item)| {
+                        let index = row * JELLYFIN_POSTER_COLUMNS + offset;
+                        let poster = model.jellyfin_poster_path(&item.id);
+                        PosterCard {
+                            title: item.title.as_str().into(),
+                            subtitle: item.subtitle.as_str().into(),
+                            image: cached_image(epoch, poster),
+                            has_image: poster.is_some(),
+                            index: index as i32,
+                            focused: index == model.jellyfin_item_focus(),
+                        }
+                    })
+                    .collect();
+                PosterRow {
+                    cards: ModelRc::new(VecModel::from(cards)),
+                }
+            })
+            .collect()
+    }
+
     fn refresh(window: &AppWindow, model: &UiModel) {
         window.set_screen(model.screen().index());
         window.set_status_text(model.status_text().into());
@@ -3728,6 +4852,41 @@ mod native {
         window.set_library_error(matches!(load, LoadState::Error { .. }));
         window.set_library_error_text(model.library_error_text().into());
         window.set_next_page_available(model.youtube_next_page_available());
+
+        window.set_jf_library_rows(ModelRc::new(VecModel::from(library_rows(model))));
+        window.set_jf_library_focus(model.jellyfin_library_focus() as i32);
+        let libraries_load = model.jellyfin_libraries_load();
+        window.set_jf_libraries_loading(matches!(libraries_load, LoadState::Loading));
+        window.set_jf_libraries_empty(matches!(libraries_load, LoadState::Empty));
+        window.set_jf_libraries_error(matches!(libraries_load, LoadState::Error { .. }));
+        let items_load = model.jellyfin_items_load();
+        window.set_jf_items_loading(matches!(items_load, LoadState::Loading));
+        window.set_jf_items_empty(matches!(items_load, LoadState::Empty));
+        window.set_jf_items_error(matches!(items_load, LoadState::Error { .. }));
+        let browse_error = libraries_load
+            .error_message()
+            .or_else(|| items_load.error_message())
+            .unwrap_or_default();
+        window.set_jf_browse_error(browse_error.into());
+        window.set_jf_library_name(model.jellyfin_library_name().into());
+        window.set_jf_poster_rows(ModelRc::new(VecModel::from(poster_rows(model))));
+        window.set_jf_item_focus(model.jellyfin_item_focus() as i32);
+        window.set_jf_item_count(model.jellyfin_items().len() as i32);
+        window.set_jf_more_available(model.jellyfin_next_page_available());
+        let preview_path = model.jellyfin_preview_path();
+        window.set_jf_preview_image(cached_image(model.artwork_epoch(), preview_path));
+        window.set_jf_preview_has_image(preview_path.is_some());
+        let preview = model.jellyfin_preview();
+        window.set_jf_preview_title(preview.map_or("", |item| item.title.as_str()).into());
+        window.set_jf_preview_subtitle(preview.map_or("", |item| item.subtitle.as_str()).into());
+        window.set_jf_preview_overview(
+            preview
+                .and_then(|item| item.overview.as_deref())
+                .unwrap_or("")
+                .into(),
+        );
+        window.set_jf_preview_focus(model.jellyfin_preview_focus() as i32);
+        window.set_jf_preview_playable(preview.is_some_and(|item| is_valid_item_id(&item.id)));
 
         let cards: Vec<MediaCard> = model
             .visible_items()

@@ -461,8 +461,9 @@ where
     let fake = FakeFactory::new(duration_ms);
     let session = PlayerSession::start(fake.clone(), SupervisorConfig::default(), 8, 64)
         .expect("player session");
-    let controller =
-        PlaybackController::new(client, session, config).expect("controller").with_storage(storage);
+    let controller = PlaybackController::new(client, session, config)
+        .expect("controller")
+        .with_storage(storage);
     Fixture {
         _directory: directory,
         server,
@@ -2025,7 +2026,11 @@ async fn artwork_command_caches_metadata_and_reports_missing_images() {
             ..
         }
     ));
-    assert_eq!(image_requests.load(Ordering::SeqCst), 1, "no tag, no request");
+    assert_eq!(
+        image_requests.load(Ordering::SeqCst),
+        1,
+        "no tag, no request"
+    );
 
     let missing_image = fixture
         .controller

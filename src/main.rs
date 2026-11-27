@@ -126,6 +126,8 @@ enum RouteCommand {
     Retry,
     /// Forward a Jellyfin-only controller command.
     Jellyfin(tv_client::playback::PlaybackCommand),
+    /// Fetch Jellyfin browse data without touching the active player.
+    Browse(tv_client::playback::PlaybackCommand),
     /// The cloud socket dropped; remote-initiated YouTube stops.
     NetworkLost,
 }
@@ -146,7 +148,7 @@ enum SearchCommand {
 fn route_command(command: &tv_client::ui::UiCommand) -> Option<RouteCommand> {
     use tv_client::model::{Action, Direction};
     use tv_client::playback::{LibraryFilter, PlaybackCommand};
-    use tv_client::ui::{SourceFilter, UiCommand, UiPlaybackCommand};
+    use tv_client::ui::{SourceFilter, UiBrowseCommand, UiCommand, UiPlaybackCommand};
 
     match command {
         UiCommand::Action(Action::PlayJellyfin { item_id }) => {
@@ -187,6 +189,25 @@ fn route_command(command: &tv_client::ui::UiCommand) -> Option<RouteCommand> {
             }
             SourceFilter::YouTube => None,
         },
+        UiCommand::Browse(request) => Some(RouteCommand::Browse(match request {
+            UiBrowseCommand::LoadLibraries => PlaybackCommand::LoadJellyfinLibraries,
+            UiBrowseCommand::LoadItems {
+                library_id,
+                start_index,
+            } => PlaybackCommand::LoadJellyfinItems {
+                library_id: library_id.clone(),
+                start_index: *start_index,
+            },
+            UiBrowseCommand::LoadArtwork {
+                item_id,
+                tag,
+                class,
+            } => PlaybackCommand::LoadArtwork {
+                item_id: item_id.clone(),
+                tag: tag.clone(),
+                class: *class,
+            },
+        })),
         UiCommand::Action(_)
         | UiCommand::YoutubeSearch { .. }
         | UiCommand::YoutubeMore { .. }
@@ -240,7 +261,7 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
     let youtube_config = YoutubePlaybackConfig::from_client(config);
     let (commands, command_rx) = mpsc::channel::<PlaybackCommand>(32);
     let (youtube_commands, youtube_rx) = mpsc::channel::<PlayerCommand>(PLAYER_COMMAND_CAPACITY);
-    let (route_commands, route_rx) = mpsc::channel::<RouteCommand>(16);
+    let (route_commands, route_rx) = mpsc::channel::<RouteCommand>(64);
     let (search_commands, search_rx) = mpsc::channel::<SearchCommand>(4);
     let (activity, _activity_rx) = watch::channel::<Option<Source>>(None);
     let cloud_routes = route_commands.clone();
@@ -1360,6 +1381,7 @@ async fn run_settings(
                         {
                             Ok(()) => {
                                 ui.set_jellyfin_user(None);
+                                ui.clear_jellyfin_browse();
                                 ui.clear_quick_connect_code();
                                 show_restart_notice(
                                     &ui,
@@ -1377,6 +1399,7 @@ async fn run_settings(
                             }
                             Err(JellyfinSignOutError::Timeout) => {
                                 ui.set_jellyfin_user(None);
+                                ui.clear_jellyfin_browse();
                                 ui.clear_quick_connect_code();
                                 show_restart_notice(
                                     &ui,
@@ -1388,6 +1411,7 @@ async fn run_settings(
                             }
                             Err(JellyfinSignOutError::Revoke(error)) => {
                                 ui.set_jellyfin_user(None);
+                                ui.clear_jellyfin_browse();
                                 ui.clear_quick_connect_code();
                                 show_restart_notice(
                                     &ui,
@@ -2295,6 +2319,11 @@ async fn run_router(
                             let _ = jellyfin.send(command).await;
                         }
                     }
+                    RouteCommand::Browse(command) => {
+                        // Browsing never interferes with the active player, so
+                        // it is forwarded regardless of source ownership.
+                        let _ = jellyfin.send(command).await;
+                    }
                     RouteCommand::NetworkLost => {
                         if ownership.active_is(Source::YouTube) && ownership.remote() {
                             ownership.stopped();
@@ -2368,6 +2397,17 @@ async fn run_unavailable(
                 match command {
                     PlaybackCommand::LoadLibrary { .. } | PlaybackCommand::RetryLibrary => {
                         ui.set_library_error(message.to_string());
+                    }
+                    PlaybackCommand::LoadJellyfinLibraries
+                    | PlaybackCommand::LoadJellyfinItems { .. }
+                    | PlaybackCommand::LoadArtwork { .. } => {
+                        ui.apply_playback_update(
+                            tv_client::playback::PlaybackUpdate::Browse(
+                                tv_client::playback::BrowseUpdate::LibrariesFailed {
+                                    message: message.to_string(),
+                                },
+                            ),
+                        );
                     }
                     // Navigation/back and player controls on an error screen are
                     // no-ops, not new failures; otherwise Escape would re-open

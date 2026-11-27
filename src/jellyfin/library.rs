@@ -83,10 +83,7 @@ impl BrowseItem {
         Self {
             id: item.id.clone(),
             title: truncate_chars(title, MAX_BROWSE_TITLE_CHARS),
-            subtitle: truncate_chars(
-                &subtitle_for(item),
-                MAX_BROWSE_SUBTITLE_CHARS,
-            ),
+            subtitle: truncate_chars(&subtitle_for(item), MAX_BROWSE_SUBTITLE_CHARS),
             overview: item
                 .overview
                 .as_deref()
@@ -100,10 +97,10 @@ impl BrowseItem {
 /// Build the bounded secondary line shown under a title.
 fn subtitle_for(item: &BaseItem) -> String {
     let mut parts = Vec::with_capacity(3);
-    if let Some(item_type) = item.item_type.as_deref() {
-        if !item_type.is_empty() {
-            parts.push(item_type.to_owned());
-        }
+    if let Some(item_type) = item.item_type.as_deref()
+        && !item_type.is_empty()
+    {
+        parts.push(item_type.to_owned());
     }
     if let Some(year) = item.production_year {
         parts.push(year.to_string());
