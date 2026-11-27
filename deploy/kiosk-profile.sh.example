@@ -19,6 +19,8 @@ if [ "$(tty)" = /dev/tty1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
   # An unset value keeps `autoaudiosink` for generic desktop use.
   export TV_AUDIO_SINK=alsa
   export TV_AUDIO_DEVICE=hw:0,0
+  # The software textoverlay makes Pi 3B video choppy; keep the OSD opt-in.
+  export TV_PLAYER_OVERLAY=off
 
   # Login PAM must supply XDG_RUNTIME_DIR and an active seat. Do not guess a
   # runtime directory: a wrong one starts a broken Wayland session.

@@ -143,10 +143,10 @@ next generation.
 
 `tv-native-player` creates `playbin3` and requests:
 
-- video: a `queue ! videoconvert ! textoverlay ! waylandsink` bin when the
-  overlay probe succeeds, otherwise a plain `waylandsink` (explicit, so a
-  missing Wayland display fails visibly instead of silently falling back to a
-  CPU sink);
+- video: a plain `waylandsink` by default. With `TV_PLAYER_OVERLAY=on` and a
+  successful probe, a `queue ! videoconvert ! textoverlay ! waylandsink` bin
+  is used instead. The software overlay adds a per-frame copy and made the Pi
+  3B choppy, so it is opt-in;
 - audio: an ordered plan derived from `TV_AUDIO_SINK`/`TV_AUDIO_DEVICE`. The
   kiosk profile selects `alsasink device=hw:0,0`, then `alsasink
   device=default`, then `autoaudiosink`. With neither variable set the plan is
@@ -157,15 +157,17 @@ next generation.
   missing HDMI device cannot turn video playback into a failure.
 
 The chosen plan and sink are logged without secrets and appear in `ready` as
-`sink: "waylandsink+textoverlay; audio=alsasink device=hw:0,0"`. The child
-reads `/dev/input/event*` directly (non-exclusive, never grabbed): Esc/Back
-stops and exits, Space toggles pause, Left/Right seek 10 s, Up/Down change the
-volume by 5. Only key presses are mapped; releases, repeats and unknown codes
-are ignored. The on-screen hint is the `textoverlay` text and updates on
-pause/seek/volume. Without the `input` group the child reports
-`input_unavailable` with `permission denied` and shows that in the overlay.
-HDMI-CEC presses continue to arrive through the parent's CEC bridge; mouse
-control is not implemented because the waylandsink surface has no widgets.
+`sink: "waylandsink; audio=alsasink device=hw:0,0"` (the video label adds
+`+textoverlay` only when the opt-in OSD is enabled). The child reads
+`/dev/input/event*` directly (non-exclusive, never grabbed): Esc/Back stops and
+exits, Space toggles pause, Left/Right seek 10 s, Up/Down change the volume by
+5. Only key presses are mapped; releases, repeats and unknown codes are
+ignored. The optional `textoverlay` hint updates on pause/seek/volume. Without
+the `input` group the child reports `input_unavailable` with `permission
+denied`; with the default OSD off, that status is available in the child event
+log rather than on screen. HDMI-CEC presses continue to arrive through the
+parent's CEC bridge; mouse control is not implemented because the waylandsink
+surface has no widgets.
 
 `playbin3` selects the decoder by rank. On the Raspberry Pi 3B, the installed
 `v4l2h264dec` has rank `primary + 1` (257), above software decoders, and is

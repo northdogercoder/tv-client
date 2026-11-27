@@ -213,7 +213,7 @@ sets the defaults:
 |---|---|---|
 | `TV_AUDIO_SINK` | `alsa` | Prefer `alsasink`; unset keeps `autoaudiosink` for desktop use. |
 | `TV_AUDIO_DEVICE` | `hw:0,0` | ALSA device of `card 0: vc4hdmi`; the child also tries the ALSA `default` device, `autoaudiosink`, and finally a silent `fakesink`. |
-| `TV_PLAYER_OVERLAY` | unset (on) | `off`/`0` disables the `textoverlay` control hint. |
+| `TV_PLAYER_OVERLAY` | unset (off) | `on`/`1` enables the optional `textoverlay` hint; the default avoids its per-frame `videoconvert` cost on the Pi. |
 
 The overlay needs the Pango-backed `textoverlay` from
 `gstreamer1.0-plugins-base`; the child probes it at startup and falls back to a

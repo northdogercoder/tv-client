@@ -7,10 +7,11 @@
 //!
 //! `waylandsink` owns its own Wayland surface, so the compositor delivers
 //! keyboard events to that surface and the UI process cannot see them. The
-//! child therefore reads Linux evdev key events directly and draws a bounded
-//! `textoverlay` hint on the video. `Back`/`Esc` stops playback and exits with a
-//! `stopped` event, so the parent returns to the launcher instead of treating
-//! the exit as a crash.
+//! child therefore reads Linux evdev key events directly. A bounded
+//! `textoverlay` hint is available only when `TV_PLAYER_OVERLAY=on`; it is
+//! off by default because the software overlay copy makes Pi 3B video choppy.
+//! `Back`/`Esc` stops playback and exits with a `stopped` event, so the parent
+//! returns to the launcher instead of treating the exit as a crash.
 //!
 //! Audio is selected deterministically: the kiosk profile asks for the direct
 //! ALSA path (`TV_AUDIO_SINK=alsa`, `TV_AUDIO_DEVICE=hw:0,0`), a generic
@@ -824,12 +825,15 @@ fn build_video_sink(
 }
 
 fn overlay_requested() -> bool {
+    // The software textoverlay/videoconvert path is too expensive for the Pi
+    // 3B at 720p30, so it is opt-in. Keyboard controls remain active without
+    // it. Set TV_PLAYER_OVERLAY=on to show the hint.
     match std::env::var(OVERLAY_ENV) {
-        Ok(value) => !matches!(
+        Ok(value) => matches!(
             value.trim().to_ascii_lowercase().as_str(),
-            "off" | "0" | "false" | "no"
+            "on" | "1" | "true" | "yes"
         ),
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
