@@ -17,10 +17,10 @@ Greenfield backlog, 2026-11-25. All rows begin TODO; no application code exists 
 | [C011](011-airplay.md) | Add opt-in LAN AirPlay mirroring | P2 | M | HIGH | C006, C008, C004 | IN PROGRESS (module) |
 | [C012](012-webrtc.md) | Add optional browser screen sharing receiver | P3 | L | HIGH | C006, C008, C009 | IN PROGRESS (module; S009 external) |
 | [C013](013-release.md) | Package, deploy and recover the Pi kiosk | P1 | L | HIGH | C007, C008, C009, C010 | BLOCKED (hardware matrix partial) |
-| [C014](014-settings.md) | Add on-device settings, writable config and Jellyfin Quick Connect | P1 | L | HIGH | C004, C005, C009, C010 | IN PROGRESS |
+| [C014](014-settings.md) | Add on-device settings, writable config and Jellyfin Quick Connect | P1 | L | HIGH | C004, C005, C009, C010 | DONE |
 | [C015](015-music-audiobooks.md) | Add music and audiobook browsing/playback | P2 | L | MED | C005, C006, C007 | TODO |
 | [C016](016-books.md) | Add safe book/comic browsing and reading | P3 | L | HIGH | C004, C005 | TODO |
-| [C017](017-player-overlay.md) | Add a smooth video control bar overlay | P1 | M | HIGH | C004, C006, C007 | TODO |
+| [C017](017-player-overlay.md) | Add a smooth video control bar overlay | P1 | M | HIGH | C004, C006, C007 | IN PROGRESS |
 
 ## Dependency notes
 
@@ -44,7 +44,8 @@ Status: TODO / IN PROGRESS / DONE / BLOCKED (reason) / REJECTED (rationale). Mar
 - **C013 BLOCKED 2026-11-27**: code merged in `e74bd3b` from `advisor/c013-release` @ `92dbb66`; reviewer APPROVE as code. ARM64 artifact **BUILT + attested** (workflow `45916540369`), checksums/AArch64/SBOM verified, installed as **0.1.0**; R1–R4 PASS (artifact, install, kiosk visible after VT switch, tvkiosk no sudo/SSH, persistent state/config). R5–R11 (5 reboots, rollback, offline/relay, YouTube panel, 2h soak) **NOT RUN**; C014 will produce 0.1.1 and require reinstall. Gate flake fix `4306780` retries transient extractor spawns; five consecutive full gates pass.
 - **C011 IN PROGRESS 2026-11-27**: bound at `6f06424`; module phase launched in `advisor/c011-airplay` (`src/cast/airplay.rs`, tests, docs). Pi verified UxPlay 1.71 + Avahi; no sender/Mac proof yet; UI/main integration and network-isolation acceptance pending. C012 module remains disjoint; shared files not touched.
 - **C012 IN PROGRESS 2026-11-27**: bound at `6f06424`; module phase launched in `advisor/c012-webrtc` (consent/SDP/ICE state machine + pipeline contract). Pi has GStreamer 1.26.2 `webrtcbin` and Chromium; S009 server signaling and real browser offer remain external gates, so final joint DONE is BLOCKED until integration.
-- **C014 IN PROGRESS 2026-11-27**: worktree `advisor/c014-settings`; writable 0600 state config, editable Settings, Quick Connect, overscan safe area, installer display-manager/tty1 handling. Settings suite and independent review running; merge/release 0.1.1 pending.
+- **C014 DONE 2026-11-27**: merged in `6816768` after two review rounds; writable 0600 state config seeded from the operator config, editable Settings, Quick Connect with immediate cancellation and local-token cleanup, opt-in safe area, installer display-manager/tty1 handling. Default/native gates green; 0.1.1 built/attested/installed and Quick Connect/Jellyfin sign-in worked on the Pi. Follow-up UX corrections shipped in 0.1.2/0.1.3.
+- **C017 IN PROGRESS 2026-11-27**: `advisor/player-overlay` implementing a separate control-bar surface above waylandsink, with mouse show/hide, seek/time, play/pause and keyboard, avoiding the choppy per-frame `textoverlay`. Hardware transparency/z-order is NOT RUN.
 - **Repository public**: switched to public 2026-11-25 after a history scan found no credentials; GitHub-hosted arm64 runners (`ubuntu-24.04-arm`) are available for C013.
 - **C010 amended 2026-11-25**: server owns YouTube API search/browse only; Pi playback uses yt-dlp + libmpv + ffmpeg. Chromium/IFrame, player tickets, the server player bridge and server-side download/relay are removed/rejected. The TV is 1080p: target H.264 1080p30, fall back to 720p30; 1080p60 hardware-decodes with v4l2m2m but currently desyncs, so do not offer it. Measure a working renderer (Wayland/OpenGL/wlshm); Vulkan/libplacebo is not assumed. The distro yt-dlp is unreliable; a managed version/update policy, client kill switch and typed extractor-unavailable state are required. Depends on C006's exclusive supervisor, C008 input and C009 device auth. `HANDOFF.md` is the live cross-repo contract; re-read it before C010 dispatch.
 
