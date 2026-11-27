@@ -280,7 +280,7 @@ inserts a `videoconvert` copy per frame and made 0.1.2 video a slideshow on the
 Pi 3B; 0.1.3 defaults to the plain `waylandsink` path and keeps keyboard
 controls. The control bar does not use `textoverlay`.
 
-## R12: mpv dmabuf playback and pause-only OSC (0.1.10–0.1.12 runtime)
+## R12: mpv dmabuf playback and pause-only OSC (0.1.10–0.1.13 runtime)
 
 The kiosk profile sets `TV_PLAYER_BACKEND=mpv`; the release does not build
 `player-overlay`. mpv owns video in one surface using `dmabuf-wayland` with
