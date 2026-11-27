@@ -166,7 +166,7 @@ fn release_artifact_name_and_feature_policy_are_fixed() {
     let workflow = read(WORKFLOW);
     for needle in [
         "runs-on: ubuntu-24.04-arm",
-        "cargo build --release --locked --features native-ui,gstreamer-player",
+        "cargo build --release --locked --features native-ui,gstreamer-player,player-overlay",
         "scripts/package-release.sh",
         "SBOM.cdx.json",
         "NOTICES",
@@ -184,6 +184,7 @@ fn release_artifact_name_and_feature_policy_are_fixed() {
 
     let cargo = read("Cargo.toml");
     assert!(cargo.contains("native-ui = [\"dep:slint\"]"));
+    assert!(cargo.contains("player-overlay = [\"gstreamer-player\", \"dep:slint\"]"));
     assert!(cargo.contains("gstreamer-player = ["));
     assert!(cargo.contains("name = \"tv-native-player\""));
     assert!(cargo.contains("required-features = [\"gstreamer-player\"]"));
@@ -197,7 +198,7 @@ fn release_artifact_name_and_feature_policy_are_fixed() {
         "SHA256SUMS",
         "gzip -n",
         "CycloneDX",
-        "--features native-ui,gstreamer-player",
+        "--features native-ui,gstreamer-player,player-overlay",
     ] {
         assert!(
             package.contains(needle),

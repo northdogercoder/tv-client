@@ -8,6 +8,7 @@ license = "GPL-3.0-only"
 [features]
 native-ui = ["dep:slint"]
 gstreamer-player = ["dep:gstreamer", "dep:gstreamer-video", "dep:gstreamer-audio"]
+player-overlay = ["gstreamer-player", "dep:slint"]
 cec = []
 airplay = []
 webrtc = []

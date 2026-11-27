@@ -25,6 +25,8 @@ use url::Url;
 
 use crate::state::{ShutdownHandle, ShutdownSignal, shutdown_channel};
 
+pub mod overlay;
+
 /// Largest accepted protocol line, excluding the trailing newline.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 /// Largest accepted number of HTTP headers in a load request.
