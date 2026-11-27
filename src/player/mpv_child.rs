@@ -194,11 +194,19 @@ impl MpvSession {
         write_input_conf(&input_conf)?;
         let arguments = build_arguments(&socket, &input_conf);
 
+        // URL-free diagnosis only: mpv expands these properties into a line
+        // per frame. The file is world-readable so the operator can inspect
+        // decoder/resolution/drop evidence while playback is live; it never
+        // contains the media URL or headers.
+        let status_file = std::fs::File::create("/tmp/tv-client-mpv-status.log").ok();
         let mut child = Command::new("mpv")
             .args(&arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(match status_file {
+                Some(file) => Stdio::from(file),
+                None => Stdio::null(),
+            })
             .spawn()
             .map_err(|_| "mpv is not available")?;
 
@@ -409,8 +417,9 @@ DOWN add volume -5
 fn build_arguments(socket: &Path, input_conf: &Path) -> Vec<String> {
     let mut arguments = vec![
         "--no-config".to_string(),
-        "--no-terminal".to_string(),
-        "--really-quiet".to_string(),
+        "--terminal=yes".to_string(),
+        "--msg-level=all=no".to_string(),
+        "--term-status-msg=hwdec=${hwdec-current} codec=${video-codec} size=${width}x${height} fps=${container-fps} vfps=${estimated-vf-fps} drops=${drop-frame-count} mistimed=${mistimed-frame-count} vo-drops=${vo-drop-frame-count} audio=${audio-codec} sync=${video-sync}".to_string(),
         "--idle=yes".to_string(),
         "--force-window=yes".to_string(),
         "--fullscreen=yes".to_string(),
