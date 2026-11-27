@@ -17,7 +17,7 @@ use tempfile::TempDir;
 use tv_client::config::ClientConfig;
 use tv_client::jellyfin::{
     ArtworkClass, BrowseItem, CancelToken, ImageRequest, ImageType, ItemQuery, JellyfinClient,
-    JellyfinError, LibraryEntry, Page, QuickConnectPoll, Timeouts, cancellation,
+    JellyfinError, LibraryEntry, Page, PreviewKind, QuickConnectPoll, Timeouts, cancellation,
 };
 use tv_client::storage::{HARD_ARTWORK_CACHE_BYTES, Storage, StorageError};
 
@@ -665,7 +665,7 @@ async fn browse_query_is_parent_scoped_fielded_and_bounded() {
     );
 
     let page = client
-        .browse("library-1", 24, &cancel)
+        .browse("library-1", Some("movies"), 24, &cancel)
         .await
         .expect("browse page");
     assert_eq!(page.total_record_count, 49);
@@ -710,6 +710,141 @@ async fn browse_query_is_parent_scoped_fielded_and_bounded() {
             .all(|request| !request.target.contains("http")),
         "requests stay on the configured path"
     );
+}
+
+#[test]
+fn browse_queries_map_each_library_collection_type() {
+    let cases: &[(Option<&str>, &[&str], &[&str])] = &[
+        (Some("movies"), &["Movie", "Episode", "Video"], &["Video"]),
+        (Some("tvshows"), &["Movie", "Episode", "Video"], &["Video"]),
+        (None, &["Movie", "Episode", "Video"], &["Video"]),
+        (Some("musicvideos"), &["MusicVideo"], &["Video"]),
+        (Some("MUSIC"), &["Audio", "MusicAlbum"], &[]),
+        (Some("audiobooks"), &["AudioBook"], &["Audio"]),
+        (Some("books"), &["Book"], &[]),
+        // Unknown collection types keep the video default rather than
+        // widening the query.
+        (
+            Some("playlists"),
+            &["Movie", "Episode", "Video"],
+            &["Video"],
+        ),
+    ];
+
+    for (collection_type, item_types, media_types) in cases {
+        let query = ItemQuery::browse("library-1", *collection_type, 24).expect("query");
+        assert_eq!(
+            query
+                .include_item_types
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            item_types.to_vec(),
+            "IncludeItemTypes for {collection_type:?}"
+        );
+        assert_eq!(
+            query
+                .media_types
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            media_types.to_vec(),
+            "MediaTypes for {collection_type:?}"
+        );
+        assert_eq!(query.parent_id.as_deref(), Some("library-1"));
+        assert_eq!(query.page.start_index(), 24);
+        assert_eq!(query.page.limit(), 24);
+        assert_eq!(
+            query.fields,
+            ["UserData", "ImageTags", "Overview"]
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn preview_kind_separates_video_from_planned_audio_and_books() {
+    let kind = |item_type: Option<&str>| {
+        BrowseItem {
+            item_type: item_type.map(str::to_owned),
+            ..BrowseItem::default()
+        }
+        .preview_kind()
+    };
+    for video in ["Movie", "Episode", "Video", "MusicVideo"] {
+        assert_eq!(kind(Some(video)), PreviewKind::Video, "{video}");
+        assert!(kind(Some(video)).is_playable(), "{video}");
+    }
+    for audio in ["Audio", "MusicAlbum", "AudioBook"] {
+        assert_eq!(kind(Some(audio)), PreviewKind::AudioPlanned, "{audio}");
+        assert!(!kind(Some(audio)).is_playable(), "{audio}");
+    }
+    assert_eq!(kind(Some("Book")), PreviewKind::BookPlanned);
+    assert_eq!(kind(None), PreviewKind::Unsupported);
+    assert!(!PreviewKind::BookPlanned.is_playable());
+}
+
+#[tokio::test]
+async fn music_library_browse_requests_audio_and_albums_without_a_video_filter() {
+    let server = MockServer::start(|request| match request.path() {
+        "/Users/AuthenticateByName" => auth_response(),
+        "/Users/user-1/Items" => MockResponse::json(
+            200,
+            json!({
+                "Items": [
+                    {"Id": "album-1", "Name": "Discovery", "Type": "MusicAlbum"},
+                    {"Id": "track-1", "Name": "One More Time", "Type": "Audio"}
+                ],
+                "TotalRecordCount": 2,
+                "StartIndex": 0
+            }),
+        ),
+        _ => MockResponse::empty(404),
+    });
+    let directory = temp_dir();
+    let mut storage = open_storage(&directory);
+    let (_cancel, cancel) = cancellation();
+    let mut client = make_client(&server.url, &mut storage);
+    login(&mut client, &mut storage, &cancel).await;
+
+    let page = client
+        .browse("library-1", Some("music"), 0, &cancel)
+        .await
+        .expect("music page");
+    assert_eq!(
+        page.items
+            .iter()
+            .map(BrowseItem::from_base_item)
+            .map(|item| item.preview_kind())
+            .collect::<Vec<_>>(),
+        [PreviewKind::AudioPlanned, PreviewKind::AudioPlanned].to_vec()
+    );
+
+    let requests = server.requests();
+    let query = requests
+        .iter()
+        .find(|request| request.path() == "/Users/user-1/Items")
+        .expect("music request")
+        .query();
+    let decode = |value: &str| {
+        url::form_urlencoded::parse(value.as_bytes())
+            .map(|(key, _)| key.into_owned())
+            .collect::<String>()
+    };
+    assert_eq!(
+        query
+            .get("IncludeItemTypes")
+            .map(|value| decode(value))
+            .as_deref(),
+        Some("Audio,MusicAlbum")
+    );
+    assert!(
+        !query.contains_key("MediaTypes"),
+        "music libraries must not carry the video media filter"
+    );
+    assert_eq!(query.get("Limit").map(String::as_str), Some("24"));
 }
 
 #[tokio::test]

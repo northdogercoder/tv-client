@@ -1824,6 +1824,7 @@ async fn browse_commands_query_the_parent_and_report_pagination() {
         .handle_command(
             PlaybackCommand::LoadJellyfinItems {
                 library_id: "library-1".to_owned(),
+                collection_type: Some("movies".to_owned()),
                 start_index: 24,
             },
             Instant::now(),
@@ -1853,6 +1854,7 @@ async fn browse_commands_query_the_parent_and_report_pagination() {
         .handle_command(
             PlaybackCommand::LoadJellyfinItems {
                 library_id: "library-1".to_owned(),
+                collection_type: Some("movies".to_owned()),
                 start_index: 48,
             },
             Instant::now(),
@@ -1899,6 +1901,80 @@ async fn browse_commands_query_the_parent_and_report_pagination() {
 }
 
 #[tokio::test]
+async fn library_items_command_selects_item_and_media_types_per_collection() {
+    let handler = |request: &MockRequest| match request.path() {
+        "/Users/AuthenticateByName" => MockResponse::json(200, auth_body()),
+        "/Users/user-1/Items" => MockResponse::json(
+            200,
+            json!({"Items": [], "TotalRecordCount": 0, "StartIndex": 0}),
+        ),
+        _ => MockResponse::empty(404),
+    };
+    let mut fixture = fixture(handler, PlaybackConfig::default(), 60_000).await;
+
+    let cases = [
+        (Some("movies"), "Movie,Episode,Video", Some("Video")),
+        (Some("musicvideos"), "MusicVideo", Some("Video")),
+        (Some("music"), "Audio,MusicAlbum", None),
+        (Some("audiobooks"), "AudioBook", Some("Audio")),
+        (Some("books"), "Book", None),
+        (None, "Movie,Episode,Video", Some("Video")),
+    ];
+    for (collection_type, _, _) in cases {
+        let updates = fixture
+            .controller
+            .handle_command(
+                PlaybackCommand::LoadJellyfinItems {
+                    library_id: "library-1".to_owned(),
+                    collection_type: collection_type.map(str::to_owned),
+                    start_index: 0,
+                },
+                Instant::now(),
+                &fixture.cancel,
+            )
+            .await;
+        assert!(
+            matches!(browse_updates(&updates)[0], BrowseUpdate::ItemsReady { .. }),
+            "collection {collection_type:?} returns an items page"
+        );
+    }
+
+    let requests = fixture.server.requests();
+    let item_requests = requests
+        .iter()
+        .filter(|request| request.path() == "/Users/user-1/Items")
+        .collect::<Vec<_>>();
+    assert_eq!(item_requests.len(), cases.len());
+    let decode = |value: &str| {
+        url::form_urlencoded::parse(value.as_bytes())
+            .map(|(key, _)| key.into_owned())
+            .collect::<String>()
+    };
+    for (request, (collection_type, item_types, media_types)) in item_requests.iter().zip(cases) {
+        let query = request.query();
+        assert_eq!(
+            query
+                .get("IncludeItemTypes")
+                .map(|value| decode(value))
+                .as_deref(),
+            Some(item_types),
+            "IncludeItemTypes for {collection_type:?}"
+        );
+        assert_eq!(
+            query
+                .get("MediaTypes")
+                .map(|value| decode(value))
+                .as_deref(),
+            media_types,
+            "MediaTypes for {collection_type:?}"
+        );
+        assert_eq!(query.get("ParentId").map(String::as_str), Some("library-1"));
+        assert_eq!(query.get("Limit").map(String::as_str), Some("24"));
+    }
+    fixture.cancel_handle.cancel();
+}
+
+#[tokio::test]
 async fn browse_401_maps_to_a_session_expired_update() {
     let handler = |request: &MockRequest| match request.path() {
         "/Users/AuthenticateByName" => MockResponse::json(200, auth_body()),
@@ -1925,6 +2001,7 @@ async fn browse_401_maps_to_a_session_expired_update() {
         .handle_command(
             PlaybackCommand::LoadJellyfinItems {
                 library_id: "library-1".to_owned(),
+                collection_type: Some("movies".to_owned()),
                 start_index: 0,
             },
             Instant::now(),

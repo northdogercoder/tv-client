@@ -17,10 +17,42 @@ const DEFAULT_FIELDS: &str = "UserData,ImageTags,Overview";
 
 /// Item page size used by a poster/library grid.
 pub const BROWSE_PAGE_SIZE: u32 = 24;
-/// Playable item types shown in a library grid.
+/// Default video item types shown in a library grid.
 pub const BROWSE_INCLUDE_ITEM_TYPES: [&str; 3] = ["Movie", "Episode", "Video"];
 /// Maximum number of library views handed to the UI in one list.
 pub const MAX_LIBRARIES: usize = 32;
+
+const VIDEO_ITEM_TYPES: &[&str] = &BROWSE_INCLUDE_ITEM_TYPES;
+const MUSIC_VIDEO_ITEM_TYPES: &[&str] = &["MusicVideo"];
+const MUSIC_ITEM_TYPES: &[&str] = &["Audio", "MusicAlbum"];
+const AUDIOBOOK_ITEM_TYPES: &[&str] = &["AudioBook"];
+const BOOK_ITEM_TYPES: &[&str] = &["Book"];
+const VIDEO_MEDIA_TYPES: &[&str] = &["Video"];
+const AUDIO_MEDIA_TYPES: &[&str] = &["Audio"];
+const ANY_MEDIA_TYPES: &[&str] = &[];
+
+/// Item and media types requested for one Jellyfin collection type.
+///
+/// The library collection type is a server-supplied hint; only exact known
+/// values select a different query. Everything else keeps the video default,
+/// so an unknown or hostile collection type can never widen the query.
+#[must_use]
+pub fn browse_types(
+    collection_type: Option<&str>,
+) -> (&'static [&'static str], &'static [&'static str]) {
+    match collection_type
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "musicvideos" => (MUSIC_VIDEO_ITEM_TYPES, VIDEO_MEDIA_TYPES),
+        "music" => (MUSIC_ITEM_TYPES, ANY_MEDIA_TYPES),
+        "audiobooks" => (AUDIOBOOK_ITEM_TYPES, AUDIO_MEDIA_TYPES),
+        "books" => (BOOK_ITEM_TYPES, ANY_MEDIA_TYPES),
+        _ => (VIDEO_ITEM_TYPES, VIDEO_MEDIA_TYPES),
+    }
+}
 
 const MAX_LIBRARY_NAME_CHARS: usize = 128;
 const MAX_BROWSE_TITLE_CHARS: usize = 256;
@@ -91,6 +123,54 @@ impl BrowseItem {
             primary_tag: item.image_tags.get("Primary").cloned(),
             item_type,
         }
+    }
+
+    /// What the preview screen can do with this item in this build.
+    #[must_use]
+    pub fn preview_kind(&self) -> PreviewKind {
+        match self
+            .item_type
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "movie" | "episode" | "video" | "musicvideo" => PreviewKind::Video,
+            "audio" | "musicalbum" | "audiobook" => PreviewKind::AudioPlanned,
+            "book" => PreviewKind::BookPlanned,
+            _ => PreviewKind::Unsupported,
+        }
+    }
+
+    /// Whether the existing video player can open this item.
+    #[must_use]
+    pub fn is_playable(&self) -> bool {
+        self.preview_kind().is_playable()
+    }
+}
+
+/// Preview capability of one browse item.
+///
+/// Audio and book playback need the dedicated players planned in C015 and
+/// C016; reporting them explicitly keeps the preview from offering a Play
+/// action that cannot work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewKind {
+    /// A video item the existing `PlayJellyfin` path can open.
+    Video,
+    /// Audio item reserved for the music/audiobook player (C015).
+    AudioPlanned,
+    /// Book item reserved for the reader (C016).
+    BookPlanned,
+    /// Item type is missing or not browsable in this build.
+    Unsupported,
+}
+
+impl PreviewKind {
+    /// Whether the current video player can open this item.
+    #[must_use]
+    pub const fn is_playable(self) -> bool {
+        matches!(self, Self::Video)
     }
 }
 
@@ -177,17 +257,27 @@ impl ItemQuery {
         Self::default()
     }
 
-    /// One bounded page of playable movies, episodes and videos below a
-    /// library view.
+    /// One bounded page of items below a library view.
     ///
-    /// The query requests `UserData`, `ImageTags` and `Overview`, restricts
-    /// `IncludeItemTypes` to `Movie,Episode,Video` and `MediaTypes` to `Video`,
-    /// and uses [`BROWSE_PAGE_SIZE`] (24) to bound poster fetches per page.
-    pub fn browse(parent_id: &str, start_index: u32) -> Result<Self, JellyfinError> {
+    /// `collection_type` selects the query shape: video libraries keep
+    /// `Movie,Episode,Video` with `MediaTypes=Video`, music videos request
+    /// `MusicVideo`, music requests `Audio,MusicAlbum`, audiobooks request
+    /// `AudioBook` and books request `Book`. Audio and book libraries are
+    /// browse-only until C015/C016; their query omits the video media filter so
+    /// the server does not hide the items.
+    ///
+    /// The query requests `UserData`, `ImageTags` and `Overview` and uses
+    /// [`BROWSE_PAGE_SIZE`] (24) to bound poster fetches per page.
+    pub fn browse(
+        parent_id: &str,
+        collection_type: Option<&str>,
+        start_index: u32,
+    ) -> Result<Self, JellyfinError> {
+        let (include_item_types, media_types) = browse_types(collection_type);
         Ok(Self::new()
             .parent(parent_id)
-            .include_types(&BROWSE_INCLUDE_ITEM_TYPES)
-            .media_types(&["Video"])
+            .include_types(include_item_types)
+            .media_types(media_types)
             .fields(&["UserData", "ImageTags", "Overview"])
             .page(Page::new(start_index, BROWSE_PAGE_SIZE)?))
     }
@@ -318,14 +408,18 @@ impl JellyfinClient {
             .collect())
     }
 
-    /// List one bounded page of playable items below a library view.
+    /// List one bounded page of items below a library view.
+    ///
+    /// `collection_type` chooses the item/media types through
+    /// [`ItemQuery::browse`].
     pub async fn browse(
         &self,
         library_id: &str,
+        collection_type: Option<&str>,
         start_index: u32,
         cancel: &CancelToken,
     ) -> Result<QueryResult<BaseItem>, JellyfinError> {
-        let query = ItemQuery::browse(library_id, start_index)?;
+        let query = ItemQuery::browse(library_id, collection_type, start_index)?;
         self.items(&query, cancel).await
     }
 

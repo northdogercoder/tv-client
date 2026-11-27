@@ -48,7 +48,8 @@ pub use client::{
 pub use error::JellyfinError;
 pub use image::{MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS};
 pub use library::{
-    BROWSE_INCLUDE_ITEM_TYPES, BROWSE_PAGE_SIZE, BrowseItem, ItemQuery, LibraryEntry, MAX_LIBRARIES,
+    BROWSE_INCLUDE_ITEM_TYPES, BROWSE_PAGE_SIZE, BrowseItem, ItemQuery, LibraryEntry,
+    MAX_LIBRARIES, PreviewKind, browse_types,
 };
 pub use models::{
     ArtworkClass, AuthenticationResult, BaseItem, DEFAULT_IMAGE_HEIGHT, DEFAULT_IMAGE_WIDTH,

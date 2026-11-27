@@ -16,7 +16,7 @@ use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::jellyfin::{ArtworkClass, BrowseItem, CachedArtwork, LibraryEntry};
+use crate::jellyfin::{ArtworkClass, BrowseItem, CachedArtwork, LibraryEntry, PreviewKind};
 use crate::model::{
     Action, AppState, Direction, InputOrigin, Mode, Source, is_valid_item_id, is_valid_youtube_id,
 };
@@ -427,6 +427,8 @@ pub enum UiBrowseCommand {
     LoadItems {
         /// Opaque library (view) identifier used as the parent.
         library_id: String,
+        /// Jellyfin collection type used to choose the query shape.
+        collection_type: Option<String>,
         /// Zero-based first item index.
         start_index: u32,
     },
@@ -818,6 +820,7 @@ struct JellyfinView {
     items: Vec<BrowseItem>,
     items_load: LoadState,
     items_library_id: Option<String>,
+    items_collection_type: Option<String>,
     items_focus: usize,
     items_selected: Option<String>,
     items_start: u32,
@@ -841,6 +844,7 @@ impl Default for JellyfinView {
             items: Vec::new(),
             items_load: LoadState::Idle,
             items_library_id: None,
+            items_collection_type: None,
             items_focus: 0,
             items_selected: None,
             items_start: 0,
@@ -1361,9 +1365,30 @@ impl UiModel {
     }
 
     /// Focused preview action: 0 is Play, 1 is Back.
+    ///
+    /// Non-playable item types always report 1, so Play can never be focused.
     #[must_use]
     pub const fn jellyfin_preview_focus(&self) -> usize {
         self.jellyfin.preview_focus
+    }
+
+    /// Whether the current preview item can use the existing video player.
+    #[must_use]
+    pub fn jellyfin_preview_playable(&self) -> bool {
+        self.jellyfin
+            .preview
+            .as_ref()
+            .is_some_and(|item| is_valid_item_id(&item.id) && item.is_playable())
+    }
+
+    /// Clear, typed note for a preview whose player is not implemented yet.
+    #[must_use]
+    pub fn jellyfin_preview_planned_note(&self) -> Option<&'static str> {
+        match self.jellyfin.preview.as_ref().map(BrowseItem::preview_kind) {
+            Some(PreviewKind::AudioPlanned) => Some("Audio player planned (C015)"),
+            Some(PreviewKind::BookPlanned) => Some("Book reader planned (C016)"),
+            _ => None,
+        }
     }
 
     /// Local poster cache path for one item, when artwork is ready.
@@ -1416,6 +1441,7 @@ impl UiModel {
         self.jellyfin.items.clear();
         self.jellyfin.items_load = LoadState::Idle;
         self.jellyfin.items_library_id = None;
+        self.jellyfin.items_collection_type = None;
         self.jellyfin.items_selected = None;
         self.jellyfin.items_focus = 0;
         self.jellyfin.items_start = 0;
@@ -1463,8 +1489,15 @@ impl UiModel {
     }
 
     /// Set the focused preview action (0 Play, 1 Back).
+    ///
+    /// Audio and book previews have no Play action, so any request to focus
+    /// it is clamped to Back.
     pub fn set_jellyfin_preview_focus(&mut self, index: usize) {
-        self.jellyfin.preview_focus = index.min(1);
+        if self.jellyfin_preview_playable() {
+            self.jellyfin.preview_focus = index.min(1);
+        } else {
+            self.jellyfin.preview_focus = 1;
+        }
     }
 
     /// Resume item shown by the first home row.
@@ -3130,11 +3163,15 @@ impl UiModel {
             }
             Key::Enter => self.activate_preview(),
             Key::Left | Key::Right | Key::Up | Key::Down => {
-                self.jellyfin.preview_focus = if self.jellyfin.preview_focus == 0 {
-                    1
-                } else {
-                    0
-                };
+                self.jellyfin.preview_focus =
+                    if self.jellyfin_preview_playable() && self.jellyfin.preview_focus == 0 {
+                        1
+                    } else if self.jellyfin_preview_playable() {
+                        0
+                    } else {
+                        // Audio and book previews only offer Back.
+                        1
+                    };
                 self.refresh_status();
                 UiOutcome::Action(Action::Navigate {
                     direction: direction_for_key(key),
@@ -3178,6 +3215,7 @@ impl UiModel {
         }
         self.jellyfin.pending_browse.clear();
         self.jellyfin.items_library_id = Some(library.id.clone());
+        self.jellyfin.items_collection_type = library.collection_type.clone();
         self.jellyfin.items.clear();
         self.jellyfin.items_load = LoadState::Loading;
         self.jellyfin.items_start = 0;
@@ -3191,6 +3229,7 @@ impl UiModel {
         self.refresh_status();
         UiOutcome::Browse(UiBrowseCommand::LoadItems {
             library_id: library.id.clone(),
+            collection_type: library.collection_type.clone(),
             start_index: 0,
         })
     }
@@ -3201,10 +3240,12 @@ impl UiModel {
             return UiOutcome::Rejected(UiReject::NoSelection);
         };
         let start_index = self.jellyfin.items_start;
+        let collection_type = self.jellyfin.items_collection_type.clone();
         self.jellyfin.items_load = LoadState::Loading;
         self.status = "Retrying Jellyfin items".to_owned();
         UiOutcome::Browse(UiBrowseCommand::LoadItems {
             library_id,
+            collection_type,
             start_index,
         })
     }
@@ -3232,11 +3273,13 @@ impl UiModel {
             let Some(library_id) = self.jellyfin.items_library_id.clone() else {
                 return UiOutcome::Rejected(UiReject::NoSelection);
             };
+            let collection_type = self.jellyfin.items_collection_type.clone();
             self.jellyfin.items_load = LoadState::Loading;
             self.jellyfin.items_start = start_index;
             self.status = "Loading more items".to_owned();
             return UiOutcome::Browse(UiBrowseCommand::LoadItems {
                 library_id,
+                collection_type,
                 start_index,
             });
         }
@@ -3248,7 +3291,7 @@ impl UiModel {
             return UiOutcome::Rejected(UiReject::InvalidItem);
         }
         self.jellyfin.preview = Some(item.clone());
-        self.jellyfin.preview_focus = 0;
+        self.jellyfin.preview_focus = if item.is_playable() { 0 } else { 1 };
         self.screen = Screen::Preview;
         self.refresh_status();
         let key = ArtworkKey::new(&item.id, ArtworkClass::Preview);
@@ -3287,6 +3330,14 @@ impl UiModel {
         if !is_valid_item_id(&item.id) {
             self.status = "Invalid Jellyfin item identifier".to_owned();
             return UiOutcome::Rejected(UiReject::InvalidItem);
+        }
+        if !item.is_playable() {
+            let note = self
+                .jellyfin_preview_planned_note()
+                .unwrap_or("This item type is not playable in this build");
+            self.status = note.to_owned();
+            self.jellyfin.preview_focus = 1;
+            return UiOutcome::Ignored;
         }
         let media = MediaItem::new(Source::Jellyfin, item.id.clone(), item.title.clone());
         match self.play_item(&media) {
@@ -3778,7 +3829,13 @@ impl UiModel {
                 }
             }
             Screen::Preview => match &self.jellyfin.preview {
-                Some(item) => format!("Preview: {}", item.title),
+                Some(item) if item.is_playable() => format!("Preview: {}", item.title),
+                Some(item) => format!(
+                    "Preview: {} ({})",
+                    item.title,
+                    self.jellyfin_preview_planned_note()
+                        .unwrap_or("not playable in this build")
+                ),
                 None => "Preview".to_owned(),
             },
         };
@@ -3915,7 +3972,7 @@ mod native {
     use super::{
         JELLYFIN_LIBRARY_COLUMNS, JELLYFIN_POSTER_COLUMNS, Key, LoadState, MediaItem, PairChoice,
         PlayerMenu, Screen, SettingsRowView, UiBrowseCommand, UiInput, UiModel, UiOutcome,
-        UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, is_valid_item_id, source_label,
+        UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, source_label,
     };
     use crate::model::Action;
 
@@ -4886,7 +4943,10 @@ mod native {
                 .into(),
         );
         window.set_jf_preview_focus(model.jellyfin_preview_focus() as i32);
-        window.set_jf_preview_playable(preview.is_some_and(|item| is_valid_item_id(&item.id)));
+        window.set_jf_preview_playable(model.jellyfin_preview_playable());
+        let planned_note = model.jellyfin_preview_planned_note().unwrap_or("");
+        window.set_jf_preview_planned(!planned_note.is_empty());
+        window.set_jf_preview_planned_note(planned_note.into());
 
         let cards: Vec<MediaCard> = model
             .visible_items()
