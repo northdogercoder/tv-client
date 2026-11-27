@@ -1,10 +1,10 @@
 # Release and deployment acceptance (C013)
 
-This is the operator matrix for the packaged ARM64 kiosk. It is a template and
-a status record, not evidence that a gate ran. The C013 executor did not build
-the release workflow, install on the Pi, change services, reboot the lab target
-or produce an attestation. Every row below is therefore **NOT RUN**, and the
-artifact is **NOT BUILT**.
+This is the operator matrix for the packaged ARM64 kiosk. Rows below contain
+only measured evidence; unrun gates remain **NOT RUN**. The 0.1.13 artifact was
+built by the tag workflow, downloaded, checksum-verified and installed on the
+operator Pi. Rows R0, R2 and R12 have operator evidence; the remaining rows are
+still unrun.
 
 The historical C010 result (local YouTube 720p30 under Cage/GLES: 2 dropped
 frames in 240) is an input to this matrix. It does not validate this artifact,
@@ -17,17 +17,17 @@ copy values from a plan or a previous release.
 
 | Field | Value |
 |---|---|
-| Version | `<0.1.1>` |
-| Git commit | `<git rev-parse HEAD>` |
-| Workflow run | `<URL / run id>` |
-| Artifact | `tv-client-linux-arm64-<version>.tar.gz` |
-| SHA256 | `<from SHA256SUMS>` |
-| Attestation | `<attestation URL or "not produced">` |
+| Version | `0.1.13` |
+| Git commit | `75f3159e7680b7a79f3caafe825d9dcae45ac81b` |
+| Workflow run | `46076618805` |
+| Artifact | `tv-client-linux-arm64-0.1.13.tar.gz` |
+| SHA256 | `3e9202de6b847d22bc9bbbf7c0a84ac8a2db9e29e89dc88e1286843490f87f86` |
+| Attestation | workflow `attest-linux-arm64` job succeeded; local `gh` has no `attestation` command |
 | Build host | `ubuntu-24.04-arm` (GitHub-hosted) |
-| Install date | `<YYYY-MM-DD>` |
-| Operator | `<name>` |
+| Install date | `2026-11-27` |
+| Operator | `operator` |
 
-Status: **0.1.0 and 0.1.1 built, attested and installed; 0.1.2 is building.**
+Status: **0.1.13 built, checksum-verified and installed; R0/R2/R12 operator-observed.**
 The tag workflow at `.github/workflows/release.yml` builds on
 `ubuntu-24.04-arm`, verifies the AArch64 ELF, packages the SBOM/NOTICES and
 checksums, attests provenance, then publishes a GitHub Release for tag builds
@@ -66,9 +66,9 @@ the SBOM: no credentials, config or state.
 
 | ID | Gate | Pass criterion | Status |
 |---|---|---|---|
-| R0 | Artifact build and verification | Workflow green on `ubuntu-24.04-arm`; checksum and attestation verify; both binaries are AArch64 with no unresolved libraries | **NOT RUN** (artifact NOT BUILT) |
+| R0 | Artifact build and verification | Workflow green on `ubuntu-24.04-arm`; checksum and attestation verify; both binaries are AArch64 with no unresolved libraries | **PASS** (workflow 46076618805; SHA256/ELF checked; attestation job green) |
 | R1 | Install preflight, dry-run and idempotence | `--check` and `--dry-run` change nothing; repeated install keeps one release and one config | **NOT RUN** |
-| R2 | Core local Jellyfin | Library loads, playback starts with audio, remote/keyboard input works, no stale process | **NOT RUN** |
+| R2 | Core local Jellyfin | Library loads, playback starts with audio, remote/keyboard input works, no stale process | **PASS** (operator TV; 0.1.10–0.1.13 playback/audio/controls) |
 | R3 | Pairing and cloud control | Device pairs, TV approval requires local keyboard/CEC, remote pause/seek acknowledged | **NOT RUN** |
 | R4 | YouTube search and playback | Search returns results; local 720p30 under Cage/GLES plays without sustained stutter; 1080p30 is reported unsupported | **NOT RUN** |
 | R5 | Reboot x5 | Five consecutive boots reach the kiosk with exactly one `cage` and one `tv-client`, no duplicate or stale process | **NOT RUN** |
@@ -78,7 +78,7 @@ the SBOM: no credentials, config or state.
 | R9 | Two-hour soak | 2 h of repeated playback has stable RSS/FD counts, no leaked mpv sockets and no orphan children | **NOT RUN** |
 | R10 | Rollback | Rollback selects the previous release atomically, preserves config/state bytes and restarts the kiosk | **NOT RUN** |
 | R11 | Crash backoff and tty2 recovery | Repeated kiosk exits back off to 60 s; tty2 allows local recovery without rebooting | **NOT RUN** |
-| R12 | Control-bar overlay (C017) | Transparent bar above video, smooth 720p30, pointer show/hide and seek, keyboard controls with no double-fire, clean stop | **NOT RUN** |
+| R12 | mpv playback and pause-only OSC | Smooth dmabuf/v4l2m2m playback; bar appears only while paused and hides on resume; keyboard/remote controls remain usable | **PASS** (operator TV; 0.1.12/0.1.13) |
 
 ## R0: artifact build and verification
 
@@ -512,16 +512,16 @@ Status: **NOT RUN**.
   for the process and journal evidence above.
 - Any row that was not executed stays **NOT RUN**. Do not turn an expected
   result into a measured result.
-- The release artifact remains **NOT BUILT** until the workflow has produced it
-  and the checksum/attestation values above are filled from that run.
+- The release artifact is built; checksum/ELF values above come from the
+  0.1.13 workflow and downloaded files.
 
 ## Sign-off
 
 | Gate | Operator | Date | Result (NOT RUN / PASS / FAIL) | Evidence link |
 |---|---|---|---|---|
-| R0 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R0 | operator | 2026-11-27 | PASS | workflow 46076618805 |
 | R1 | `<name>` | `<date>` | NOT RUN | `<link>` |
-| R2 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R2 | operator | 2026-11-27 | PASS | operator TV; 0.1.10–0.1.13 |
 | R3 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R4 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R5 | `<name>` | `<date>` | NOT RUN | `<link>` |
@@ -531,7 +531,7 @@ Status: **NOT RUN**.
 | R9 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R10 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R11 | `<name>` | `<date>` | NOT RUN | `<link>` |
-| R12 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R12 | operator | 2026-11-27 | PASS | operator TV; 0.1.12/0.1.13 |
 
 A row may be marked PASS only with its evidence filled in. The accepted C010
 YouTube gate is 720p30 under Cage/GLES; 1080p30 remains unsupported on the

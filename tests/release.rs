@@ -1014,7 +1014,8 @@ fn release_docs_report_unrun_gates_honestly() {
         "soak",
         "Rollback",
         "NOT RUN",
-        "NOT BUILT",
+        "0.1.13",
+        "46076618805",
         "720p30",
         "1080p",
         "unsupported",
@@ -1032,9 +1033,23 @@ fn release_docs_report_unrun_gates_honestly() {
         release.matches("NOT RUN").count() >= 10,
         "every unexecuted matrix row must be marked NOT RUN"
     );
+    for row in [
+        "| R0 | operator | 2026-11-27 | PASS | workflow 46076618805 |",
+        "| R2 | operator | 2026-11-27 | PASS | operator TV; 0.1.10–0.1.13 |",
+        "| R12 | operator | 2026-11-27 | PASS | operator TV; 0.1.12/0.1.13 |",
+    ] {
+        assert!(
+            release.contains(row),
+            "release docs are missing measured row {row:?}"
+        );
+    }
     assert!(
-        !release.contains("| PASS |"),
-        "release docs must not claim an unrun gate"
+        !release.contains("| R1 | operator | 2026-11-27 | PASS"),
+        "install idempotence is still unrun"
+    );
+    assert!(
+        !release.contains("| R9 | operator | 2026-11-27 | PASS"),
+        "the soak is still unrun"
     );
     assert!(release.contains("/var/lib/tv-client/client.db"));
     assert!(!release.contains("/var/lib/tv-client/state.db"));
