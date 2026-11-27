@@ -1844,7 +1844,7 @@ fn start_playback_thread(
                     session,
                     tv_client::playback::PlaybackConfig::default(),
                 ) {
-                    Ok(controller) => controller,
+                    Ok(controller) => controller.with_storage(storage),
                     Err(error) => {
                         tracing::warn!(%error, "cannot start the playback controller");
                         cancel_handle.cancel();
@@ -1880,6 +1880,7 @@ fn start_playback_thread(
                             }
                             tv_client::playback::PlaybackUpdate::LibraryReady { .. }
                             | tv_client::playback::PlaybackUpdate::LibraryFailed { .. }
+                            | tv_client::playback::PlaybackUpdate::Browse(_)
                             | tv_client::playback::PlaybackUpdate::Message { .. } => {}
                         }
                         ui_updates.apply_playback_update(update);

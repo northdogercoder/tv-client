@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tv_client::config::ClientConfig;
 use tv_client::jellyfin::{
-    CancelToken, ImageRequest, ImageType, ItemQuery, JellyfinClient, JellyfinError, Page,
-    QuickConnectPoll, Timeouts, cancellation,
+    ArtworkClass, BrowseItem, CancelToken, ImageRequest, ImageType, ItemQuery, JellyfinClient,
+    JellyfinError, LibraryEntry, Page, QuickConnectPoll, Timeouts, cancellation,
 };
 use tv_client::storage::{HARD_ARTWORK_CACHE_BYTES, Storage, StorageError};
 
@@ -612,6 +612,301 @@ async fn pagination_sets_start_index_and_limit() {
     ));
     assert_eq!(page.next().start_index(), 150);
     assert_eq!(Page::default().limit(), 50);
+}
+
+#[tokio::test]
+async fn browse_query_is_parent_scoped_fielded_and_bounded() {
+    let server = MockServer::start(|request| match request.path() {
+        "/Users/AuthenticateByName" => auth_response(),
+        "/Users/user-1/Views" => MockResponse::json(
+            200,
+            json!({
+                "Items": [
+                    {"Id": "library-1", "Name": "Movies", "CollectionType": "movies"},
+                    {"Id": "library-2", "Name": "TV Shows", "CollectionType": "tvshows"}
+                ],
+                "TotalRecordCount": 2
+            }),
+        ),
+        "/Users/user-1/Items" => MockResponse::json(
+            200,
+            json!({
+                "Items": [{
+                    "Id": "movie-1",
+                    "Name": "Dune",
+                    "Type": "Movie",
+                    "ProductionYear": 2021,
+                    "RunTimeTicks": 67_200_000_000u64,
+                    "Overview": "A desert epic",
+                    "ImageTags": {"Primary": "primary-tag"},
+                    "UserData": {"Played": false, "PlaybackPositionTicks": 0}
+                }],
+                "TotalRecordCount": 49,
+                "StartIndex": 24
+            }),
+        ),
+        _ => MockResponse::empty(404),
+    });
+    let directory = temp_dir();
+    let mut storage = open_storage(&directory);
+    let (_cancel, cancel) = cancellation();
+    let mut client = make_client(&server.url, &mut storage);
+    login(&mut client, &mut storage, &cancel).await;
+
+    let libraries = client.libraries(&cancel).await.expect("libraries");
+    assert_eq!(libraries.len(), 2);
+    assert_eq!(
+        libraries[0],
+        LibraryEntry {
+            id: "library-1".to_owned(),
+            name: "Movies".to_owned(),
+            collection_type: Some("movies".to_owned()),
+        }
+    );
+
+    let page = client
+        .browse("library-1", 24, &cancel)
+        .await
+        .expect("browse page");
+    assert_eq!(page.total_record_count, 49);
+    let item = BrowseItem::from_base_item(&page.items[0]);
+    assert_eq!(item.id, "movie-1");
+    assert_eq!(item.title, "Dune");
+    assert_eq!(item.item_type.as_deref(), Some("Movie"));
+    assert_eq!(item.primary_tag.as_deref(), Some("primary-tag"));
+    assert_eq!(item.overview.as_deref(), Some("A desert epic"));
+    assert_eq!(item.subtitle, "Movie · 2021 · 1h 52m");
+
+    let requests = server.requests();
+    let query = requests
+        .iter()
+        .find(|request| request.path() == "/Users/user-1/Items")
+        .expect("browse request")
+        .query();
+    assert_eq!(query.get("ParentId").map(String::as_str), Some("library-1"));
+    let decode = |value: &str| {
+        url::form_urlencoded::parse(value.as_bytes())
+            .map(|(key, _)| key.into_owned())
+            .collect::<String>()
+    };
+    assert_eq!(
+        query
+            .get("IncludeItemTypes")
+            .map(|value| decode(value))
+            .as_deref(),
+        Some("Movie,Episode,Video")
+    );
+    assert_eq!(query.get("MediaTypes").map(String::as_str), Some("Video"));
+    assert_eq!(
+        query.get("Fields").map(|value| decode(value)).as_deref(),
+        Some("UserData,ImageTags,Overview")
+    );
+    assert_eq!(query.get("StartIndex").map(String::as_str), Some("24"));
+    assert_eq!(query.get("Limit").map(String::as_str), Some("24"));
+    assert_eq!(query.get("Recursive").map(String::as_str), Some("true"));
+    assert!(
+        requests.iter().all(|request| !request.target.contains("http")),
+        "requests stay on the configured path"
+    );
+}
+
+#[tokio::test]
+async fn missing_artwork_is_a_typed_outcome_not_a_page_failure() {
+    let server = MockServer::start(|request| match request.path() {
+        "/Users/AuthenticateByName" => auth_response(),
+        "/Items/item-1/Images/Primary" => MockResponse::empty(404),
+        _ => MockResponse::empty(404),
+    });
+    let directory = temp_dir();
+    let mut storage = open_storage(&directory);
+    let (_cancel, cancel) = cancellation();
+    let mut client = make_client(&server.url, &mut storage);
+    login(&mut client, &mut storage, &cancel).await;
+
+    let request = ImageRequest::poster("item-1", Some("tag-1")).expect("poster");
+    let error = client
+        .image(&mut storage, &request, &cancel)
+        .await
+        .expect_err("missing artwork");
+    assert!(matches!(error, JellyfinError::ArtworkMissing));
+    assert_eq!(storage.artwork_total_bytes().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn poster_and_preview_do_not_share_a_cache_entry() {
+    let image_requests = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&image_requests);
+    let server = MockServer::start(move |request| match request.path() {
+        "/Users/AuthenticateByName" => auth_response(),
+        "/Items/item-1/Images/Primary" => {
+            counter.fetch_add(1, Ordering::SeqCst);
+            match request.query().get("maxWidth").map(String::as_str) {
+                Some("320") => MockResponse::bytes(200, "image/png", png(320, 480)),
+                Some("1280") => MockResponse::bytes(200, "image/png", png(1280, 720)),
+                _ => MockResponse::empty(400),
+            }
+        }
+        _ => MockResponse::empty(404),
+    });
+    let directory = temp_dir();
+    let mut storage = open_storage(&directory);
+    let (_cancel, cancel) = cancellation();
+    let mut client = make_client(&server.url, &mut storage);
+    login(&mut client, &mut storage, &cancel).await;
+
+    let poster_request = ImageRequest::poster("item-1", Some("tag-1")).expect("poster");
+    assert_eq!(poster_request.class(), ArtworkClass::Poster);
+    assert_eq!(
+        (poster_request.max_width(), poster_request.max_height()),
+        (320, 480)
+    );
+    let poster = client
+        .image(&mut storage, &poster_request, &cancel)
+        .await
+        .expect("poster");
+    let preview_request = ImageRequest::preview("item-1", Some("tag-1")).expect("preview");
+    assert_eq!(preview_request.class(), ArtworkClass::Preview);
+    let preview = client
+        .image(&mut storage, &preview_request, &cancel)
+        .await
+        .expect("preview");
+
+    assert_ne!(
+        poster.path(),
+        preview.path(),
+        "poster and preview must not share a cache entry"
+    );
+    assert_eq!((poster.width(), poster.height()), (320, 480));
+    assert_eq!((preview.width(), preview.height()), (1280, 720));
+    assert_eq!(image_requests.load(Ordering::SeqCst), 2);
+
+    let cached = client
+        .image(&mut storage, &poster_request, &cancel)
+        .await
+        .expect("cached poster");
+    assert_eq!(cached.path(), poster.path());
+    assert_eq!(image_requests.load(Ordering::SeqCst), 2, "cache hit");
+
+    let images: Vec<_> = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path() == "/Items/item-1/Images/Primary")
+        .collect();
+    assert_eq!(images.len(), 2);
+    for request in &images {
+        let query = request.query();
+        assert_eq!(query.get("tag").map(String::as_str), Some("tag-1"));
+        assert_eq!(query.get("format").map(String::as_str), Some("jpg"));
+    }
+    assert_eq!(
+        images[0].query().get("maxWidth").map(String::as_str),
+        Some("320")
+    );
+    assert_eq!(
+        images[1].query().get("maxWidth").map(String::as_str),
+        Some("1280")
+    );
+}
+
+#[tokio::test]
+async fn per_class_artwork_caps_reject_oversized_payloads() {
+    let server = MockServer::start(|request| match request.path() {
+        "/Users/AuthenticateByName" => auth_response(),
+        "/Items/wide/Images/Primary" => MockResponse::bytes(200, "image/png", png(321, 480)),
+        "/Items/tall/Images/Primary" => MockResponse::bytes(200, "image/png", png(1280, 721)),
+        "/Items/big/Images/Primary" => MockResponse::bytes(
+            200,
+            "image/png",
+            vec![0_u8; 2 * 1024 * 1024 + 1],
+        ),
+        _ => MockResponse::empty(404),
+    });
+    let directory = temp_dir();
+    let mut storage = open_storage(&directory);
+    let (_cancel, cancel) = cancellation();
+    let mut client = make_client(&server.url, &mut storage);
+    login(&mut client, &mut storage, &cancel).await;
+
+    let wide = ImageRequest::poster("wide", Some("tag")).expect("poster");
+    assert!(matches!(
+        client.image(&mut storage, &wide, &cancel).await,
+        Err(JellyfinError::ImageTooLarge {
+            width: 321,
+            height: 480
+        })
+    ));
+    let tall = ImageRequest::preview("tall", Some("tag")).expect("preview");
+    assert!(matches!(
+        client.image(&mut storage, &tall, &cancel).await,
+        Err(JellyfinError::ImageTooLarge {
+            width: 1280,
+            height: 721
+        })
+    ));
+    let big = ImageRequest::poster("big", Some("tag")).expect("poster");
+    assert!(matches!(
+        client.image(&mut storage, &big, &cancel).await,
+        Err(JellyfinError::ArtworkTooLarge)
+    ));
+    assert_eq!(storage.artwork_total_bytes().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn artwork_uses_the_configured_base_path_and_format() {
+    let server = MockServer::start(|request| match request.path() {
+        "/jellyfin/Users/AuthenticateByName" => auth_response(),
+        "/jellyfin/Items/item-1/Images/Primary" => {
+            MockResponse::bytes(200, "image/png", png(320, 480))
+        }
+        _ => MockResponse::empty(404),
+    });
+    let directory = temp_dir();
+    let mut storage = open_storage(&directory);
+    let (_cancel, cancel) = cancellation();
+    let url = format!("{}/jellyfin", server.url);
+    let mut client = make_client(&url, &mut storage);
+    login(&mut client, &mut storage, &cancel).await;
+
+    let request = ImageRequest::poster("item-1", Some("tag-1")).expect("poster");
+    let artwork = client
+        .image(&mut storage, &request, &cancel)
+        .await
+        .expect("artwork");
+    assert_eq!((artwork.width(), artwork.height()), (320, 480));
+
+    let image = server
+        .requests()
+        .into_iter()
+        .find(|request| request.path() == "/jellyfin/Items/item-1/Images/Primary")
+        .expect("base-path image request");
+    assert!(!image.target.contains("http"), "{}", image.target);
+    let query = image.query();
+    assert_eq!(query.get("maxWidth").map(String::as_str), Some("320"));
+    assert_eq!(query.get("maxHeight").map(String::as_str), Some("480"));
+    assert_eq!(query.get("format").map(String::as_str), Some("jpg"));
+}
+
+#[test]
+fn browse_models_never_expose_urls_paths_or_tokens() {
+    let base: tv_client::jellyfin::BaseItem = serde_json::from_value(json!({
+        "Id": "item-1",
+        "Name": "Dune",
+        "Type": "Movie",
+        "ProductionYear": 2021,
+        "Overview": "A desert epic",
+        "ImageTags": {"Primary": "primary-tag"},
+        "Path": "/srv/media/secret/dune.mkv",
+        "MediaSources": [{"TranscodingUrl": "http://secret.invalid/stream?Token=leak"}]
+    }))
+    .expect("base item");
+    let browse = BrowseItem::from_base_item(&base);
+    let library = LibraryEntry::from_base_item(&base);
+    let debug = format!("{browse:?} {library:?}");
+    assert!(!debug.contains("http"));
+    assert!(!debug.contains("/srv/media"));
+    assert!(!debug.contains("Token"));
+    assert!(!debug.contains("secret"));
+    assert_eq!(browse.primary_tag.as_deref(), Some("primary-tag"));
 }
 
 #[tokio::test]

@@ -18,13 +18,13 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tv_client::config::ClientConfig;
 use tv_client::jellyfin::{
-    CancelHandle, CancelToken, ItemQuery, JellyfinClient, JellyfinError, Page, PlayMethod,
-    PlaybackInfoOptions, PlaybackInfoResponse, SelectionError, SelectionOptions, StreamUrl,
-    TICKS_PER_MILLISECOND, cancellation, select_media_source,
+    ArtworkClass, CancelHandle, CancelToken, ItemQuery, JellyfinClient, JellyfinError, Page,
+    PlayMethod, PlaybackInfoOptions, PlaybackInfoResponse, SelectionError, SelectionOptions,
+    StreamUrl, TICKS_PER_MILLISECOND, cancellation, select_media_source,
 };
 use tv_client::model::Source;
 use tv_client::playback::{
-    LibraryFilter, MAX_PROGRESS_AGE, PlayRequest, PlaybackCommand, PlaybackConfig,
+    BrowseUpdate, LibraryFilter, MAX_PROGRESS_AGE, PlayRequest, PlaybackCommand, PlaybackConfig,
     PlaybackController, PlaybackUpdate, ProgressEntry, ProgressJournal, RESUME_MIN_TICKS,
     millis_from_ticks, ticks_from_millis,
 };
@@ -94,6 +94,14 @@ impl MockResponse {
             status,
             headers: Vec::new(),
             body: Vec::new(),
+        }
+    }
+
+    fn bytes(status: u16, content_type: &str, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            headers: vec![("Content-Type".to_owned(), content_type.to_owned())],
+            body,
         }
     }
 }
@@ -253,10 +261,20 @@ fn temp_dir() -> TempDir {
 
 fn auth_body() -> Value {
     json!({
-        "User": { "Id": "user-1", "Name": "tester" },
+        "User": {"Id": "user-1", "Name": "tester"},
         "AccessToken": ACCESS_TOKEN,
         "ServerId": "server-1"
     })
+}
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.extend_from_slice(&13_u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 2, 0, 0, 0]);
+    bytes
 }
 
 fn direct_item(user_data: bool) -> Value {
@@ -443,7 +461,8 @@ where
     let fake = FakeFactory::new(duration_ms);
     let session = PlayerSession::start(fake.clone(), SupervisorConfig::default(), 8, 64)
         .expect("player session");
-    let controller = PlaybackController::new(client, session, config).expect("controller");
+    let controller =
+        PlaybackController::new(client, session, config).expect("controller").with_storage(storage);
     Fixture {
         _directory: directory,
         server,
@@ -1721,6 +1740,310 @@ async fn library_command_reports_items_and_persistent_errors() {
         )
         .await;
     assert_eq!(fixture.fake.spawns.load(Ordering::SeqCst), 0);
+    fixture.cancel_handle.cancel();
+}
+
+// ---------------------------------------------------------------------------
+// Browse and artwork commands.
+// ---------------------------------------------------------------------------
+
+fn browse_updates(updates: &[PlaybackUpdate]) -> Vec<&BrowseUpdate> {
+    updates
+        .iter()
+        .filter_map(|update| match update {
+            PlaybackUpdate::Browse(browse) => Some(browse),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn browse_commands_query_the_parent_and_report_pagination() {
+    let handler = |request: &MockRequest| match request.path() {
+        "/Users/AuthenticateByName" => MockResponse::json(200, auth_body()),
+        "/Users/user-1/Views" => MockResponse::json(
+            200,
+            json!({
+                "Items": [
+                    {"Id": "library-1", "Name": "Movies", "CollectionType": "movies"},
+                    {"Id": "library-2", "Name": "Shows", "CollectionType": "tvshows"}
+                ],
+                "TotalRecordCount": 2
+            }),
+        ),
+        "/Users/user-1/Items" => {
+            let query = request.query();
+            let start = query
+                .get("StartIndex")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0);
+            let items = if start >= 48 {
+                json!([{"Id": "movie-3", "Name": "Third", "Type": "Movie"}])
+            } else {
+                json!([
+                    {
+                        "Id": "movie-1",
+                        "Name": "Dune",
+                        "Type": "Movie",
+                        "ProductionYear": 2021,
+                        "Overview": "A desert epic",
+                        "ImageTags": {"Primary": "primary-tag"}
+                    },
+                    {"Id": "movie-2", "Name": "Arrival", "Type": "Movie"}
+                ])
+            };
+            MockResponse::json(
+                200,
+                json!({"Items": items, "TotalRecordCount": 49, "StartIndex": start}),
+            )
+        }
+        _ => MockResponse::empty(404),
+    };
+    let mut fixture = fixture(handler, PlaybackConfig::default(), 60_000).await;
+
+    let libraries = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadJellyfinLibraries,
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    let browse = browse_updates(&libraries);
+    let BrowseUpdate::LibrariesReady { libraries } = browse[0] else {
+        panic!("libraries ready: {browse:?}");
+    };
+    assert_eq!(libraries.len(), 2);
+    assert_eq!(libraries[0].id, "library-1");
+    assert_eq!(libraries[0].name, "Movies");
+    assert_eq!(libraries[0].collection_type.as_deref(), Some("movies"));
+
+    let page = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadJellyfinItems {
+                library_id: "library-1".to_owned(),
+                start_index: 24,
+            },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    let browse = browse_updates(&page);
+    let BrowseUpdate::ItemsReady {
+        library_id,
+        items,
+        total,
+        next_start,
+    } = browse[0]
+    else {
+        panic!("items ready: {browse:?}");
+    };
+    assert_eq!(library_id, "library-1");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].title, "Dune");
+    assert_eq!(items[0].primary_tag.as_deref(), Some("primary-tag"));
+    assert_eq!(items[0].subtitle, "Movie · 2021");
+    assert_eq!(*total, 49);
+    assert_eq!(*next_start, Some(26), "24 + 2 items remain below 49");
+
+    let last = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadJellyfinItems {
+                library_id: "library-1".to_owned(),
+                start_index: 48,
+            },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    let browse = browse_updates(&last);
+    let BrowseUpdate::ItemsReady {
+        next_start, total, ..
+    } = browse[0]
+    else {
+        panic!("items ready: {browse:?}");
+    };
+    assert_eq!(*next_start, None);
+    assert_eq!(*total, 49);
+
+    let requests = fixture.server.requests();
+    let items_request = requests
+        .iter()
+        .find(|request| request.path() == "/Users/user-1/Items")
+        .expect("items request");
+    let query = items_request.query();
+    assert_eq!(query.get("ParentId").map(String::as_str), Some("library-1"));
+    let decode = |value: &str| {
+        url::form_urlencoded::parse(value.as_bytes())
+            .map(|(key, _)| key.into_owned())
+            .collect::<String>()
+    };
+    assert_eq!(
+        query
+            .get("IncludeItemTypes")
+            .map(|value| decode(value))
+            .as_deref(),
+        Some("Movie,Episode,Video")
+    );
+    assert_eq!(query.get("MediaTypes").map(String::as_str), Some("Video"));
+    assert_eq!(
+        query.get("Fields").map(|value| decode(value)).as_deref(),
+        Some("UserData,ImageTags,Overview")
+    );
+    assert_eq!(query.get("StartIndex").map(String::as_str), Some("24"));
+    assert_eq!(query.get("Limit").map(String::as_str), Some("24"));
+    fixture.cancel_handle.cancel();
+}
+
+#[tokio::test]
+async fn browse_401_maps_to_a_session_expired_update() {
+    let handler = |request: &MockRequest| match request.path() {
+        "/Users/AuthenticateByName" => MockResponse::json(200, auth_body()),
+        "/Users/user-1/Views" | "/Users/user-1/Items" => MockResponse::empty(401),
+        _ => MockResponse::empty(404),
+    };
+    let mut fixture = fixture(handler, PlaybackConfig::default(), 60_000).await;
+
+    let libraries = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadJellyfinLibraries,
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert!(matches!(
+        browse_updates(&libraries)[0],
+        BrowseUpdate::SessionExpired
+    ));
+
+    let items = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadJellyfinItems {
+                library_id: "library-1".to_owned(),
+                start_index: 0,
+            },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert!(matches!(
+        browse_updates(&items)[0],
+        BrowseUpdate::SessionExpired
+    ));
+    fixture.cancel_handle.cancel();
+}
+
+#[tokio::test]
+async fn artwork_command_caches_metadata_and_reports_missing_images() {
+    let image_requests = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&image_requests);
+    let handler = move |request: &MockRequest| {
+        let path = request.path();
+        if path == "/Users/AuthenticateByName" {
+            MockResponse::json(200, auth_body())
+        } else if path.ends_with("/Images/Primary") {
+            counter.fetch_add(1, Ordering::SeqCst);
+            if path == "/Items/item-1/Images/Primary" {
+                MockResponse::bytes(200, "image/png", png(320, 480))
+            } else {
+                MockResponse::empty(404)
+            }
+        } else {
+            MockResponse::empty(404)
+        }
+    };
+    let mut fixture = fixture(handler, PlaybackConfig::default(), 60_000).await;
+
+    let ready = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadArtwork {
+                item_id: "item-1".to_owned(),
+                tag: Some("tag-1".to_owned()),
+                class: ArtworkClass::Poster,
+            },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    let BrowseUpdate::ArtworkReady {
+        item_id,
+        class,
+        artwork,
+    } = browse_updates(&ready)[0]
+    else {
+        panic!("artwork ready: {ready:?}");
+    };
+    assert_eq!(item_id, "item-1");
+    assert_eq!(*class, ArtworkClass::Poster);
+    assert_eq!((artwork.width(), artwork.height()), (320, 480));
+    assert!(artwork.path().is_file());
+    assert_eq!(image_requests.load(Ordering::SeqCst), 1);
+
+    let cached = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadArtwork {
+                item_id: "item-1".to_owned(),
+                tag: Some("tag-1".to_owned()),
+                class: ArtworkClass::Poster,
+            },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert!(matches!(
+        browse_updates(&cached)[0],
+        BrowseUpdate::ArtworkReady { .. }
+    ));
+    assert_eq!(
+        image_requests.load(Ordering::SeqCst),
+        1,
+        "second request is a cache hit"
+    );
+
+    let missing_tag = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadArtwork {
+                item_id: "item-1".to_owned(),
+                tag: None,
+                class: ArtworkClass::Preview,
+            },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert!(matches!(
+        browse_updates(&missing_tag)[0],
+        BrowseUpdate::ArtworkMissing {
+            class: ArtworkClass::Preview,
+            ..
+        }
+    ));
+    assert_eq!(image_requests.load(Ordering::SeqCst), 1, "no tag, no request");
+
+    let missing_image = fixture
+        .controller
+        .handle_command(
+            PlaybackCommand::LoadArtwork {
+                item_id: "other-item".to_owned(),
+                tag: Some("tag-2".to_owned()),
+                class: ArtworkClass::Poster,
+            },
+            Instant::now(),
+            &fixture.cancel,
+        )
+        .await;
+    assert!(matches!(
+        browse_updates(&missing_image)[0],
+        BrowseUpdate::ArtworkMissing { .. }
+    ));
+    assert_eq!(image_requests.load(Ordering::SeqCst), 2);
     fixture.cancel_handle.cancel();
 }
 
