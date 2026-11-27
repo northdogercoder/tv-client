@@ -166,7 +166,7 @@ fn release_artifact_name_and_feature_policy_are_fixed() {
     let workflow = read(WORKFLOW);
     for needle in [
         "runs-on: ubuntu-24.04-arm",
-        "cargo build --release --locked --features native-ui,gstreamer-player,player-overlay",
+        "cargo build --release --locked --features native-ui,gstreamer-player",
         "scripts/package-release.sh",
         "SBOM.cdx.json",
         "NOTICES",
@@ -198,7 +198,7 @@ fn release_artifact_name_and_feature_policy_are_fixed() {
         "SHA256SUMS",
         "gzip -n",
         "CycloneDX",
-        "--features native-ui,gstreamer-player,player-overlay",
+        "--features native-ui,gstreamer-player",
     ] {
         assert!(
             package.contains(needle),
@@ -1156,6 +1156,7 @@ fn native_player_hardware_path_is_configured_and_documented_as_unrun() {
     for needle in [
         "TV_AUDIO_SINK=alsa",
         "TV_AUDIO_DEVICE=hw:0,0",
+        "TV_PLAYER_BACKEND=mpv",
         "TV_PLAYER_OVERLAY=off",
     ] {
         assert!(

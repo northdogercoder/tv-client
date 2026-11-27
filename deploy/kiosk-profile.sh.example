@@ -19,7 +19,9 @@ if [ "$(tty)" = /dev/tty1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
   # An unset value keeps `autoaudiosink` for generic desktop use.
   export TV_AUDIO_SINK=alsa
   export TV_AUDIO_DEVICE=hw:0,0
-  # The software textoverlay makes Pi 3B video choppy; keep the OSD opt-in.
+  # mpv owns video and its native OSC control bar in one surface; this avoids
+  # Cage's non-transparent fullscreen overlay and the choppy textoverlay path.
+  export TV_PLAYER_BACKEND=mpv
   export TV_PLAYER_OVERLAY=off
 
   # Login PAM must supply XDG_RUNTIME_DIR and an active seat. Do not guess a

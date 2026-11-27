@@ -64,6 +64,7 @@ const MAX_EVENTS_PER_DEVICE: usize = 16;
 const OVERLAY_ENV: &str = "TV_PLAYER_OVERLAY";
 /// Set to `off`/`0` to disable the transparent control-bar window without a
 /// rebuild. The `player-overlay` feature is the real switch.
+#[cfg(feature = "player-overlay")]
 const OVERLAY_WINDOW_ENV: &str = "TV_PLAYER_OVERLAY_WINDOW";
 const OVERLAY_PROBE_TIMEOUT_SECONDS: u32 = 2;
 /// Delay between the first `ready` and mapping the overlay, so waylandsink has
@@ -281,6 +282,9 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<(), &'static str> {
+    if std::env::var("TV_PLAYER_BACKEND").as_deref() == Ok("mpv") {
+        return tv_client::player::mpv_child::run();
+    }
     gst::init().map_err(|_| "gstreamer initialization failed")?;
 
     let (inbound_tx, inbound_rx) = std_mpsc::channel::<Inbound>();

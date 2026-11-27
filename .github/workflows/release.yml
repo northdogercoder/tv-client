@@ -52,7 +52,7 @@ jobs:
             pkg-config
 
       - name: Build release binaries
-        run: cargo build --release --locked --features native-ui,gstreamer-player,player-overlay
+        run: cargo build --release --locked --features native-ui,gstreamer-player
 
       - name: Verify AArch64 ELF and shared libraries
         run: |

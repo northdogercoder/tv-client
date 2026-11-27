@@ -280,12 +280,14 @@ inserts a `videoconvert` copy per frame and made 0.1.2 video a slideshow on the
 Pi 3B; 0.1.3 defaults to the plain `waylandsink` path and keeps keyboard
 controls. The control bar does not use `textoverlay`.
 
-## R12: control-bar overlay on Cage (C017, next-release candidate)
+## R12: mpv OSC control bar on Cage (0.1.5 runtime)
 
-Build with `native-ui,gstreamer-player,player-overlay` and install the release.
-The overlay is a second, fully transparent top-level window created by
-`tv-native-player` after waylandsink reports `ready`; Cage stacks the last
-mapped window on top and gives it keyboard/pointer input.
+The kiosk profile sets `TV_PLAYER_BACKEND=mpv`; the release no longer builds
+`player-overlay`. mpv owns video and its native OSC in one surface, avoiding
+the transparent Slint overlay that produced artifacts on 0.1.4. URL/header
+values travel only over private IPC. **No Pi test has been run for this
+runtime yet.** The old experimental overlay remains a `player-overlay` feature
+only, not a release feature.
 
 - **NOT RUN** — the bar is transparent (video visible through it) and sits
   above the video; it appears only after playback is ready.

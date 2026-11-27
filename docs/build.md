@@ -66,10 +66,10 @@ and state machine compile, lint and pass their tests on the CI host.
   `src/ui.rs` view model and `tests/ui_navigation.rs` are always compiled and
   contain no Slint types.
 - `player-overlay` implies `gstreamer-player`, enables `slint` and compiles
-  `ui/player_overlay.slint` into `tv-native-player`. The child then maps a
-  transparent control-bar window above waylandsink; it never adds a video
-  filter. Without this feature the child keeps the evdev-only controls and
-  does not link Slint. The release/kiosk build enables it.
+  `ui/player_overlay.slint` into `tv-native-player`. The transparent-window
+  path is experimental and failed Cage compositing (video artifacts); the
+  release does **not** enable it. The kiosk instead sets
+  `TV_PLAYER_BACKEND=mpv`, which uses mpv's native OSC in one video surface.
 - The supervisor, protocol and `ProgramChildFactory` are always compiled and
   backend neutral, so a future libmpv/yt-dlp child can be added without
   touching the gated GStreamer code.
@@ -88,10 +88,10 @@ tests without GStreamer or Slint. Build the native player explicitly:
 cargo build --release --features gstreamer-player
 ```
 
-Build the kiosk binaries with the transparent control bar:
+Build the kiosk binaries (mpv OSC is selected at runtime by the profile):
 
 ```sh
-cargo build --release --locked --features native-ui,gstreamer-player,player-overlay
+cargo build --release --locked --features native-ui,gstreamer-player
 ```
 
 Build the Slint launcher explicitly:
@@ -225,6 +225,7 @@ sets the defaults:
 |---|---|---|
 | `TV_AUDIO_SINK` | `alsa` | Prefer `alsasink`; unset keeps `autoaudiosink` for desktop use. |
 | `TV_AUDIO_DEVICE` | `hw:0,0` | ALSA device of `card 0: vc4hdmi`; the child also tries the ALSA `default` device, `autoaudiosink`, and finally a silent `fakesink`. |
+| `TV_PLAYER_BACKEND` | `mpv` | Selects the mpv OSC-backed video surface; unset uses the GStreamer child. |
 | `TV_PLAYER_OVERLAY` | unset (off) | `on`/`1` enables the optional `textoverlay` hint; the default avoids its per-frame `videoconvert` cost on the Pi. |
 
 The overlay needs the Pango-backed `textoverlay` from
@@ -349,7 +350,7 @@ The build installs the pinned Rust 1.100.0 toolchain from
 `jq`, then builds exactly:
 
 ```sh
-cargo build --release --locked --features native-ui,gstreamer-player,player-overlay
+cargo build --release --locked --features native-ui,gstreamer-player
 ```
 
 No cross-compilation from x86_64 is supported. The release artifact must be
@@ -379,7 +380,7 @@ two binaries at its root plus `NOTICES` and `SBOM.cdx.json`.
 `SHA256SUMS` is written next to it, and `NOTICES`/`SBOM.cdx.json` are also
 copied to `dist/` for direct inspection. `SBOM.cdx.json` is CycloneDX 1.5
 generated from
-`cargo metadata --locked --format-version 1 --features native-ui,gstreamer-player,player-overlay`;
+`cargo metadata --locked --format-version 1 --features native-ui,gstreamer-player`;
 `NOTICES` lists every crate with its declared license and the project's
 GPL-3.0-only notice. The release job also verifies that the tar root contains
 exactly those four entries and that `sha256sum -c SHA256SUMS` passes for the
@@ -392,7 +393,7 @@ action, not part of `scripts/check.sh`):
 sudo apt-get install --yes --no-install-recommends \
   libfontconfig1-dev libxkbcommon-dev pkg-config \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev jq
-cargo build --release --locked --features native-ui,gstreamer-player,player-overlay
+cargo build --release --locked --features native-ui,gstreamer-player
 scripts/package-release.sh --version "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
 ```
 
