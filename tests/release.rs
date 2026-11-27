@@ -124,7 +124,7 @@ fn deploy_example_parses_with_youtube_playback_contract() {
         assert!(has_active_key(&raw, key), "example is missing key {key}");
     }
 
-    assert_eq!(config.ui_safe_area_percent, 3);
+    assert_eq!(config.ui_safe_area_percent, 0);
     assert!(
         raw.contains("https://ovh-anders.minotaur-gacrux.ts.net"),
         "the example must use the staging control-server origin"

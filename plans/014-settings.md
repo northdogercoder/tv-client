@@ -36,7 +36,7 @@ The installed 0.1.0 kiosk has a read-only Settings screen. `/etc/tv-client/clien
 ## Steps
 
 ### Step 1: Writable config and precedence
-Add `ui_safe_area_percent` (0..=10, default 3) and a state config at `<state-dir>/client.toml`. Precedence: explicit `--config`, else state config if present, else `/etc/tv-client/client.toml`, else defaults. Validate before write; write atomically 0600 with fsync+rename in the 0700 state dir; never log values. The installer seeds the state config from the root example only when absent, owned tvkiosk 0600; the kiosk profile passes the state config. Preserve the root config as operator fallback.
+Add `ui_safe_area_percent` (0..=10, default 0; opt-in overscan inset) and a state config at `<state-dir>/client.toml`. Precedence: explicit `--config`, else state config if present, else `/etc/tv-client/client.toml`, else defaults. Validate before write; write atomically 0600 with fsync+rename in the 0700 state dir; never log values. The installer seeds the state config from the root example only when absent, owned tvkiosk 0600; the kiosk profile passes the state config. Preserve the root config as operator fallback.
 
 **Verify:** `cargo test --locked --no-default-features --test settings` → exit 0.
 

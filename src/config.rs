@@ -47,8 +47,12 @@ pub const DEFAULT_YOUTUBE_TIMEOUT_SECS: u64 = 60;
 pub const MIN_UI_SAFE_AREA_PERCENT: u8 = 0;
 /// Highest accepted UI safe-area inset, as a percentage of the short edge.
 pub const MAX_UI_SAFE_AREA_PERCENT: u8 = 10;
-/// Default UI safe-area inset for the 1080p kiosk panel.
-pub const DEFAULT_UI_SAFE_AREA_PERCENT: u8 = 3;
+/// Default UI safe-area inset.
+///
+/// Disabled by default: most panels do not crop the launcher, and a nonzero
+/// inset makes the content box smaller. Enable it only when the panel itself
+/// hides edge content.
+pub const DEFAULT_UI_SAFE_AREA_PERCENT: u8 = 0;
 
 /// File name of the writable configuration inside the state directory.
 pub const STATE_CONFIG_FILE: &str = "client.toml";

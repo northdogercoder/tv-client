@@ -32,7 +32,7 @@ use crate::ui::Key;
 /// Number of editable settings rows.
 pub const SETTINGS_ROW_COUNT: usize = 14;
 /// Rows before this index are rendered in the left column.
-pub const SETTINGS_COLUMN_BREAK: usize = 8;
+pub const SETTINGS_COLUMN_BREAK: usize = 7;
 /// Longest accepted text-field buffer, in characters.
 pub const MAX_SETTINGS_FIELD_CHARS: usize = 2048;
 const MAX_NUMERIC_FIELD_CHARS: usize = 12;
@@ -187,6 +187,8 @@ pub enum SettingsEvent {
     Editing,
     /// A value changed locally.
     Edited,
+    /// The text caret moved without changing the value.
+    CaretMoved,
     /// The operator asked for a cloud pairing code.
     StartPairing,
     /// Start the Jellyfin Quick Connect flow.
@@ -403,6 +405,8 @@ pub struct SettingsForm {
     focus: usize,
     editing: Option<usize>,
     edit_buffer: String,
+    /// Caret position as a char index into `edit_buffer`.
+    caret: usize,
     message: String,
     error: Option<String>,
     dirty: bool,
@@ -433,6 +437,7 @@ impl SettingsForm {
             focus: 0,
             editing: None,
             edit_buffer: String::new(),
+            caret: 0,
             message: String::new(),
             error: None,
             dirty: false,
@@ -470,6 +475,66 @@ impl SettingsForm {
     #[must_use]
     pub fn edit_value(&self) -> &str {
         &self.edit_buffer
+    }
+
+    /// Row that owns the edit buffer, if any.
+    #[must_use]
+    pub const fn editing_index(&self) -> Option<usize> {
+        self.editing
+    }
+
+    /// Caret position as a char index into [`Self::edit_value`].
+    #[must_use]
+    pub const fn caret(&self) -> usize {
+        self.caret
+    }
+
+    /// Edit buffer with a `|` marker at the caret, for the declarative field.
+    ///
+    /// The marker is display-only; the stored buffer never contains it. A
+    /// value longer than the field is elided by the UI, so the caret marker is
+    /// only guaranteed visible while the tail fits the field.
+    #[must_use]
+    pub fn edit_display(&self) -> String {
+        if self.editing.is_none() {
+            return String::new();
+        }
+        let mut display = String::with_capacity(self.edit_buffer.len() + 1);
+        let split = char_to_byte(&self.edit_buffer, self.caret);
+        display.push_str(&self.edit_buffer[..split]);
+        display.push('|');
+        display.push_str(&self.edit_buffer[split..]);
+        display
+    }
+
+    /// Place the caret at the nearest character while editing.
+    ///
+    /// `fraction` is the horizontal click position inside the field, from
+    /// `0.0` (left edge) to `1.0` (right edge). This is the pointer equivalent
+    /// of Left/Right: Slint does not expose glyph metrics to the app, so the
+    /// click is mapped to the nearest character boundary instead of an exact
+    /// text offset.
+    pub fn place_caret_fraction(&mut self, fraction: f32) {
+        if self.editing.is_none() {
+            return;
+        }
+        let length = self.edit_buffer.chars().count();
+        let fraction = f64::from(fraction.clamp(0.0, 1.0));
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let caret = (fraction * length as f64).round() as usize;
+        self.caret = caret.min(length);
+    }
+
+    /// Move the caret to the end of the edit buffer.
+    ///
+    /// Returns `false` when no row is being edited, so a native End key can be
+    /// ignored outside editing without changing screen focus.
+    pub fn caret_to_end(&mut self) -> bool {
+        if self.editing.is_none() {
+            return false;
+        }
+        self.caret = self.edit_buffer.chars().count();
+        true
     }
 
     /// Short status message for the settings screen.
@@ -705,6 +770,7 @@ impl SettingsForm {
             | SettingRow::SafeArea => {
                 self.editing = Some(self.focus);
                 self.edit_buffer = self.row_value(self.focused_row());
+                self.caret = self.edit_buffer.chars().count();
                 self.error = None;
                 self.message = "Enter to apply, Esc to cancel".to_owned();
                 SettingsEvent::Editing
@@ -764,23 +830,53 @@ impl SettingsForm {
             Key::Escape => {
                 self.editing = None;
                 self.edit_buffer.clear();
+                self.caret = 0;
                 self.error = None;
                 self.message = "Edit cancelled".to_owned();
                 SettingsEvent::Navigated
             }
             Key::Enter => self.commit_edit(row),
             Key::Backspace => {
-                self.edit_buffer.pop();
+                self.backspace_at_caret();
                 SettingsEvent::Edited
             }
             Key::Char(character) => {
                 if !character.is_control() && self.accept_character(row, character) {
-                    self.edit_buffer.push(character);
+                    self.insert_at_caret(character);
                 }
                 SettingsEvent::Edited
             }
-            Key::Up | Key::Down | Key::Left | Key::Right | Key::Home => SettingsEvent::Ignored,
+            Key::Left => {
+                self.caret = self.caret.saturating_sub(1);
+                SettingsEvent::CaretMoved
+            }
+            Key::Right => {
+                let end = self.edit_buffer.chars().count();
+                self.caret = (self.caret + 1).min(end);
+                SettingsEvent::CaretMoved
+            }
+            Key::Home => {
+                self.caret = 0;
+                SettingsEvent::CaretMoved
+            }
+            Key::Up | Key::Down => SettingsEvent::Ignored,
         }
+    }
+
+    fn insert_at_caret(&mut self, character: char) {
+        let at = char_to_byte(&self.edit_buffer, self.caret);
+        self.edit_buffer.insert(at, character);
+        self.caret += 1;
+    }
+
+    fn backspace_at_caret(&mut self) {
+        if self.caret == 0 {
+            return;
+        }
+        let start = char_to_byte(&self.edit_buffer, self.caret - 1);
+        let end = char_to_byte(&self.edit_buffer, self.caret);
+        self.edit_buffer.replace_range(start..end, "");
+        self.caret -= 1;
     }
 
     fn accept_character(&self, row: SettingRow, character: char) -> bool {
@@ -850,10 +946,19 @@ impl SettingsForm {
         }
         self.editing = None;
         self.edit_buffer.clear();
+        self.caret = 0;
         self.dirty = true;
         self.set_message(format!("Edited {}", row.label()));
         SettingsEvent::Edited
     }
+}
+
+/// Byte offset of a char index, clamped to the string end.
+fn char_to_byte(value: &str, character_index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(character_index)
+        .map_or(value.len(), |(offset, _)| offset)
 }
 
 fn validate_optional_url(value: &str, local_http: bool) -> Result<(), ConfigError> {

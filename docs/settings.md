@@ -37,17 +37,36 @@ owner and no on-screen keyboard.
 | Up / Down | Move within the current column |
 | Left / Right | Move between columns; never change a value |
 | Enter | Start editing a text row, toggle a switch, cycle a choice, or run the action |
-| Character / Backspace | Edit the focused text row |
+| Character / Backspace | Edit the focused text row at the caret |
+| Left / Right while editing | Move the caret one character, without leaving the row |
+| Home while editing | Move the caret to the start of the value |
+| End while editing | Move the caret to the end of the value |
 | Enter while editing | Apply the edited value |
 | Esc while editing | Cancel the edit and restore the previous value |
 | Esc | Cancel an active Quick Connect poll, otherwise return home |
 
-Toggles and choices change only with Enter; the arrow keys always move focus.
+The Settings footer repeats the editing keys: arrows move, Enter edits or
+activates, Home/End move the caret while editing, and Esc cancels or goes
+back.
 
-Text rows render through a read-only `TextInput`; toggles render as disabled
-`CheckBox` controls. The row `TouchArea` covers the whole row and activates the
-focused row, so a pointer cannot take keyboard focus away from the app-level
-scope.
+Toggles and choices change only with Enter or a pointer click on the row; the
+arrow keys always move focus when no field is being edited.
+
+Text rows render in a clipped, full-width value box with an amber border and a
+`|` caret marker while editing. The marker is display-only; the stored value
+never contains it. Long values are elided at the end of the box.
+
+Pointer behaviour is explicit and local-only:
+
+- clicking any part of a row focuses it and activates it;
+- clicking a text value box focuses the row, starts editing when needed, and
+  places the caret at the nearest character to the click (Slint exposes no
+  glyph metrics, so this is an approximation rather than an exact text
+  offset);
+- clicking a different row while editing commits the current value first; an
+  invalid value keeps its field open instead of silently discarding the edit;
+- toggles are a large custom pill and the whole row is the hit target, so no
+  small stock `CheckBox` can steal focus from the app-level keyboard scope.
 
 ## Rows
 
@@ -60,11 +79,14 @@ scope.
   still requires the kill switch and an executable file.
 - `Playback timeout (s)`: whole seconds, `10..=300`.
 - `Hardware decode`: `auto-safe`, `v4l2m2m` or `none`.
-- `UI safe area (%)`: whole percent, `0..=10`, default 3. The value is applied
-  as padding around the whole launcher in `ui/app.slint` so the bottom status
-  strip stays inside the panel's visible area. The running value comes from
-  the effective configuration at startup, so a change is applied after
-  Restart.
+- `UI safe area (%)`: whole percent, `0..=10`, default `0` (disabled). A
+  nonzero value removes that percentage of the short edge from every side of
+  the launcher frame, so the header, screen host and footer stay aligned. The
+  screen host takes the space between the fixed header and footer; each
+  screen scales its own base to that host height, so rows compact rather than
+  push the footer off-screen. Enable it only if the panel crops its edges.
+  The running value comes from the effective configuration at startup, so a
+  change is applied after Restart.
 - `Pair a remote`: starts the existing local-only cloud pairing code.
 - `Jellyfin sign-in` / `Jellyfin sign out`: see below.
 - `Save settings`: validates and writes the state copy, then shows
@@ -143,7 +165,9 @@ bodies, and the worker never logs a code, secret or token.
 
 - configuration precedence and explicit-path handling;
 - 0600/0700 persistence, atomic replacement and invalid-config refusal;
-- safe-area parsing and clamping;
+- safe-area default (`0`) and clamping to `0..=10`;
+- caret movement, pointer caret placement and display-only caret marker;
+- whole-row pointer activation of settings rows and local toggles;
 - settings edit, save and restart through the UI model;
 - Quick Connect initiate/poll/approve, expiry and cancellation against a local
   mock server, including cancellation during the token exchange;

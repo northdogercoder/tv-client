@@ -3,12 +3,13 @@
 
 // Editable on-device settings. Every row is driven by the keyboard focus
 // scope in app.slint: Enter edits or activates, arrows move, Escape leaves the
-// screen or cancels an edit. Text values are shown through read-only
-// TextInputs and toggles through CheckBoxes; the row TouchArea activates the
-// focused row so a pointer cannot steal keyboard focus from the overscan-aware
-// root scope.
-
-import { CheckBox } from "std-widgets.slint";
+// screen or cancels an edit.
+//
+// A row is one large pointer target. Text values live in a clipped, full-width
+// field with its own pointer target so a click can place the caret; the caret
+// itself is an amber `|` marker supplied by the model. Toggles are drawn as a
+// large custom pill and the whole row activates them, so no small stock
+// CheckBox or unreadable TextInput is required.
 
 export struct SettingsRow {
     index: int,
@@ -25,68 +26,130 @@ component SettingsLine inherits Rectangle {
     in property <int> focus-index;
     in property <length> base;
     callback activated(int);
+    callback caret-requested(int, float);
 
-    height: base / 13;
+    min-height: base / 20;
     border-radius: base / 120;
-    background: setting.index == focus-index ? #1f6feb : #151c25;
+    background: setting.index == focus-index ? #173a6b : #151c25;
     border-width: setting.index == focus-index ? 4px : 1px;
     border-color: setting.index == focus-index ? #a8c7ff : #2c3642;
+    clip: true;
+
+    // Backmost hit target: clicking the label or empty row space activates
+    // the row. The text field below owns clicks inside the value box.
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        mouse-cursor: pointer;
+        clicked => {
+            root.activated(setting.index);
+        }
+    }
 
     HorizontalLayout {
         padding-left: base / 40;
         padding-right: base / 40;
+        padding-top: base / 100;
+        padding-bottom: base / 100;
         spacing: base / 48;
 
         Text {
-            width: 42%;
+            width: 34%;
             text: setting.label;
-            font-size: base / 30;
+            font-size: base / 32;
             font-weight: setting.index == focus-index ? 700 : 400;
-            color: #c6d2e1;
+            color: setting.index == focus-index ? #f4f7fb : #c6d2e1;
             vertical-alignment: center;
             overflow: elide;
         }
 
-        if setting.kind == 0 : TextInput {
+        if setting.kind == 0 : Rectangle {
             horizontal-stretch: 1;
-            read-only: true;
-            text: setting.editing ? edit-value : setting.value;
-            single-line: true;
-            font-size: base / 30;
-            color: setting.editing ? #ffd479 : #f4f7fb;
-            vertical-alignment: center;
-            horizontal-alignment: left;
+            background: #0d1219;
+            border-radius: base / 180;
+            border-width: setting.editing ? 3px : (setting.index == focus-index ? 2px : 1px);
+            border-color: setting.editing ? #ffd479 : (setting.index == focus-index ? #7fb0ff : #2c3642);
+            clip: true;
+
+            Text {
+                x: base / 64;
+                width: parent.width - base / 32;
+                height: parent.height;
+                text: setting.editing ? root.edit-value : setting.value;
+                font-size: base / 32;
+                color: setting.editing ? #ffd479 : #f4f7fb;
+                vertical-alignment: center;
+                horizontal-alignment: left;
+                overflow: elide;
+            }
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                mouse-cursor: text;
+                clicked => {
+                    root.caret-requested(setting.index, self.pressed-x / self.width);
+                }
+            }
         }
 
-        if setting.kind == 1 : CheckBox {
-            checked: setting.toggle-on;
-            enabled: false;
-            text: setting.toggle-on ? "On" : "Off";
+        if setting.kind == 1 : HorizontalLayout {
+            horizontal-stretch: 1;
+            spacing: base / 40;
+
+            Rectangle {
+                horizontal-stretch: 1;
+                background: transparent;
+            }
+
+            Text {
+                text: setting.toggle-on ? "On" : "Off";
+                font-size: base / 32;
+                font-weight: 700;
+                color: setting.toggle-on ? #9fc2ff : #a9b7c8;
+                vertical-alignment: center;
+            }
+
+            // Large custom toggle pill. The whole row is the hit target, so
+            // the pill has no pointer handler of its own.
+            Rectangle {
+                width: base / 7;
+                height: base / 18;
+                border-radius: self.height / 2;
+                background: setting.toggle-on ? #1f6feb : #2c3642;
+                border-width: 2px;
+                border-color: setting.toggle-on ? #7fb0ff : #455466;
+
+                Rectangle {
+                    x: setting.toggle-on ? parent.width - self.width - 4px : 4px;
+                    y: 4px;
+                    width: parent.height - 8px;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: #f4f7fb;
+
+                    animate x { duration: 120ms; }
+                }
+            }
         }
 
         if setting.kind == 2 : Text {
             horizontal-stretch: 1;
             text: "< " + setting.value + " >";
-            font-size: base / 30;
+            font-size: base / 32;
             color: #f4f7fb;
             vertical-alignment: center;
+            overflow: elide;
         }
 
         if setting.kind == 3 : Text {
             horizontal-stretch: 1;
             text: setting.value;
-            font-size: base / 30;
+            font-size: base / 32;
             color: #9fc2ff;
             vertical-alignment: center;
+            horizontal-alignment: right;
             overflow: elide;
-        }
-    }
-
-    TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => {
-            root.activated(root.setting.index);
         }
     }
 }
@@ -104,43 +167,66 @@ export component SettingsScreen inherits Rectangle {
     in property <string> quick-code;
 
     callback activated(int);
+    callback caret-requested(int, float);
 
     VerticalLayout {
-        padding: root.base / 24;
-        spacing: root.base / 70;
-
-        Text {
-            height: root.base / 13;
-            text: "Settings";
-            font-size: root.base / 15;
-            font-weight: 700;
-            color: #f4f7fb;
-            vertical-alignment: center;
-        }
+        padding: root.base / 32;
+        spacing: root.base / 80;
 
         HorizontalLayout {
-            spacing: root.base / 20;
+            height: root.base / 12;
+            spacing: root.base / 40;
+
+            Text {
+                text: "Settings";
+                font-size: root.base / 15;
+                font-weight: 700;
+                color: #f4f7fb;
+                vertical-alignment: center;
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: root.version;
+                font-size: root.base / 34;
+                color: #8fa3b8;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                overflow: elide;
+            }
+        }
+
+        // Two flexible columns: rows share the available height instead of
+        // keeping a fixed height that can overlap the status strip.
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: root.base / 24;
 
             VerticalLayout {
-                width: 50%;
-                spacing: root.base / 80;
+                horizontal-stretch: 1;
+                spacing: root.base / 100;
 
                 for entry in root.rows-left : SettingsLine {
+                    vertical-stretch: 1;
                     setting: entry;
                     edit-value: root.edit-value;
                     focus-index: root.focus-index;
                     base: root.base;
                     activated(index) => {
                         root.activated(index);
+                    }
+                    caret-requested(index, fraction) => {
+                        root.caret-requested(index, fraction);
                     }
                 }
             }
 
             VerticalLayout {
-                width: 50%;
-                spacing: root.base / 80;
+                horizontal-stretch: 1;
+                spacing: root.base / 100;
 
                 for entry in root.rows-right : SettingsLine {
+                    vertical-stretch: 1;
                     setting: entry;
                     edit-value: root.edit-value;
                     focus-index: root.focus-index;
@@ -148,49 +234,51 @@ export component SettingsScreen inherits Rectangle {
                     activated(index) => {
                         root.activated(index);
                     }
+                    caret-requested(index, fraction) => {
+                        root.caret-requested(index, fraction);
+                    }
                 }
             }
         }
 
-        if root.quick-code != "" : Text {
-            height: root.base / 18;
-            text: "Jellyfin Quick Connect code: " + root.quick-code;
-            font-size: root.base / 22;
-            font-weight: 700;
-            color: #ffd479;
-            vertical-alignment: center;
-        }
-
-        if root.message != "" : Text {
-            height: root.base / 26;
-            text: root.message;
-            font-size: root.base / 32;
-            color: #9fc2ff;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        if root.error != "" : Text {
-            height: root.base / 26;
-            text: root.error;
-            font-size: root.base / 32;
-            font-weight: 700;
-            color: #ff9a9a;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
+        // Reserved status strip. Reserving it keeps the rows from jumping
+        // when Quick Connect or a save message appears.
         Rectangle {
-            vertical-stretch: 1;
+            height: root.base / 14;
+            clip: true;
             background: transparent;
+
+            HorizontalLayout {
+                spacing: root.base / 32;
+
+                if root.quick-code != "" : Text {
+                    text: "Quick Connect: " + root.quick-code;
+                    font-size: root.base / 32;
+                    font-weight: 700;
+                    color: #ffd479;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.error != "" ? root.error : root.message;
+                    font-size: root.base / 32;
+                    font-weight: root.error != "" ? 700 : 400;
+                    color: root.error != "" ? #ff9a9a : #9fc2ff;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
         }
 
         Text {
-            height: root.base / 24;
-            text: root.version + "    ARROWS move    ENTER edit/activate    ESC cancel/back";
-            font-size: root.base / 36;
+            height: root.base / 26;
+            text: "ARROWS move    ENTER edit/activate    HOME/END caret    ESC cancel/back";
+            font-size: root.base / 38;
             color: #a9b7c8;
             vertical-alignment: center;
+            overflow: elide;
         }
     }
 }

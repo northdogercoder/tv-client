@@ -55,7 +55,7 @@ bitrate_bps = 6000000
 max_bitrate_bps = 10000000
 artwork_cache_bytes = 134217728
 share_titles = false
-ui_safe_area_percent = 3
+ui_safe_area_percent = 0
 ```
 
 | Key | Type | Default | Validation |
@@ -78,7 +78,7 @@ ui_safe_area_percent = 3
 | `max_bitrate_bps` | integer | `10000000` | `64000..=100000000` and at least `bitrate_bps` |
 | `artwork_cache_bytes` | integer | `134217728` | `0..=134217728` (128 MiB) |
 | `share_titles` | boolean | `false` | Metadata-sharing consent; never enables credentials or media upload |
-| `ui_safe_area_percent` | integer | `3` | `0..=10` percent of the short edge used as an overscan inset around the UI |
+| `ui_safe_area_percent` | integer | `0` | `0..=10` percent of the short edge, removed from every edge as an opt-in overscan inset; `0` uses the whole window |
 
 Every key is optional and missing keys take the defaults above. A present but
 invalid value, an unknown key or a duplicate key fails startup. TOML syntax and

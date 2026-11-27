@@ -18,11 +18,13 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use tv_client::config::{
-    self, ClientConfig, ConfigOrigin, MAX_UI_SAFE_AREA_PERCENT, MIN_UI_SAFE_AREA_PERCENT,
+    self, ClientConfig, ConfigOrigin, DEFAULT_UI_SAFE_AREA_PERCENT, MAX_UI_SAFE_AREA_PERCENT,
+    MIN_UI_SAFE_AREA_PERCENT,
 };
 use tv_client::jellyfin::{
     ACCESS_TOKEN_CREDENTIAL, JellyfinClient, JellyfinError, QuickConnectPoll, cancellation,
 };
+use tv_client::model::{Action, Direction};
 use tv_client::settings::{
     JellyfinSignOutError, SettingRow, SettingsEvent, SettingsForm, save_state_config,
 };
@@ -179,18 +181,32 @@ fn invalid_config_errors_do_not_echo_secrets() {
 // --- Safe area and the editable form --------------------------------------
 
 #[test]
-fn safe_area_defaults_and_clamps_in_the_editor() {
+fn safe_area_defaults_to_zero_and_clamps_in_the_editor() {
+    assert_eq!(DEFAULT_UI_SAFE_AREA_PERCENT, 0);
     assert_eq!(
         ClientConfig::default().ui_safe_area_percent,
-        MIN_UI_SAFE_AREA_PERCENT + 3
+        DEFAULT_UI_SAFE_AREA_PERCENT
     );
+    assert_eq!(MIN_UI_SAFE_AREA_PERCENT, 0);
+    assert_eq!(MAX_UI_SAFE_AREA_PERCENT, 10);
 
     let mut form = SettingsForm::new(&ClientConfig::default());
     form.set_focus(SettingRow::SafeArea.index());
     assert_eq!(form.handle_key(Key::Enter), SettingsEvent::Editing);
-    assert_eq!(form.edit_value(), "3");
-    assert_eq!(form.handle_key(Key::Backspace), SettingsEvent::Edited);
+    assert_eq!(form.edit_value(), "0");
+    assert_eq!(form.caret(), 1, "editing starts with the caret at the end");
     assert_eq!(form.handle_key(Key::Char('1')), SettingsEvent::Edited);
+    assert_eq!(form.handle_key(Key::Enter), SettingsEvent::Edited);
+    assert_eq!(
+        form.build_config()
+            .expect("accepted configuration")
+            .ui_safe_area_percent,
+        1
+    );
+
+    // 11 is outside the accepted range and keeps the field open.
+    form.set_focus(SettingRow::SafeArea.index());
+    assert_eq!(form.handle_key(Key::Enter), SettingsEvent::Editing);
     assert_eq!(form.handle_key(Key::Char('1')), SettingsEvent::Edited);
     assert_eq!(form.handle_key(Key::Enter), SettingsEvent::Rejected);
     assert!(form.editing(), "an invalid value keeps the edit open");
@@ -211,6 +227,185 @@ fn safe_area_defaults_and_clamps_in_the_editor() {
             .expect("accepted configuration")
             .ui_safe_area_percent,
         10
+    );
+}
+
+#[test]
+fn settings_editor_tracks_caret_and_places_it_from_a_pointer_fraction() {
+    let mut form = SettingsForm::new(&ClientConfig::default());
+    form.set_focus(SettingRow::SafeArea.index());
+    assert_eq!(form.handle_key(Key::Enter), SettingsEvent::Editing);
+    assert_eq!(form.edit_value(), "0");
+    assert_eq!(form.caret(), 1);
+
+    assert_eq!(form.handle_key(Key::Home), SettingsEvent::CaretMoved);
+    assert_eq!(form.caret(), 0);
+    assert_eq!(form.handle_key(Key::Char('1')), SettingsEvent::Edited);
+    assert_eq!(form.edit_value(), "10");
+    assert_eq!(form.caret(), 1);
+
+    assert_eq!(form.handle_key(Key::Right), SettingsEvent::CaretMoved);
+    assert_eq!(form.caret(), 2);
+    assert_eq!(form.handle_key(Key::Right), SettingsEvent::CaretMoved);
+    assert_eq!(form.caret(), 2, "the caret clamps at the end");
+    assert!(form.caret_to_end());
+    assert_eq!(form.caret(), 2);
+
+    assert_eq!(form.handle_key(Key::Left), SettingsEvent::CaretMoved);
+    assert_eq!(form.caret(), 1);
+    assert_eq!(form.handle_key(Key::Backspace), SettingsEvent::Edited);
+    assert_eq!(form.edit_value(), "0");
+    assert_eq!(form.caret(), 0);
+    assert_eq!(
+        form.handle_key(Key::Backspace),
+        SettingsEvent::Edited,
+        "backspace at the start is a no-op"
+    );
+    assert_eq!(form.edit_value(), "0");
+
+    // Pointer fractions map to the nearest character boundary.
+    form.place_caret_fraction(1.0);
+    assert_eq!(form.caret(), 1);
+    form.place_caret_fraction(0.0);
+    assert_eq!(form.caret(), 0);
+    form.place_caret_fraction(0.5);
+    assert_eq!(form.caret(), 1);
+
+    // A caret marker is display-only; the stored buffer stays clean.
+    let display = form.edit_display();
+    assert_eq!(display, "0|");
+    assert_eq!(form.edit_value(), "0");
+}
+
+#[test]
+fn settings_pointer_activates_whole_rows_and_toggles_locally() {
+    let mut model = UiModel::new();
+    model.reset_settings(&ClientConfig::default());
+    model.set_home_focus(4);
+    assert_eq!(
+        press(&mut model, Key::Enter, 10),
+        UiOutcome::Navigated {
+            screen: Screen::Settings,
+            focus: 0,
+        }
+    );
+
+    let cloud = SettingRow::CloudEnabled.index();
+    model.settings_pointer_activate(cloud);
+    assert_eq!(model.settings_focus(), cloud);
+    assert!(
+        model.settings_rows()[cloud].toggle_on,
+        "clicking the whole toggle row turns it on"
+    );
+    assert_eq!(model.settings_rows()[cloud].value, "On");
+
+    model.settings_pointer_activate(cloud);
+    assert!(!model.settings_rows()[cloud].toggle_on);
+    assert_eq!(model.settings_rows()[cloud].value, "Off");
+
+    // A pointer click on a value box focuses the row and starts editing.
+    let url = SettingRow::JellyfinUrl.index();
+    let outcome = model.settings_pointer_caret(url, 0.0);
+    assert_eq!(
+        outcome,
+        UiOutcome::Navigated {
+            screen: Screen::Settings,
+            focus: url,
+        }
+    );
+    assert!(model.settings_editing());
+    assert_eq!(model.settings_focus(), url);
+    assert_eq!(model.settings_caret(), 0);
+
+    // Caret movement stays inside the field and never navigates the screen.
+    assert_eq!(
+        press(&mut model, Key::Char('a'), 20),
+        UiOutcome::Navigated {
+            screen: Screen::Settings,
+            focus: url,
+        }
+    );
+    assert_eq!(model.settings_caret(), 1);
+    // A remote navigation action cannot move the local caret.
+    assert_eq!(
+        model.handle_remote_action(
+            Action::Navigate {
+                direction: Direction::Left,
+            },
+            Duration::from_millis(25),
+        ),
+        UiOutcome::Ignored
+    );
+    assert_eq!(model.settings_caret(), 1);
+    assert_eq!(
+        press(&mut model, Key::Home, 30),
+        UiOutcome::Navigated {
+            screen: Screen::Settings,
+            focus: url,
+        }
+    );
+    assert_eq!(model.settings_caret(), 0);
+    assert!(model.settings_caret_to_end());
+    assert_eq!(model.settings_caret(), 1);
+    assert_eq!(
+        press(&mut model, Key::Escape, 40),
+        UiOutcome::Navigated {
+            screen: Screen::Settings,
+            focus: url,
+        }
+    );
+    assert!(!model.settings_editing());
+
+    // Clicking a different row starts editing it.
+    let path = SettingRow::YtdlpPath.index();
+    model.settings_pointer_caret(path, 1.0);
+    assert!(model.settings_editing());
+    assert_eq!(model.settings_focus(), path);
+    assert_eq!(model.settings_caret(), 0);
+
+    // Clicking Save commits the open field first, then emits the same Save
+    // event as Enter so pointer and keyboard use one reducer path.
+    let save = SettingRow::Save.index();
+    let outcome = model.settings_pointer_activate(save);
+    assert!(!model.settings_editing());
+    assert_eq!(model.settings_focus(), save);
+    let UiOutcome::SaveSettings(config) = outcome else {
+        panic!("expected SaveSettings, got another outcome");
+    };
+    assert_eq!(config.youtube_ytdlp_path, None);
+}
+
+#[test]
+fn settings_rows_and_errors_never_contain_connection_secrets() {
+    let mut config = client_config("https://jellyfin.example.test");
+    config.ui_safe_area_percent = 2;
+    let mut model = UiModel::new();
+    model.reset_settings(&config);
+    model.set_jellyfin_user(Some("tester".to_owned()));
+    model.set_quick_connect_code(Some("483920".to_owned()));
+
+    let rendered = format!(
+        "{:?} {:?} {:?}",
+        model.settings_rows(),
+        model.settings_quick_code(),
+        model.settings_error()
+    );
+    assert!(!rendered.contains(ACCESS_TOKEN));
+    assert!(!rendered.contains(QUICK_CONNECT_SECRET));
+
+    let mut form = SettingsForm::new(&ClientConfig::default());
+    form.set_focus(SettingRow::JellyfinUrl.index());
+    assert_eq!(form.handle_key(Key::Enter), SettingsEvent::Editing);
+    for character in "https://alice:hunter2@example.test".chars() {
+        assert_eq!(form.handle_key(Key::Char(character)), SettingsEvent::Edited);
+    }
+    assert_eq!(form.handle_key(Key::Enter), SettingsEvent::Rejected);
+    let error = form.error().expect("validation error");
+    assert!(error.contains("jellyfin_url"));
+    assert!(!error.contains("alice"), "error leaked the user: {error}");
+    assert!(
+        !error.contains("hunter2"),
+        "error leaked the password: {error}"
     );
 }
 
