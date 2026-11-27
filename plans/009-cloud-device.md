@@ -17,7 +17,7 @@
 
 - Baseline `fa53133`; C003, C004 and C008 are merged; host gate exit 0 (140 tests, 2 live ignored) and combined `native-ui,gstreamer-player` clippy passes.
 - Server S002/S003/S004 are DONE (`b9f2ee8`, `a6ca230`, `ef432e9`), server `main` is clean, and `docs/protocol-v1.md` / `docs/protocol-fixtures.json` hashes are identical across the two repos (`8695cf14…`, `3a7d0e53…`).
-- Staging S006 Phase A is at `ovh-1.minotaur-gacrux.ts.net`; no one-use enrollment token has been minted for this run, so live enrollment/pairing integration is pending an operator token. Implement against the protocol and mocks; do not fabricate a live claim.
+- Staging S006 Phase A is at `ovh-anders.minotaur-gacrux.ts.net`; no one-use enrollment token has been minted for this run, so live enrollment/pairing integration is pending an operator token. Implement against the protocol and mocks; do not fabricate a live claim.
 - Existing interfaces: `ClientConfig`/`Storage` (0600 credentials), `UiModel`/input provenance, playback/player supervisor; rustls-backed reqwest.
 - Absent: `src/cloud/`, `tests/cloud_device.rs`, `docs/cloud.md`. Add `tokio-tungstenite` (rustls) for the device WebSocket and document it in `docs/build.md` (scope amendment).
 

@@ -12,7 +12,7 @@
 - **Category**: direction
 - **Planned at**: 6af17e4ebb65136d5fd5ae0efbd01b192e9f2543 (amended 2026-11-25; bound 2026-11-26)
 - **State**: TODO (index authoritative)
-- **Cross-repo contract**: `HANDOFF.md` (untracked live handoff; last seen hash `6305ba625f60b882e728828d462dc15b9308f1069794679c916e7fd6aa70b6a5`; re-read before dispatch). Server S006 Phase A staging `ovh-1.minotaur-gacrux.ts.net`, release `0.1.0-ee4814880aca` (branch `advisor/s006-youtube`, commit `ee4814880aca8278ba6fd1f840d8db84e4157c3c`). Re-read the handoff before dispatch and integration.
+- **Cross-repo contract**: `HANDOFF.md` (untracked live handoff; last seen hash `6305ba625f60b882e728828d462dc15b9308f1069794679c916e7fd6aa70b6a5`; re-read before dispatch). Server S006 Phase A staging `ovh-anders.minotaur-gacrux.ts.net`, release `0.1.0-ee4814880aca` (branch `advisor/s006-youtube`, commit `ee4814880aca8278ba6fd1f840d8db84e4157c3c`). Re-read the handoff before dispatch and integration.
 
 ## Why this matters
 The operator split YouTube work: the server owns YouTube Data API search/browse only, while the Pi resolves and plays locally with yt-dlp + libmpv + ffmpeg. No media URL, API key or player ticket crosses the wire. Playback bypasses the official embed/ads/branding path; yt-dlp is unofficial and may break. This is the accepted tradeoff. Server-side download/relay was considered and **rejected**: OVH's datacenter IP fails YouTube's bot check without cookies, and adding cookies or a media relay would violate the no-credentials/least-privilege contract and create ToS/egress exposure. Do not implement or expect a server media endpoint.
