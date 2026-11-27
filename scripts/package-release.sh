@@ -225,7 +225,7 @@ chmod 0755 "$work/tv-client" "$work/tv-native-player"
 if [[ -z $metadata ]]; then
   command -v cargo >/dev/null 2>&1 || { echo "error: cargo is required to generate the SBOM" >&2; exit 1; }
   cargo metadata --locked --format-version 1 \
-    --features native-ui,gstreamer-player >"$work/cargo-metadata.json"
+    --features native-ui,gstreamer-player,player-overlay >"$work/cargo-metadata.json"
   metadata="$work/cargo-metadata.json"
 fi
 generate_inventory "$metadata" "$work"

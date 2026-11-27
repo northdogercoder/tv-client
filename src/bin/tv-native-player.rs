@@ -6,10 +6,15 @@
 //! and exits on `stop`, stdin EOF or the default SIGTERM action.
 //!
 //! `waylandsink` owns its own Wayland surface, so the compositor delivers
-//! keyboard events to that surface and the UI process cannot see them. The
-//! child therefore reads Linux evdev key events directly. A bounded
-//! `textoverlay` hint is available only when `TV_PLAYER_OVERLAY=on`; it is
-//! off by default because the software overlay copy makes Pi 3B video choppy.
+//! keyboard events to that surface and the UI process cannot see them. With
+//! the `player-overlay` feature the child maps a second, fully transparent
+//! Slint window after the video surface and draws the control bar there; Cage
+//! stacks the newest window on top and routes input to it. Without that
+//! feature, or when the window cannot be created, the child reads Linux evdev
+//! key events directly and the evdev path stays the only control owner.
+//! A bounded `textoverlay` hint is available only when `TV_PLAYER_OVERLAY=on`;
+//! it is off by default because the software overlay copy makes Pi 3B video
+//! choppy. The control-bar window never inserts a video filter.
 //! `Back`/`Esc` stops playback and exits with a `stopped` event, so the parent
 //! returns to the launcher instead of treating the exit as a crash.
 //!
@@ -19,6 +24,9 @@
 //! one. When no audio device can be opened at all, a silent `fakesink` keeps
 //! video playing and the child reports a typed `degraded` event.
 
+use std::cell::Cell;
+#[cfg(feature = "player-overlay")]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 #[cfg(target_os = "linux")]
 use std::fs::{File, OpenOptions};
@@ -36,6 +44,8 @@ use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::glib::prelude::*;
 use gstreamer::prelude::*;
+#[cfg(feature = "player-overlay")]
+use tv_client::player::overlay::{self, OverlayAction};
 use tv_client::player::{
     self, LoadRequest, PlayerEvent, PlayerRequest, audio, controls, redact_text,
 };
@@ -52,8 +62,212 @@ const MAX_INPUT_DEVICES: usize = 32;
 const MAX_EVENTS_PER_DEVICE: usize = 16;
 /// Set to `off`/`0` to skip the on-screen hint (keeps the plain video sink).
 const OVERLAY_ENV: &str = "TV_PLAYER_OVERLAY";
+/// Set to `off`/`0` to disable the transparent control-bar window without a
+/// rebuild. The `player-overlay` feature is the real switch.
+const OVERLAY_WINDOW_ENV: &str = "TV_PLAYER_OVERLAY_WINDOW";
 const OVERLAY_PROBE_TIMEOUT_SECONDS: u32 = 2;
+/// Delay between the first `ready` and mapping the overlay, so waylandsink has
+/// committed its surface first. Cage stacks whichever window mapped last.
+#[cfg(feature = "player-overlay")]
+const OVERLAY_MAP_DELAY: Duration = Duration::from_millis(250);
+#[cfg(feature = "player-overlay")]
+const OVERLAY_PUMP_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_LOG_BYTES: usize = 300;
+
+#[cfg(feature = "player-overlay")]
+mod overlay_generated {
+    include!(concat!(env!("OUT_DIR"), "/player_overlay.rs"));
+}
+
+/// Thin, bounded bridge between the generated Slint component and the player.
+///
+/// The window is created only after `ready`, so it maps above waylandsink's
+/// surface. Callbacks never touch GStreamer directly; they call back into the
+/// owning [`Player`] through a weak reference. All visibility and seek policy
+/// lives in [`tv_client::player::overlay`], which is pure and tested headless.
+#[cfg(feature = "player-overlay")]
+mod overlay_window {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
+    use slint::ComponentHandle;
+
+    use tv_client::player::overlay::{OverlayAction, OverlayState};
+
+    use super::Player;
+    use super::overlay_generated::PlayerOverlay;
+
+    pub(super) struct OverlayUi {
+        ui: PlayerOverlay,
+        state: RefCell<OverlayState>,
+        start: Instant,
+        keyboard_focus: Rc<Cell<bool>>,
+    }
+
+    impl OverlayUi {
+        pub(super) fn new(player: Rc<Player>) -> Result<Rc<Self>, slint::PlatformError> {
+            let ui = PlayerOverlay::new()?;
+            let keyboard_focus = Rc::new(Cell::new(false));
+
+            {
+                let focus = Rc::clone(&keyboard_focus);
+                ui.on_keyboard_focus(move |focused| focus.set(focused));
+            }
+            {
+                let weak = Rc::downgrade(&player);
+                ui.on_activity(move || {
+                    if let Some(player) = weak.upgrade() {
+                        player.overlay_activity();
+                    }
+                });
+            }
+            {
+                let weak = Rc::downgrade(&player);
+                ui.on_tick(move || {
+                    if let Some(player) = weak.upgrade() {
+                        player.overlay_tick();
+                    }
+                });
+            }
+            {
+                let weak = Rc::downgrade(&player);
+                ui.on_toggle_pause(move || {
+                    if let Some(player) = weak.upgrade() {
+                        player.overlay_toggle_pause();
+                    }
+                });
+            }
+            {
+                let weak = Rc::downgrade(&player);
+                ui.on_stop(move || {
+                    if let Some(player) = weak.upgrade() {
+                        player.overlay_stop();
+                    }
+                });
+            }
+            {
+                let weak = Rc::downgrade(&player);
+                ui.on_seek_fraction(move |fraction| {
+                    if let Some(player) = weak.upgrade() {
+                        player.overlay_seek_fraction(fraction);
+                    }
+                });
+            }
+            {
+                let weak = Rc::downgrade(&player);
+                ui.on_key_pressed(move |text| {
+                    if let Some(player) = weak.upgrade() {
+                        player.overlay_key_press(text.as_str());
+                    }
+                });
+            }
+            {
+                let weak = Rc::downgrade(&player);
+                ui.on_key_released(move |text| {
+                    if let Some(player) = weak.upgrade() {
+                        player.overlay_key_release(text.as_str());
+                    }
+                });
+            }
+
+            // `show()` creates and maps the window. On Wayland this is the
+            // moment the compositor stacks it above the video surface.
+            ui.show()?;
+            // The kiosk panel is 1080p; set a physical size as a fallback for
+            // compositors that ignore the fullscreen request, mirroring the
+            // launcher.
+            ui.window().set_size(slint::PhysicalSize::new(1920, 1080));
+            ui.window().set_fullscreen(true);
+
+            Ok(Rc::new(Self {
+                ui,
+                state: RefCell::new(OverlayState::new(Duration::ZERO)),
+                start: Instant::now(),
+                keyboard_focus,
+            }))
+        }
+
+        pub(super) fn keyboard_focus(&self) -> bool {
+            self.keyboard_focus.get()
+        }
+
+        pub(super) fn note_activity(&self) {
+            let mut state = self.state.borrow_mut();
+            state.note_activity(self.start.elapsed());
+            self.ui.set_bar_visible(state.visible());
+        }
+
+        pub(super) fn tick(&self) {
+            let mut state = self.state.borrow_mut();
+            if state.tick(self.start.elapsed()) {
+                self.ui.set_bar_visible(state.visible());
+            }
+        }
+
+        /// Push a player snapshot into the bar. Repeated calls are cheap and
+        /// only touch properties whose values are derived from the snapshot.
+        pub(super) fn sync(
+            &self,
+            position_ms: u64,
+            duration_ms: Option<u64>,
+            paused: bool,
+            active: bool,
+        ) {
+            let mut state = self.state.borrow_mut();
+            state.update_position(position_ms, duration_ms);
+            state.set_paused(paused, self.start.elapsed());
+            if !active {
+                state.deactivate();
+            }
+            let visible = state.visible();
+            let elapsed = state.elapsed_label();
+            let remaining = state.remaining_label();
+            let progress = state.progress();
+            drop(state);
+
+            self.ui.set_elapsed_text(elapsed.into());
+            self.ui.set_remaining_text(remaining.into());
+            self.ui.set_progress(progress);
+            self.ui.set_paused(paused);
+            self.ui.set_bar_visible(visible);
+        }
+
+        pub(super) fn deactivate(&self) {
+            let mut state = self.state.borrow_mut();
+            if !state.active() {
+                return;
+            }
+            state.deactivate();
+            self.ui.set_bar_visible(false);
+        }
+
+        pub(super) fn fraction_target(&self, fraction: f32) -> Option<u64> {
+            self.state.borrow().fraction_target(fraction)
+        }
+
+        pub(super) fn key_press(&self, text: &str) -> Option<OverlayAction> {
+            let mut state = self.state.borrow_mut();
+            let action = state.key_press(text, self.start.elapsed());
+            let visible = state.visible();
+            drop(state);
+            // A key press reveals the bar even when it maps to nothing or is
+            // only a repeat; inactivity hides it again later.
+            self.ui.set_bar_visible(visible);
+            action
+        }
+
+        pub(super) fn key_release(&self, text: &str) {
+            self.state.borrow_mut().key_release(text);
+        }
+    }
+
+    /// Whether the runtime switch allows the control-bar window.
+    pub(super) fn window_enabled() -> bool {
+        let value = std::env::var(super::OVERLAY_WINDOW_ENV).ok();
+        tv_client::player::overlay::window_enabled_from_env(value.as_deref())
+    }
+}
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -84,9 +298,30 @@ fn run() -> Result<(), &'static str> {
         glib::ControlFlow::Continue
     });
 
+    #[cfg(feature = "player-overlay")]
+    if overlay_window::window_enabled() {
+        match player.run_overlay() {
+            OverlayPhase::Finished => {
+                player.shutdown();
+                return Ok(());
+            }
+            OverlayPhase::Unavailable => {}
+        }
+    }
+
     player.main_loop.run();
-    let _ = player.pipeline.set_state(gst::State::Null);
+    player.shutdown();
     Ok(())
+}
+
+/// How the control-bar phase ended, so `run` can either finish or fall back to
+/// the glib-only evdev path.
+#[cfg(feature = "player-overlay")]
+enum OverlayPhase {
+    /// The Slint loop owned playback and it is now stopped or ended.
+    Finished,
+    /// No usable overlay; run the plain glib loop with evdev controls.
+    Unavailable,
 }
 
 enum Inbound {
@@ -230,6 +465,11 @@ struct PlaybackState {
     paused: bool,
     input_available: bool,
     last_position_ms: u64,
+    duration_ms: Option<u64>,
+    /// Incremented on every transition into `ready`, including the re-preroll
+    /// after an audio-sink fallback. The overlay uses it to remap itself above
+    /// a recreated video surface.
+    ready_seq: u64,
     last_position_notification: Option<Instant>,
     video_decoder: Option<String>,
     audio_decoder: Option<String>,
@@ -243,7 +483,17 @@ struct Player {
     pipeline: gst::Element,
     main_loop: glib::MainLoop,
     state: Arc<Mutex<PlaybackState>>,
+    /// The opt-in `textoverlay` element, if `TV_PLAYER_OVERLAY=on`.
     overlay: Option<gst::Element>,
+    /// Set once a stop request is being honoured; the loops must not restart.
+    stopped: Cell<bool>,
+    /// The transparent Slint control bar, present only while it could be
+    /// mapped above the video surface.
+    #[cfg(feature = "player-overlay")]
+    control_bar: RefCell<Option<Rc<overlay_window::OverlayUi>>>,
+    /// Ready generation already reflected by [`Self::control_bar`].
+    #[cfg(feature = "player-overlay")]
+    overlay_seq: Cell<u64>,
     // The bus watch owns the `AudioChain` shared state; dropping the guard
     // removes the watch, so keep it for the process lifetime.
     _bus_watch: gst::bus::BusWatchGuard,
@@ -381,6 +631,9 @@ impl Player {
                                         let mut state = lock(&bus_state);
                                         let first = !state.ready;
                                         state.ready = true;
+                                        if first {
+                                            state.ready_seq = state.ready_seq.wrapping_add(1);
+                                        }
                                         first
                                     };
                                     if first_ready {
@@ -464,11 +717,16 @@ impl Player {
             main_loop,
             state,
             overlay,
+            stopped: Cell::new(false),
+            #[cfg(feature = "player-overlay")]
+            control_bar: RefCell::new(None),
+            #[cfg(feature = "player-overlay")]
+            overlay_seq: Cell::new(0),
             _bus_watch: bus_watch,
         }))
     }
 
-    fn poll(&self, inbound: &std_mpsc::Receiver<Inbound>) {
+    fn poll(self: &Rc<Self>, inbound: &std_mpsc::Receiver<Inbound>) {
         // Bounded per tick: a stuck or noisy input source cannot starve the
         // position timer or the bus watch.
         for _ in 0..64 {
@@ -489,7 +747,35 @@ impl Player {
                 Err(std_mpsc::TryRecvError::Empty) => break,
             }
         }
+        self.maintain_overlay();
         self.publish_position();
+    }
+
+    /// Keep the control bar consistent with the bus state.
+    ///
+    /// End of stream and errors hide the bar immediately; a new ready
+    /// generation (audio-sink fallback or a second load) recreates the window
+    /// so it maps above the recreated waylandsink surface. All of this is
+    /// driven by the existing 100 ms poll, so there is no extra polling.
+    fn maintain_overlay(self: &Rc<Self>) {
+        #[cfg(feature = "player-overlay")]
+        {
+            let (ready, ended, ready_seq) = {
+                let state = lock(&self.state);
+                (state.ready, state.ended, state.ready_seq)
+            };
+            let has_bar = self.control_bar.borrow().is_some();
+            if !has_bar {
+                return;
+            }
+            if ended {
+                self.overlay_deactivate();
+                return;
+            }
+            if ready && self.overlay_seq.get() != ready_seq && self.install_overlay().is_err() {
+                self.overlay_deactivate();
+            }
+        }
     }
 
     fn handle(&self, request: PlayerRequest) {
@@ -499,6 +785,7 @@ impl Player {
                 if self.pipeline.set_state(gst::State::Paused).is_ok() {
                     lock(&self.state).paused = true;
                     self.set_hint("Paused - SPACE resumes");
+                    self.overlay_sync();
                 } else {
                     emit(&PlayerEvent::Error {
                         code: "state_failed".to_string(),
@@ -510,6 +797,7 @@ impl Player {
                 if self.pipeline.set_state(gst::State::Playing).is_ok() {
                     lock(&self.state).paused = false;
                     self.set_hint("Playing");
+                    self.overlay_sync();
                 } else {
                     emit(&PlayerEvent::Error {
                         code: "state_failed".to_string(),
@@ -529,15 +817,19 @@ impl Player {
     }
 
     fn handle_key(&self, action: controls::KeyAction) {
+        // The overlay window owns the keyboard while it has focus. Reading
+        // evdev in addition would toggle pause twice for one press. Volume has
+        // no overlay control, so it always stays on the evdev path.
+        if self.overlay_owns_keys()
+            && !matches!(
+                action,
+                controls::KeyAction::VolumeUp | controls::KeyAction::VolumeDown
+            )
+        {
+            return;
+        }
         match action {
-            controls::KeyAction::Stop => {
-                // Tell the parent this was intentional before exiting, so the
-                // supervisor returns to the launcher instead of reporting
-                // `child_exited`.
-                emit(&PlayerEvent::Stopped);
-                log_line("tv-native-player: stopped from local controls");
-                self.stop();
-            }
+            controls::KeyAction::Stop => self.stop_from_local(),
             controls::KeyAction::TogglePause => self.toggle_pause(),
             controls::KeyAction::SeekBackward => self.seek_by(false),
             controls::KeyAction::SeekForward => self.seek_by(true),
@@ -546,15 +838,25 @@ impl Player {
         }
     }
 
+    /// Stop from a surface control (evdev or the overlay), reporting the stop
+    /// before the process exits so the supervisor returns to the launcher.
+    fn stop_from_local(&self) {
+        emit(&PlayerEvent::Stopped);
+        log_line("tv-native-player: stopped from local controls");
+        self.stop();
+    }
+
     fn toggle_pause(&self) {
         match self.pipeline.current_state() {
             gst::State::Playing if self.pipeline.set_state(gst::State::Paused).is_ok() => {
                 lock(&self.state).paused = true;
                 self.set_hint("Paused - SPACE resumes");
+                self.overlay_sync();
             }
             gst::State::Paused if self.pipeline.set_state(gst::State::Playing).is_ok() => {
                 lock(&self.state).paused = false;
                 self.set_hint("Playing");
+                self.overlay_sync();
             }
             _ => {}
         }
@@ -586,9 +888,11 @@ impl Player {
         {
             let mut state = lock(&self.state);
             state.last_position_ms = target;
+            state.duration_ms = duration;
             state.last_position_notification = None;
             drop(state);
             self.set_hint(&format!("Seek {} s", target / 1_000));
+            self.overlay_sync();
         }
     }
 
@@ -628,6 +932,13 @@ impl Player {
         log_line(&format!(
             "tv-native-player: evdev controls unavailable: {detail}"
         ));
+        // The overlay window is a complete keyboard/pointer input path; a
+        // missing evdev permission only loses the fallback. If the window also
+        // fails to map, its own `overlay_unavailable` event reports that.
+        #[cfg(feature = "player-overlay")]
+        if overlay_window::window_enabled() {
+            return;
+        }
         self.set_hint(&format!("Controls unavailable: {detail}"));
         let notice = PlayerEvent::Degraded {
             code: "input_unavailable".to_string(),
@@ -657,6 +968,7 @@ impl Player {
             state.ended = false;
             state.paused = false;
             state.last_position_ms = start_position_ms;
+            state.duration_ms = None;
             state.last_position_notification = None;
             state.video_decoder = None;
             state.audio_decoder = None;
@@ -664,6 +976,9 @@ impl Player {
             state.pending_seek_ms = (start_position_ms > 0).then_some(start_position_ms);
             state.volume
         };
+        // The old bar belongs to the previous media; a fresh window is mapped
+        // when the new pipeline reports ready.
+        self.overlay_deactivate();
         self.pipeline
             .set_property("volume", f64::from(volume) / 100.0);
         self.set_hint("Loading");
@@ -685,23 +1000,35 @@ impl Player {
             });
             return;
         };
+        let duration_ms = self
+            .pipeline
+            .query_duration::<gst::ClockTime>()
+            .map(|duration| duration.mseconds());
         let result = self
             .pipeline
             .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, position);
         if result.is_ok() {
             let mut state = lock(&self.state);
             state.last_position_ms = position_ms;
+            state.duration_ms = duration_ms.or(state.duration_ms);
             state.last_position_notification = None;
             drop(state);
             self.set_hint(&format!("Seek {} s", position_ms / 1_000));
+            self.overlay_sync();
         } else {
             self.publish_position();
         }
     }
 
     fn stop(&self) {
+        self.stopped.set(true);
+        self.overlay_deactivate();
         let _ = self.pipeline.set_state(gst::State::Null);
         self.main_loop.quit();
+        #[cfg(feature = "player-overlay")]
+        if self.control_bar.borrow().is_some() {
+            let _ = slint::quit_event_loop();
+        }
     }
 
     fn publish_position(&self) {
@@ -734,11 +1061,261 @@ impl Player {
         let position_ms = position_ms.max(state.last_position_ms);
         let position_ms = duration_ms.map_or(position_ms, |duration| position_ms.min(duration));
         state.last_position_ms = position_ms;
+        state.duration_ms = duration_ms.or(state.duration_ms);
         state.last_position_notification = Some(Instant::now());
+        drop(state);
         emit(&PlayerEvent::Position {
             position_ms,
             duration_ms,
         });
+        // The bar follows the same 500 ms snapshot as the protocol, never a
+        // separate timer.
+        self.overlay_sync();
+    }
+
+    /// Close the window (if any) and drop the pipeline. Safe to call twice.
+    fn shutdown(&self) {
+        self.overlay_deactivate();
+        #[cfg(feature = "player-overlay")]
+        self.close_overlay();
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_sync(&self) {
+        let Some(ui) = self.overlay_ui() else {
+            return;
+        };
+        let (position, duration, paused, ready, ended) = {
+            let state = lock(&self.state);
+            (
+                state.last_position_ms,
+                state.duration_ms,
+                state.paused,
+                state.ready,
+                state.ended,
+            )
+        };
+        ui.sync(position, duration, paused, ready && !ended);
+    }
+
+    #[cfg(not(feature = "player-overlay"))]
+    fn overlay_sync(&self) {}
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_deactivate(&self) {
+        if let Some(ui) = self.overlay_ui() {
+            ui.deactivate();
+        }
+    }
+
+    #[cfg(not(feature = "player-overlay"))]
+    fn overlay_deactivate(&self) {}
+
+    /// True when the overlay window exists and currently owns the keyboard.
+    #[cfg(feature = "player-overlay")]
+    fn overlay_owns_keys(&self) -> bool {
+        self.control_bar
+            .borrow()
+            .as_ref()
+            .is_some_and(|ui| ui.keyboard_focus())
+    }
+
+    #[cfg(not(feature = "player-overlay"))]
+    fn overlay_owns_keys(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_ui(&self) -> Option<Rc<overlay_window::OverlayUi>> {
+        self.control_bar.borrow().clone()
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn close_overlay(&self) {
+        let previous = self.control_bar.borrow_mut().take();
+        drop(previous);
+    }
+
+    /// Create and map a fresh control-bar window.
+    ///
+    /// Replacing an existing window shows the new one before dropping the old
+    /// one, so the Slint event loop never observes zero windows (which would
+    /// end it). This is also the remap path after an audio fallback recreated
+    /// the video surface below the old window.
+    #[cfg(feature = "player-overlay")]
+    fn install_overlay(self: &Rc<Self>) -> Result<(), slint::PlatformError> {
+        let ui = overlay_window::OverlayUi::new(Rc::clone(self))?;
+        let (position, duration, paused, ready, ended, ready_seq) = {
+            let state = lock(&self.state);
+            (
+                state.last_position_ms,
+                state.duration_ms,
+                state.paused,
+                state.ready,
+                state.ended,
+                state.ready_seq,
+            )
+        };
+        ui.sync(position, duration, paused, ready && !ended);
+        let previous = self.control_bar.borrow_mut().replace(ui);
+        drop(previous);
+        self.overlay_seq.set(ready_seq);
+        log_line("tv-native-player: control bar mapped above the video surface");
+        Ok(())
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_activity(&self) {
+        if let Some(ui) = self.overlay_ui() {
+            ui.note_activity();
+        }
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_tick(&self) {
+        if let Some(ui) = self.overlay_ui() {
+            ui.tick();
+        }
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_toggle_pause(&self) {
+        self.toggle_pause();
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_stop(&self) {
+        self.stop_from_local();
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_seek_fraction(&self, fraction: f32) {
+        if let Some(ui) = self.overlay_ui() {
+            ui.note_activity();
+            if let Some(target) = ui.fraction_target(fraction) {
+                self.seek(target);
+            }
+        }
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_key_press(&self, text: &str) {
+        let Some(ui) = self.overlay_ui() else {
+            return;
+        };
+        if let Some(action) = ui.key_press(text) {
+            self.overlay_action(action);
+        }
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_key_release(&self, text: &str) {
+        if let Some(ui) = self.overlay_ui() {
+            ui.key_release(text);
+        }
+    }
+
+    #[cfg(feature = "player-overlay")]
+    fn overlay_action(&self, action: OverlayAction) {
+        if let Some(ui) = self.overlay_ui() {
+            ui.note_activity();
+        }
+        match action {
+            OverlayAction::Stop => self.stop_from_local(),
+            OverlayAction::TogglePause => self.toggle_pause(),
+            OverlayAction::SeekBackward
+            | OverlayAction::SeekForward
+            | OverlayAction::SeekToStart
+            | OverlayAction::SeekToEnd => {
+                let (position, duration) = {
+                    let state = lock(&self.state);
+                    (state.last_position_ms, state.duration_ms)
+                };
+                if let Some(target) = overlay::seek_target(action, position, duration) {
+                    self.seek(target);
+                }
+            }
+        }
+    }
+
+    /// Drive the control-bar phase: wait for the first `ready` while the
+    /// normal glib loop runs, then map the overlay and let Slint own the event
+    /// loop, pumping the glib context from a timer so bus messages, commands
+    /// and position snapshots keep flowing.
+    #[cfg(feature = "player-overlay")]
+    fn run_overlay(self: &Rc<Self>) -> OverlayPhase {
+        let ready_state = Arc::clone(&self.state);
+        let main_loop = self.main_loop.clone();
+        let probe_done = Rc::new(Cell::new(false));
+        let probe_flag = Rc::clone(&probe_done);
+        let mut ready_at: Option<Instant> = None;
+        let probe = glib::timeout_add_local(COMMAND_POLL_INTERVAL, move || {
+            if !lock(&ready_state).ready {
+                return glib::ControlFlow::Continue;
+            }
+            let since_ready = *ready_at.get_or_insert_with(Instant::now);
+            if since_ready.elapsed() < OVERLAY_MAP_DELAY {
+                return glib::ControlFlow::Continue;
+            }
+            probe_flag.set(true);
+            main_loop.quit();
+            glib::ControlFlow::Break
+        });
+
+        self.main_loop.run();
+        if !probe_done.get() {
+            probe.remove();
+        }
+        if self.stopped.get() {
+            return OverlayPhase::Finished;
+        }
+        let (ready, ended) = {
+            let state = lock(&self.state);
+            (state.ready, state.ended)
+        };
+        if !ready || ended {
+            return OverlayPhase::Finished;
+        }
+        if let Err(error) = self.install_overlay() {
+            log_line(&format!(
+                "tv-native-player: control bar unavailable: {error}"
+            ));
+            emit(&PlayerEvent::Degraded {
+                code: "overlay_unavailable".to_string(),
+                message: Some(
+                    "control bar window unavailable; keyboard controls stay active".to_string(),
+                ),
+            });
+            return OverlayPhase::Unavailable;
+        }
+
+        let context = glib::MainContext::ref_thread_default();
+        let pump = slint::Timer::default();
+        pump.start(
+            slint::TimerMode::Repeated,
+            OVERLAY_PUMP_INTERVAL,
+            move || {
+                // Dispatches the bus watch, the 100 ms command poll and the
+                // position timer without blocking the Slint event loop.
+                let _ = context.iteration(false);
+            },
+        );
+        let result = slint::run_event_loop();
+        pump.stop();
+        self.close_overlay();
+        if let Err(error) = result {
+            log_line(&format!(
+                "tv-native-player: control bar event loop failed: {error}"
+            ));
+            return OverlayPhase::Unavailable;
+        }
+        if self.stopped.get() || lock(&self.state).ended {
+            OverlayPhase::Finished
+        } else {
+            log_line("tv-native-player: control bar event loop ended; using evdev controls");
+            OverlayPhase::Unavailable
+        }
     }
 }
 

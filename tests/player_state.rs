@@ -1169,3 +1169,139 @@ fn invalid_session_capacity_is_rejected() {
         }
     );
 }
+
+/// Pure control-bar policy: labels, seek mapping, visibility and keys. These
+/// run in the headless gate and never touch GStreamer, Slint or Wayland.
+mod overlay_policy {
+    use std::time::Duration;
+
+    use tv_client::player::MAX_POSITION_MS;
+    use tv_client::player::controls;
+    use tv_client::player::overlay::{
+        AUTO_HIDE, OverlayAction, OverlayState, UNKNOWN_TIME, format_time, fraction_from_x,
+        map_key, position_from_fraction, position_from_x, progress, remaining_time, seek_target,
+        window_enabled_from_env,
+    };
+
+    fn at(milliseconds: u64) -> Duration {
+        Duration::from_millis(milliseconds)
+    }
+
+    #[test]
+    fn labels_are_compact_and_bounded() {
+        assert_eq!(format_time(0), "0:00");
+        assert_eq!(format_time(59_999), "0:59");
+        assert_eq!(format_time(3_600_000), "1:00:00");
+        assert_eq!(format_time(MAX_POSITION_MS), "24:00:00");
+        assert_eq!(remaining_time(30_000, Some(90_000)), "-1:00");
+        assert_eq!(remaining_time(90_000, None), UNKNOWN_TIME);
+        assert!((progress(30_000, Some(90_000)) - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(progress(30_000, None), 0.0);
+    }
+
+    #[test]
+    fn pointer_and_keyboard_seeks_share_one_mapping() {
+        assert_eq!(position_from_x(0.0, 1280.0, Some(600_000)), Some(0));
+        assert_eq!(position_from_x(640.0, 1280.0, Some(600_000)), Some(300_000));
+        assert_eq!(
+            position_from_x(2000.0, 1280.0, Some(600_000)),
+            Some(600_000)
+        );
+        assert_eq!(fraction_from_x(-20.0, 1280.0), 0.0);
+        assert_eq!(position_from_fraction(0.25, 600_000), 150_000);
+        assert_eq!(position_from_fraction(2.0, 600_000), 600_000);
+        assert_eq!(
+            seek_target(OverlayAction::SeekForward, 590_000, Some(600_000)),
+            Some(600_000)
+        );
+        assert_eq!(
+            seek_target(OverlayAction::SeekBackward, 5_000, Some(600_000)),
+            Some(0)
+        );
+        assert_eq!(
+            seek_target(OverlayAction::SeekForward, 0, None),
+            Some(controls::SEEK_STEP_MS)
+        );
+        assert_eq!(
+            seek_target(OverlayAction::SeekToStart, 5_000, None),
+            Some(0)
+        );
+        assert_eq!(
+            seek_target(OverlayAction::SeekToEnd, 5_000, Some(600_000)),
+            Some(600_000)
+        );
+        assert_eq!(seek_target(OverlayAction::SeekToEnd, 5_000, None), None);
+    }
+
+    #[test]
+    fn bar_shows_on_activity_and_hides_after_three_seconds() {
+        let mut state = OverlayState::new(at(0));
+        assert!(state.visible());
+        assert!(state.tick(at(AUTO_HIDE.as_millis() as u64)));
+        assert!(!state.visible());
+        state.note_activity(at(10_000));
+        assert!(state.visible());
+        assert_eq!(
+            state.key_press("\u{f703}", at(10_100)),
+            Some(OverlayAction::SeekForward)
+        );
+        assert!(state.tick(at(13_100)));
+        assert!(!state.tick(at(13_200)));
+    }
+
+    #[test]
+    fn paused_playback_keeps_the_bar_visible() {
+        let mut state = OverlayState::new(at(0));
+        state.set_paused(true, at(0));
+        assert!(!state.tick(at(60_000)));
+        assert!(state.visible());
+        state.set_paused(false, at(60_100));
+        assert!(!state.tick(at(62_500)));
+        assert!(state.tick(at(63_100)));
+    }
+
+    #[test]
+    fn keys_map_to_bounded_actions_once_per_press() {
+        assert_eq!(map_key("\u{001b}"), Some(OverlayAction::Stop));
+        assert_eq!(map_key("\u{0020}"), Some(OverlayAction::TogglePause));
+        assert_eq!(map_key("\u{f702}"), Some(OverlayAction::SeekBackward));
+        assert_eq!(map_key("\u{f703}"), Some(OverlayAction::SeekForward));
+        assert_eq!(map_key("\u{f729}"), Some(OverlayAction::SeekToStart));
+        assert_eq!(map_key("\u{f72b}"), Some(OverlayAction::SeekToEnd));
+        assert_eq!(map_key("x"), None);
+        assert_eq!(map_key("esc"), None);
+
+        let mut state = OverlayState::new(at(0));
+        assert_eq!(
+            state.key_press("\u{0020}", at(10)),
+            Some(OverlayAction::TogglePause)
+        );
+        // Kernel/Wayland repeat: held keys never fire twice.
+        assert_eq!(state.key_press("\u{0020}", at(20)), None);
+        state.key_release("\u{0020}");
+        assert_eq!(
+            state.key_press("\u{0020}", at(30)),
+            Some(OverlayAction::TogglePause)
+        );
+    }
+
+    #[test]
+    fn deactivation_hides_the_bar_and_ignores_late_activity() {
+        let mut state = OverlayState::new(at(0));
+        state.deactivate();
+        assert!(!state.visible());
+        assert!(!state.active());
+        state.note_activity(at(100));
+        assert!(!state.visible());
+        assert!(!state.tick(at(10_000)));
+    }
+
+    #[test]
+    fn the_window_switch_is_on_by_default_and_can_be_turned_off() {
+        assert!(window_enabled_from_env(None));
+        assert!(window_enabled_from_env(Some("on")));
+        assert!(!window_enabled_from_env(Some("off")));
+        assert!(!window_enabled_from_env(Some(" 0 ")));
+        assert!(!window_enabled_from_env(Some("false")));
+    }
+}

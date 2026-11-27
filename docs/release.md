@@ -78,6 +78,7 @@ the SBOM: no credentials, config or state.
 | R9 | Two-hour soak | 2 h of repeated playback has stable RSS/FD counts, no leaked mpv sockets and no orphan children | **NOT RUN** |
 | R10 | Rollback | Rollback selects the previous release atomically, preserves config/state bytes and restarts the kiosk | **NOT RUN** |
 | R11 | Crash backoff and tty2 recovery | Repeated kiosk exits back off to 60 s; tty2 allows local recovery without rebooting | **NOT RUN** |
+| R12 | Control-bar overlay (C017) | Transparent bar above video, smooth 720p30, pointer show/hide and seek, keyboard controls with no double-fire, clean stop | **NOT RUN** |
 
 ## R0: artifact build and verification
 
@@ -269,11 +270,52 @@ says `audio sink fallback to fakesink`, HDMI was absent or busy. Any result
 from the list above remains **NOT RUN** until it is recorded here with
 evidence.
 
-HDMI-CEC remote keys still travel through the parent's CEC bridge; mouse
-control is not implemented on the waylandsink surface. Both are limitations,
-not verified features. The opt-in `textoverlay` bin inserts a `videoconvert`
-copy per frame and made 0.1.2 video a slideshow on the Pi 3B; 0.1.3 defaults
-to the plain `waylandsink` path and keeps keyboard controls.
+HDMI-CEC remote keys still travel through the parent's CEC bridge. With the
+`player-overlay` feature the child maps a transparent Slint control bar above
+the video surface, so the mouse and keyboard reach that window instead of the
+inert waylandsink surface; `TV_PLAYER_OVERLAY_WINDOW=off` disables it without
+a rebuild and leaves evdev as the only input path. Both the window mapping and
+input arbitration are **NOT RUN** on hardware. The opt-in `textoverlay` bin
+inserts a `videoconvert` copy per frame and made 0.1.2 video a slideshow on the
+Pi 3B; 0.1.3 defaults to the plain `waylandsink` path and keeps keyboard
+controls. The control bar does not use `textoverlay`.
+
+## R12: control-bar overlay on Cage (C017, next-release candidate)
+
+Build with `native-ui,gstreamer-player,player-overlay` and install the release.
+The overlay is a second, fully transparent top-level window created by
+`tv-native-player` after waylandsink reports `ready`; Cage stacks the last
+mapped window on top and gives it keyboard/pointer input.
+
+- **NOT RUN** — the bar is transparent (video visible through it) and sits
+  above the video; it appears only after playback is ready.
+- **NOT RUN** — 720p30 stays smooth with the bar visible (no `videoconvert` /
+  `textoverlay` element in the pipeline; verify with the `sink:` value in the
+  `ready` line and `GST_DEBUG=3` if needed).
+- **NOT RUN** — pointer movement reveals the bar, 3 s of inactivity hides it,
+  and clicking or dragging the seek track seeks once per gesture.
+- **NOT RUN** — Space pauses/resumes, Left/Right seek 10 s, Home/End jump,
+  Esc/Back stops and the launcher returns with no `tv-native-player` process.
+- **NOT RUN** — `TV_PLAYER_OVERLAY_WINDOW=off` restores the evdev-only path.
+- **NOT RUN** — audio-sink fallback recreates the video surface; the bar is
+  remapped above it and stays usable.
+
+Suggested evidence commands (run as `tvkiosk` in the Cage session; the child
+logs to the journal):
+
+```sh
+id -nG tvkiosk
+journalctl -b -t tv-native-player -n 60 --no-pager
+# Expected: "control bar mapped above the video surface"
+pgrep -a tv-native-player        # before and after Esc
+systemctl --user show-environment | grep -E 'WAYLAND_DISPLAY|XDG_RUNTIME_DIR'
+```
+
+If the window cannot be created, the child emits `degraded` with
+`code=overlay_unavailable` and keeps the evdev controls; record that instead of
+inferring a working bar. Transparent-window support depends on the compositor
+accepting an ARGB surface; on Cage 0.3.1 with `WLR_RENDERER=gles2` this is the
+expected path, but it is unverified here.
 
 ## R3: pairing and cloud control
 
@@ -487,6 +529,7 @@ Status: **NOT RUN**.
 | R9 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R10 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R11 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R12 | `<name>` | `<date>` | NOT RUN | `<link>` |
 
 A row may be marked PASS only with its evidence filled in. The accepted C010
 YouTube gate is 720p30 under Cage/GLES; 1080p30 remains unsupported on the

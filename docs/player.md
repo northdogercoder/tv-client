@@ -4,12 +4,15 @@ The TV client does not render media in the UI process. A supervised child
 process, `tv-native-player`, owns the GStreamer pipeline, the Wayland surface
 and the audio sink. The parent keeps policy and state; the child only executes
 validated playback requests. This isolates decoder or driver failures from the
-UI and gives the video surface an independent fullscreen window.
+UI and gives the video surface an independent fullscreen window. With the
+`player-overlay` feature the child also owns the transparent control-bar
+window, which is the only way to put interactive controls above its own video
+surface without a per-frame video filter.
 
-The child is built only with the `gstreamer-player` feature. The parent-side
-protocol, state machine and supervision code in `src/player/` are always
-compiled, so `--no-default-features` and the headless gate never link
-GStreamer.
+The child is built only with the `gstreamer-player` feature; `player-overlay`
+implies it and additionally links Slint. The parent-side protocol, state
+machine and supervision code in `src/player/` are always compiled, so
+`--no-default-features` and the headless gate never link GStreamer or Slint.
 
 ## Process model
 
@@ -166,8 +169,9 @@ ignored. The optional `textoverlay` hint updates on pause/seek/volume. Without
 the `input` group the child reports `input_unavailable` with `permission
 denied`; with the default OSD off, that status is available in the child event
 log rather than on screen. HDMI-CEC presses continue to arrive through the
-parent's CEC bridge; mouse control is not implemented because the waylandsink
-surface has no widgets.
+parent's CEC bridge. With `player-overlay`, the control-bar window is the
+primary pointer/keyboard owner; evdev stays as the fallback and still owns
+Up/Down volume. See the next section.
 
 `playbin3` selects the decoder by rank. On the Raspberry Pi 3B, the installed
 `v4l2h264dec` has rank `primary + 1` (257), above software decoders, and is
@@ -179,6 +183,75 @@ the selected audio sink label, bounded to 120 bytes.
 The child does not fabricate a decoder name when none was observed. On a host
 without `v4l2h264dec` the reported decoder will be whichever factory GStreamer
 actually selected (for example `avdec_h264`).
+
+## Control-bar overlay (C017)
+
+The `player-overlay` feature compiles `ui/player_overlay.slint` into
+`tv-native-player` and maps a second, fully transparent full-screen window
+after the video surface. It is not a video filter: the pipeline still contains
+only `waylandsink`, so no `videoconvert`/`textoverlay` copy is inserted and
+720p30 costs the same as before. `TV_PLAYER_OVERLAY=on` still means the old
+opt-in `textoverlay` hint and stays off; the window is controlled by the
+compile-time feature and can be disabled at runtime with
+`TV_PLAYER_OVERLAY_WINDOW=off` (also `0`/`false`/`no`).
+
+Window model and the assumptions that must hold on the target:
+
+- **Mapping order.** The window is created only after the first `ready` event,
+  which the pipeline emits after waylandsink prerolled the first buffer, so
+  waylandsink's surface already exists. A short bounded delay
+  (`OVERLAY_MAP_DELAY`, 250 ms) runs in the normal glib loop before the window
+  is shown. Cage's documented kiosk behaviour is that a newly mapped
+  maximized window is placed on top of the previous one and takes all input
+  until it is closed, so the overlay is the top surface.
+- **Transparency.** The Slint window uses `background: transparent` and
+  `no-frame: true`. Slint's winit backend requests a transparent window; on
+  Wayland winit clears the surface's opaque region, and the FemtoVG renderer
+  selects an EGL config with alpha when the compositor offers one and clears
+  the window to alpha 0. Only the bottom bar paints; the rest of the surface
+  is composited over the video. This relies on the compositor accepting an
+  ARGB/top-level surface, which Cage 0.3.1 with `WLR_RENDERER=gles2` does.
+  It is **not verified on hardware in this change**; see `release.md` R12.
+- **Focus arbitration.** The child never lets two input paths act on one
+  press. The Slint `FocusScope` reports focus through `keyboard-focus`; while
+  the overlay owns focus the evdev reader drops Esc/Space/Left/Right (and the
+  other overlay-mapped keys), and the overlay callbacks handle them. Up/Down
+  volume remains on evdev because the bar has no volume control. If the window
+  cannot be created, or focus is lost/never granted, the evdev path is the
+  only owner and behaves exactly as before. A missing `input` permission is
+  not reported as `input_unavailable` when the window is enabled, because the
+  window is a complete input path; if the window also fails, the child emits
+  `overlay_unavailable` instead.
+- **State.** The bar is driven by the existing `position`/`duration` snapshot
+  and the pipeline's paused state. It updates on the same 500 ms cadence as
+  the protocol (plus immediate updates on pause/seek), never with its own
+  poller. Paused playback keeps the bar visible; while playing, pointer or
+  key activity shows it and 3 s of inactivity hides it.
+- **Controls.** The bar has Play/Pause, Back (which sends `stopped` and exits),
+  elapsed and remaining labels, and a seek track. A click or drag commits one
+  seek on release. Keyboard: Space pauses/resumes, Left/Right seek 10 s,
+  Home/End jump, Esc/Back stops, handled once per press (held keys are
+  ignored until release). Mouse movement anywhere reveals the bar; the full
+  surface is the hit target for that, while the buttons and track keep
+  bounded, at-least-48-logical-pixel hit areas.
+- **Lifecycle.** On stop and stdin EOF the bar is deactivated and the window is
+  dropped after the Slint loop exits; on end-of-stream or a pipeline error the
+  bar is hidden immediately and the normal supervisor stop tears the child
+  down. If an audio-sink fallback re-prerolls the pipeline, the new
+  waylandsink surface would otherwise map above the old window; the child
+  creates a fresh window and drops the old one only after the new one is
+  shown, so the Slint loop never has zero windows and the bar is on top
+  again.
+- **Scheduling.** Before `ready`, the normal glib main loop runs. After the
+  bar is mapped, Slint owns the main-thread event loop and a 16 ms Slint timer
+  pumps `glib::MainContext::iteration(false)`, so the bus watch, the 100 ms
+  command poll and the 500 ms position timer keep running without a second
+  thread or an unbounded loop. If the Slint loop fails or ends while playback
+  is still active, the child drops the window, logs the fallback and returns
+  to the glib/evdev path.
+
+Hardware verification (transparency, z-order, focus and 720p30 smoothness with
+the bar visible) is **NOT RUN**; `release.md` R12 lists the exact commands.
 
 ## Authentication and headers
 

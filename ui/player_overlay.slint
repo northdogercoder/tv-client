@@ -1,0 +1,250 @@
+// Copyright (C) 2026 the tv-client authors.
+// SPDX-License-Identifier: GPL-3.0-only
+
+// Transparent full-screen control surface for native video. It is mapped by
+// tv-native-player *after* waylandsink's surface, which is what places it on
+// top of the video in Cage. Nothing here touches a video frame: only the small
+// bar and its labels are painted, and the rest of the surface stays fully
+// transparent so the compositor blends it over the video.
+//
+// keyboard-focus mirrors FocusScope focus. The child uses it to decide whether
+// the overlay or the evdev fallback owns a key press; both must never act on
+// the same physical press.
+
+export component PlayerOverlay inherits Window {
+    title: "tv-native-player overlay";
+    no-frame: true;
+    full-screen: true;
+    width: 1920px;
+    height: 1080px;
+    preferred-width: 1920px;
+    preferred-height: 1080px;
+    // A translucent Window background is what makes the whole surface ARGB:
+    // the renderer clears it to alpha 0 and the compositor blends the video
+    // underneath. An opaque background would cover the video.
+    background: transparent;
+
+    in property <bool> bar-visible: true;
+    in property <string> elapsed-text: "0:00";
+    in property <string> remaining-text: "--:--";
+    in property <float> progress: 0.0;
+    in property <bool> paused: false;
+
+    // Pointer activity anywhere in the window shows the bar.
+    callback activity();
+    // Periodic visibility check while the window exists.
+    callback tick();
+    callback toggle-pause();
+    callback stop();
+    // Committed seek fraction in 0.0..=1.0, sent once per click or drag.
+    callback seek-fraction(float);
+    callback key-pressed(string);
+    callback key-released(string);
+    callback keyboard-focus(bool);
+
+    property <length> base: Math.min(root.width * 9 / 16, root.height);
+    property <length> bar-height: root.base / 5;
+    property <length> button-height: Math.max(root.base / 11, 48px);
+    property <bool> dragging: false;
+    property <float> drag-fraction: 0.0;
+    property <float> track-fraction: root.dragging ? root.drag-fraction : root.progress;
+
+    forward-focus: key-handler;
+
+    key-handler := FocusScope {
+        key-pressed(event) => {
+            root.activity();
+            root.key-pressed(event.text);
+            accept
+        }
+        key-released(event) => {
+            root.key-released(event.text);
+            accept
+        }
+        focus-gained(reason) => {
+            root.keyboard-focus(true);
+        }
+        focus-lost(reason) => {
+            root.keyboard-focus(false);
+        }
+    }
+
+    Timer {
+        interval: 250ms;
+        running: true;
+        triggered() => {
+            root.tick();
+        }
+    }
+
+    // Lowest layer: catches pointer motion so a hidden bar can reappear. The
+    // bar and its buttons are declared later and therefore hit-test first.
+    window-input := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.move || event.kind == PointerEventKind.down) {
+                root.activity();
+            }
+        }
+    }
+
+    if root.bar-visible : Rectangle {
+        y: root.height - root.bar-height;
+        width: root.width;
+        height: root.bar-height;
+        background: #0b0e13e6;
+        border-width: 1px;
+        border-color: #2c3642;
+
+        VerticalLayout {
+            padding-left: root.base / 32;
+            padding-right: root.base / 32;
+            padding-top: root.base / 60;
+            padding-bottom: root.base / 60;
+            spacing: root.base / 120;
+
+            HorizontalLayout {
+                spacing: root.base / 40;
+
+                Text {
+                    width: root.base / 5;
+                    height: root.button-height;
+                    text: root.elapsed-text;
+                    font-size: root.base / 26;
+                    font-weight: 700;
+                    color: #f4f7fb;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: root.button-height;
+                    background: transparent;
+
+                    // The rail is thinner than the hit area on purpose: the
+                    // touch target stays at least 48 logical pixels high.
+                    Rectangle {
+                        y: (parent.height - root.base / 36) / 2;
+                        width: parent.width;
+                        height: root.base / 36;
+                        border-radius: root.base / 72;
+                        background: #151c25;
+
+                        Rectangle {
+                            width: parent.width * root.track-fraction;
+                            height: parent.height;
+                            border-radius: parent.height / 2;
+                            background: #1f6feb;
+                        }
+                    }
+
+                    seek-touch := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        pointer-event(event) => {
+                            if (event.button != PointerEventButton.left) {
+                                return;
+                            }
+                            if (event.kind == PointerEventKind.down) {
+                                root.activity();
+                                root.dragging = true;
+                                root.drag-fraction = Math.max(0.0, Math.min(1.0, seek-touch.mouse-x / seek-touch.width));
+                            } else if (event.kind == PointerEventKind.move && root.dragging) {
+                                root.activity();
+                                root.drag-fraction = Math.max(0.0, Math.min(1.0, seek-touch.mouse-x / seek-touch.width));
+                            } else if (event.kind == PointerEventKind.up && root.dragging) {
+                                root.dragging = false;
+                                root.activity();
+                                root.seek-fraction(root.drag-fraction);
+                            } else if (event.kind == PointerEventKind.cancel) {
+                                root.dragging = false;
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    width: root.base / 5;
+                    height: root.button-height;
+                    text: root.remaining-text;
+                    font-size: root.base / 26;
+                    font-weight: 700;
+                    color: #d7e2ef;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Rectangle {
+                    width: root.base / 5;
+                    height: root.button-height;
+                    border-radius: root.base / 120;
+                    background: #1f6feb;
+                    border-width: 2px;
+                    border-color: #a8c7ff;
+
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: root.paused ? "Play" : "Pause";
+                        font-size: root.base / 26;
+                        font-weight: 700;
+                        color: #f4f7fb;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            root.activity();
+                            root.toggle-pause();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: root.base / 6;
+                    height: root.button-height;
+                    border-radius: root.base / 120;
+                    background: #151c25;
+                    border-width: 1px;
+                    border-color: #2c3642;
+
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "Back";
+                        font-size: root.base / 26;
+                        color: #f4f7fb;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            root.activity();
+                            root.stop();
+                        }
+                    }
+                }
+            }
+
+            Text {
+                height: root.base / 28;
+                text: root.paused
+                    ? "Paused · Space resumes · Esc stops"
+                    : "Space pause · Left/Right seek 10 s · Home/End · Esc stops";
+                font-size: root.base / 38;
+                color: #8fa3b8;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}

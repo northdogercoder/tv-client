@@ -41,7 +41,8 @@ window adds `slint` and `slint-build` to `Cargo.toml`; after that change the
 committed `Cargo.lock` must be regenerated (`cargo update` or a normal resolve)
 before any `--locked` command can pass. Do not hand-edit the lockfile. The
 headless gate itself does not compile any Slint crate into the library or
-binary targets, and `build.rs` is a no-op without `native-ui`.
+binary targets, and `build.rs` only compiles UI roots when `native-ui` or
+`player-overlay` is requested.
 
 ## Architecture targets
 
@@ -54,7 +55,7 @@ and state machine compile, lint and pass their tests on the CI host.
 
 ## Platform features
 
-`Cargo.toml` declares five features:
+`Cargo.toml` declares six features:
 
 - `gstreamer-player` enables the optional `gstreamer`, `gstreamer-video` and
   `gstreamer-audio` dependencies, the `tv-native-player` binary and the
@@ -64,6 +65,11 @@ and state machine compile, lint and pass their tests on the CI host.
   of `ui/app.slint`, and the Slint window launched by `src/main.rs`. The pure
   `src/ui.rs` view model and `tests/ui_navigation.rs` are always compiled and
   contain no Slint types.
+- `player-overlay` implies `gstreamer-player`, enables `slint` and compiles
+  `ui/player_overlay.slint` into `tv-native-player`. The child then maps a
+  transparent control-bar window above waylandsink; it never adds a video
+  filter. Without this feature the child keeps the evdev-only controls and
+  does not link Slint. The release/kiosk build enables it.
 - The supervisor, protocol and `ProgramChildFactory` are always compiled and
   backend neutral, so a future libmpv/yt-dlp child can be added without
   touching the gated GStreamer code.
@@ -80,6 +86,12 @@ tests without GStreamer or Slint. Build the native player explicitly:
 
 ```sh
 cargo build --release --features gstreamer-player
+```
+
+Build the kiosk binaries with the transparent control bar:
+
+```sh
+cargo build --release --locked --features native-ui,gstreamer-player,player-overlay
 ```
 
 Build the Slint launcher explicitly:
@@ -337,7 +349,7 @@ The build installs the pinned Rust 1.100.0 toolchain from
 `jq`, then builds exactly:
 
 ```sh
-cargo build --release --locked --features native-ui,gstreamer-player
+cargo build --release --locked --features native-ui,gstreamer-player,player-overlay
 ```
 
 No cross-compilation from x86_64 is supported. The release artifact must be
@@ -367,7 +379,7 @@ two binaries at its root plus `NOTICES` and `SBOM.cdx.json`.
 `SHA256SUMS` is written next to it, and `NOTICES`/`SBOM.cdx.json` are also
 copied to `dist/` for direct inspection. `SBOM.cdx.json` is CycloneDX 1.5
 generated from
-`cargo metadata --locked --format-version 1 --features native-ui,gstreamer-player`;
+`cargo metadata --locked --format-version 1 --features native-ui,gstreamer-player,player-overlay`;
 `NOTICES` lists every crate with its declared license and the project's
 GPL-3.0-only notice. The release job also verifies that the tar root contains
 exactly those four entries and that `sha256sum -c SHA256SUMS` passes for the
@@ -380,7 +392,7 @@ action, not part of `scripts/check.sh`):
 sudo apt-get install --yes --no-install-recommends \
   libfontconfig1-dev libxkbcommon-dev pkg-config \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev jq
-cargo build --release --locked --features native-ui,gstreamer-player
+cargo build --release --locked --features native-ui,gstreamer-player,player-overlay
 scripts/package-release.sh --version "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
 ```
 
