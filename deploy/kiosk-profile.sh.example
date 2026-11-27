@@ -23,6 +23,8 @@ if [ "$(tty)" = /dev/tty1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
   # Cage's non-transparent fullscreen overlay and the choppy textoverlay path.
   export TV_PLAYER_BACKEND=mpv
   export TV_PLAYER_OVERLAY=off
+  # mpv names ALSA devices differently from GStreamer; hw:0,0 is invalid here.
+  export TV_PLAYER_AUDIO_DEVICE=alsa/hdmi:CARD=vc4hdmi,DEV=0
 
   # Login PAM must supply XDG_RUNTIME_DIR and an active seat. Do not guess a
   # runtime directory: a wrong one starts a broken Wayland session.

@@ -478,50 +478,8 @@ export component JellyfinPreviewScreen inherits Rectangle {
             height: parent.height;
             spacing: root.base / 32;
 
-            // Title, metadata and overview scroll inside their own area so a
-            // long synopsis can never push the action row out of the host.
-            ScrollView {
-                vertical-stretch: 1;
-
-                VerticalLayout {
-                    width: parent.width;
-                    padding-right: root.base / 24;
-                    spacing: root.base / 32;
-
-                    Text {
-                        text: root.title;
-                        font-size: root.base / 11;
-                        font-weight: 700;
-                        color: #f4f7fb;
-                        wrap: word-wrap;
-                    }
-
-                    Text {
-                        text: root.subtitle;
-                        font-size: root.base / 24;
-                        color: #9fc2ff;
-                        overflow: elide;
-                    }
-
-                    Text {
-                        text: root.overview;
-                        font-size: root.base / 30;
-                        color: #c6d2e1;
-                        wrap: word-wrap;
-                    }
-
-                    if root.planned : Text {
-                        text: root.planned-note;
-                        font-size: root.base / 28;
-                        font-weight: 700;
-                        color: #9fc2ff;
-                        wrap: word-wrap;
-                    }
-                }
-            }
-
-            // Fixed action row: always visible at 720p and 1080p. Audio and
-            // book items render a typed badge instead of a Play button.
+            // Actions are at the top of the metadata column so the fixed
+            // global footer can never cover them, regardless of TV overscan.
             HorizontalLayout {
                 height: root.base / 14;
                 spacing: root.base / 40;
@@ -572,6 +530,47 @@ export component JellyfinPreviewScreen inherits Rectangle {
                     font-size: root.base / 38;
                     color: #8fa3b8;
                     vertical-alignment: center;
+                }
+            }
+
+            // Title, metadata and overview scroll below the fixed action row.
+            ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    width: parent.width;
+                    padding-right: root.base / 24;
+                    spacing: root.base / 32;
+
+                    Text {
+                        text: root.title;
+                        font-size: root.base / 11;
+                        font-weight: 700;
+                        color: #f4f7fb;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: root.subtitle;
+                        font-size: root.base / 24;
+                        color: #9fc2ff;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: root.overview;
+                        font-size: root.base / 30;
+                        color: #c6d2e1;
+                        wrap: word-wrap;
+                    }
+
+                    if root.planned : Text {
+                        text: root.planned-note;
+                        font-size: root.base / 28;
+                        font-weight: 700;
+                        color: #9fc2ff;
+                        wrap: word-wrap;
+                    }
                 }
             }
         }

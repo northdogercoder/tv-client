@@ -436,10 +436,19 @@ fn build_arguments(socket: &Path, input_conf: &Path) -> Vec<String> {
     }
     if std::env::var("TV_AUDIO_SINK").as_deref() == Ok("alsa") {
         arguments.push("--ao=alsa".to_string());
-        if let Ok(device) = std::env::var("TV_AUDIO_DEVICE")
+        if let Ok(device) = std::env::var("TV_PLAYER_AUDIO_DEVICE")
             && !device.trim().is_empty()
         {
-            arguments.push(format!("--audio-device=alsa/{}", device.trim()));
+            arguments.push(format!("--audio-device={}", device.trim()));
+        } else if let Ok(device) = std::env::var("TV_AUDIO_DEVICE")
+            && !device.trim().is_empty()
+        {
+            // The kiosk profile sets the mpv-specific name; this fallback
+            // accepts a full mpv device string without inventing an invalid
+            // `alsa/hw:N,M` path.
+            if device.trim().starts_with("alsa/") || device.trim() == "auto" {
+                arguments.push(format!("--audio-device={}", device.trim()));
+            }
         }
     }
     arguments

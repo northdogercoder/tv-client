@@ -1158,6 +1158,7 @@ fn native_player_hardware_path_is_configured_and_documented_as_unrun() {
         "TV_AUDIO_DEVICE=hw:0,0",
         "TV_PLAYER_BACKEND=mpv",
         "TV_PLAYER_OVERLAY=off",
+        "TV_PLAYER_AUDIO_DEVICE=alsa/hdmi:CARD=vc4hdmi,DEV=0",
     ] {
         assert!(
             profile.contains(needle),
