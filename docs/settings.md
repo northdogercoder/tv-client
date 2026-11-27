@@ -100,27 +100,28 @@ Lifecycle:
    token through `Storage::write_credential` (0600, atomic). If cancellation
    lands while that exchange is finishing, the freshly written token is
    removed before the flow reports cancellation. Otherwise the worker shows
-   `Quick Connect succeeded; restarting to load Jellyfin`, keeps it visible
-   briefly, and requests a clean restart; it does not claim the library is
-   ready. The playback thread built its `JellyfinClient` at startup, found no
-   token and entered `run_unavailable`, so only the supervisor's restarted
-   process can build a signed-in client.
+   `Quick Connect succeeded; press Restart to load Jellyfin`; it does not
+   claim the library is ready. The playback thread built its `JellyfinClient`
+   at startup, found no token and entered `run_unavailable`, so only the
+   Restart row can rebuild a signed-in client. The settings worker stays alive
+   so a Save queued during sign-in is still written.
 5. On expiry or cancellation the code is cleared and a typed message is
    shown. Transient timeouts keep the code visible until the request's
    600 s approval window ends.
 6. `Jellyfin sign out` removes the stored local token before calling
    `Sessions/Logout`. The stored token and the in-memory session are
    distinct: the long-lived playback client on the `tv-playback` thread keeps
-   its own authenticated session and cannot be told to forget it. The bounded
-   revocation attempt also clears the cached artwork. After local cleanup
-   succeeds, every outcome shows a notice, keeps it visible briefly and
-   requests a clean restart so that in-memory client is dropped and the
-   supervisor rebuilds the app signed out:
-   - success shows `Signed out of Jellyfin; restarting the app`;
+   its own authenticated session and cannot be told to forget it. After local
+   token cleanup succeeds, every outcome shows a notice and leaves the
+   Settings worker alive; press Restart to drop the in-memory client and let
+   the supervisor rebuild signed out. A timed-out or failed revocation can
+   leave the cached artwork and the server session until that restart; the
+   local token is already gone:
+   - success shows `Signed out of Jellyfin; press Restart to apply`;
    - a revocation timeout shows `Jellyfin sign-out timed out; local token
-     cleared, restarting the app`;
+     cleared; press Restart to finish signing out`;
    - a failed revocation shows the typed error followed by
-     `; local token cleared, restarting the app`.
+     `; local token cleared; press Restart to finish signing out`.
 
    If local cleanup itself fails (`JellyfinSignOutError::Storage`), nothing
    was removed, so the signed-in row is kept,

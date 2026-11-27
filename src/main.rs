@@ -1246,32 +1246,26 @@ enum QuickConnectStep {
     Retry,
 }
 
-/// Settings notice shown briefly before the process exits for the supervisor.
+/// Settings notice asking the operator to apply a restart.
 #[cfg(feature = "native-ui")]
 enum RestartNotice {
     Info(String),
     Error(String),
 }
 
-/// Show a notice, let the Slint loop paint it, then exit cleanly.
+/// Show the restart notice without exiting the worker.
 ///
 /// The playback thread builds its Jellyfin client once at startup, and a
-/// client that started without a token is parked in `run_unavailable`. Only a
-/// process restart drops that in-memory session and lets the supervisor build
-/// a client with the stored token (or without one after sign-out).
+/// client that started without a token is parked in `run_unavailable`. Only
+/// the settings Restart row can rebuild that client. The worker stays alive so
+/// a Save queued during Quick Connect or sign-out is still processed; the
+/// notice tells the operator to apply the restart.
 #[cfg(feature = "native-ui")]
-async fn restart_with_notice(ui: &tv_client::ui::UiHandle, notice: RestartNotice) {
-    use std::time::Duration;
-
+fn show_restart_notice(ui: &tv_client::ui::UiHandle, notice: RestartNotice) {
     match notice {
         RestartNotice::Info(message) => ui.set_settings_message(message),
         RestartNotice::Error(message) => ui.set_settings_error(message),
     }
-    // The worker posts UI updates onto the Slint event loop; the short pause
-    // keeps the notice visible before `request_restart` quits that loop.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    tracing::info!("restarting to rebuild the Jellyfin session");
-    ui.request_restart();
 }
 
 /// Settings worker: configuration writes and Jellyfin sign-in.
@@ -1367,14 +1361,12 @@ async fn run_settings(
                             Ok(()) => {
                                 ui.set_jellyfin_user(None);
                                 ui.clear_quick_connect_code();
-                                restart_with_notice(
+                                show_restart_notice(
                                     &ui,
                                     RestartNotice::Info(
-                                        "Signed out of Jellyfin; restarting the app".to_string(),
+                                        "Signed out of Jellyfin; press Restart to apply".to_string(),
                                     ),
-                                )
-                                .await;
-                                break;
+                                );
                             }
                             Err(JellyfinSignOutError::Storage) => {
                                 // Local cleanup failed, so the stored token may
@@ -1386,28 +1378,24 @@ async fn run_settings(
                             Err(JellyfinSignOutError::Timeout) => {
                                 ui.set_jellyfin_user(None);
                                 ui.clear_quick_connect_code();
-                                restart_with_notice(
+                                show_restart_notice(
                                     &ui,
                                     RestartNotice::Error(
-                                        "Jellyfin sign-out timed out; local token cleared, restarting the app"
+                                        "Jellyfin sign-out timed out; local token cleared; press Restart to finish signing out"
                                             .to_string(),
                                     ),
-                                )
-                                .await;
-                                break;
+                                );
                             }
                             Err(JellyfinSignOutError::Revoke(error)) => {
                                 ui.set_jellyfin_user(None);
                                 ui.clear_quick_connect_code();
-                                restart_with_notice(
+                                show_restart_notice(
                                     &ui,
                                     RestartNotice::Error(format!(
-                                        "{}; local token cleared, restarting the app",
+                                        "{}; local token cleared; press Restart to finish signing out",
                                         jellyfin_error_text(&error)
                                     )),
-                                )
-                                .await;
-                                break;
+                                );
                             }
                         }
                     }
@@ -1452,15 +1440,13 @@ async fn run_settings(
                             // `run_unavailable` without a token at startup, so
                             // the library is not usable until the supervisor
                             // rebuilds the process with the stored token.
-                            restart_with_notice(
+                            show_restart_notice(
                                 &ui,
                                 RestartNotice::Info(
-                                    "Quick Connect succeeded; restarting to load Jellyfin"
+                                    "Quick Connect succeeded; press Restart to load Jellyfin"
                                         .to_string(),
                                 ),
-                            )
-                            .await;
-                            break;
+                            );
                         }
                     }
                     QuickConnectStep::Expired => {
