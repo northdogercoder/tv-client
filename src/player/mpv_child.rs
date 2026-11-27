@@ -431,8 +431,13 @@ fn build_arguments(socket: &Path, input_conf: &Path) -> Vec<String> {
         "--osc=yes".to_string(),
         "--osd-level=1".to_string(),
         "--input-default-bindings=yes".to_string(),
-        "--vo=gpu".to_string(),
-        "--gpu-context=wayland".to_string(),
+        format!(
+            "--vo={}",
+            std::env::var("TV_PLAYER_VO")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "dmabuf-wayland".to_string())
+        ),
         format!("--input-ipc-server={}", socket.display()),
         format!("--input-conf={}", input_conf.display()),
     ];
