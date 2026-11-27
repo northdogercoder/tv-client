@@ -2,8 +2,9 @@
 //!
 //! This mode exists because Cage's xdg-shell surfaces cannot composite the
 //! Slint transparent control window reliably. mpv owns one window, renders its
-//! native OSC (mouse show/hide, seek, elapsed/remaining, play/pause) and thus
-//! needs no video filter and no second full-screen surface.
+//! native OSC (seek, elapsed/remaining, play/pause) only while paused; the
+//! OSD is hidden during playback because compositing it over 1080p video
+//! causes visible lag on the Pi. No video filter or second surface is used.
 //!
 //! The URL and every authentication header travel only through mpv's private
 //! JSON IPC socket. They are never placed in argv, the environment or logs.
@@ -194,22 +195,13 @@ impl MpvSession {
         write_input_conf(&input_conf)?;
         let arguments = build_arguments(&socket, &input_conf);
 
-        // URL-free diagnosis only: mpv expands these properties into a line
-        // per frame. The relay redacts any URL/header token before the line
-        // reaches the world-readable status file.
         let mut child = Command::new("mpv")
             .args(&arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|_| "mpv is not available")?;
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::Builder::new()
-                .name("mpv-status".to_string())
-                .spawn(move || relay_status(stderr))
-                .map_err(|_| "mpv status relay failed")?;
-        }
 
         let deadline = Instant::now() + START_TIMEOUT;
         let stream = loop {
@@ -442,9 +434,8 @@ DOWN add volume -5
 fn build_arguments(socket: &Path, input_conf: &Path) -> Vec<String> {
     let mut arguments = vec![
         "--no-config".to_string(),
-        "--terminal=yes".to_string(),
-        "--msg-level=all=error".to_string(),
-        "--term-status-msg=hwdec=${hwdec-current} codec=${video-codec} size=${width}x${height} fps=${container-fps} vfps=${estimated-vf-fps} drops=${drop-frame-count} mistimed=${mistimed-frame-count} vo-drops=${vo-drop-frame-count} audio=${audio-codec} sync=${video-sync}".to_string(),
+        "--no-terminal".to_string(),
+        "--really-quiet".to_string(),
         "--idle=yes".to_string(),
         "--force-window=yes".to_string(),
         "--fullscreen=yes".to_string(),
@@ -497,47 +488,6 @@ fn build_arguments(socket: &Path, input_conf: &Path) -> Vec<String> {
     arguments
 }
 
-fn relay_status(stderr: std::process::ChildStderr) {
-    let Ok(file) = std::fs::File::create("/tmp/tv-client-mpv-status.log") else {
-        return;
-    };
-    let mut file = std::io::BufWriter::new(file);
-    let reader = std::io::BufReader::new(stderr);
-    for line in reader.lines().map_while(Result::ok).take(4000) {
-        let redacted = redact_status_line(&line);
-        if writeln!(file, "{redacted}").is_err() {
-            return;
-        }
-        let _ = file.flush();
-    }
-}
-
-fn redact_status_line(line: &str) -> String {
-    let mut out = String::new();
-    let mut redact_next = false;
-    for token in line.split_whitespace() {
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        let lower = token.to_ascii_lowercase();
-        if redact_next {
-            out.push_str("[redacted]");
-            redact_next = false;
-        } else if token.contains("http://")
-            || token.contains("https://")
-            || lower.contains("bearer")
-            || lower.contains("api_key")
-            || lower.contains("authorization")
-        {
-            out.push_str("[redacted]");
-            redact_next = lower.contains("bearer") || lower.contains("authorization");
-        } else {
-            out.push_str(token);
-        }
-    }
-    out.chars().take(512).collect()
-}
-
 fn monotonic_nonce() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -560,15 +510,6 @@ mod tests {
                 .all(|argument| !argument.contains("http") && !argument.contains("Bearer"))
         );
         assert!(arguments.iter().any(|argument| argument == "--osc=yes"));
-    }
-
-    #[test]
-    fn status_relay_redacts_urls_and_authorization_values() {
-        let line = "error https://jellyfin.example/stream?api_key=secret Bearer secret2";
-        let redacted = redact_status_line(line);
-        assert!(!redacted.contains("secret"));
-        assert!(!redacted.contains("https://"));
-        assert!(redacted.contains("[redacted]"));
     }
 
     #[test]

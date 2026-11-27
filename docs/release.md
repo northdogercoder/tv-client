@@ -280,27 +280,27 @@ inserts a `videoconvert` copy per frame and made 0.1.2 video a slideshow on the
 Pi 3B; 0.1.3 defaults to the plain `waylandsink` path and keeps keyboard
 controls. The control bar does not use `textoverlay`.
 
-## R12: mpv OSC control bar on Cage (0.1.5 runtime)
+## R12: mpv dmabuf playback and pause-only OSC (0.1.10–0.1.12 runtime)
 
-The kiosk profile sets `TV_PLAYER_BACKEND=mpv`; the release no longer builds
-`player-overlay`. mpv owns video and its native OSC in one surface, avoiding
-the transparent Slint overlay that produced artifacts on 0.1.4. URL/header
-values travel only over private IPC. **No Pi test has been run for this
-runtime yet.** The old experimental overlay remains a `player-overlay` feature
+The kiosk profile sets `TV_PLAYER_BACKEND=mpv`; the release does not build
+`player-overlay`. mpv owns video in one surface using `dmabuf-wayland` with
+`v4l2m2m` hardware decode, avoiding both the transparent Slint overlay that
+produced artifacts on 0.1.4 and the choppy GPU-shader path. URL/header values
+travel only over private IPC. The native OSC is hidden during playback and
+shown only while paused; the OSD compositing itself caused visible lag over
+1080p video. The old experimental overlay remains a `player-overlay` feature
 only, not a release feature.
 
-- **NOT RUN** — the bar is transparent (video visible through it) and sits
-  above the video; it appears only after playback is ready.
-- **NOT RUN** — 720p30 stays smooth with the bar visible (no `videoconvert` /
-  `textoverlay` element in the pipeline; verify with the `sink:` value in the
-  `ready` line and `GST_DEBUG=3` if needed).
-- **NOT RUN** — pointer movement reveals the bar, 3 s of inactivity hides it,
-  and clicking or dragging the seek track seeks once per gesture.
-- **NOT RUN** — Space pauses/resumes, Left/Right seek 10 s, Home/End jump,
-  Esc/Back stops and the launcher returns with no `tv-native-player` process.
-- **NOT RUN** — `TV_PLAYER_OVERLAY_WINDOW=off` restores the evdev-only path.
-- **NOT RUN** — audio-sink fallback recreates the video surface; the bar is
-  remapped above it and stays usable.
+- **OBSERVED (operator TV, 2026-11-27)** — 0.1.10 (`dmabuf-wayland` +
+  `v4l2m2m`) played Jellyfin video smoothly with HDMI audio after the app was
+  restarted. An earlier “black screen” report was the old 0.1.9 process still
+  running, not a decode failure.
+- **OBSERVED (operator TV, 2026-11-27)** — 0.1.12 kept playback smooth; the
+  native bar appeared only while paused and disappeared on resume. Keyboard/
+  remote pause/seek/volume/back remained usable.
+- **NOT RUN** — long soak with repeated pause/resume and OSD activity.
+- **NOT RUN** — `TV_PLAYER_VO=gpu` fallback after the dmabuf change.
+- **NOT RUN** — audio-device hotplug while the mpv child owns the surface.
 
 Suggested evidence commands (run as `tvkiosk` in the Cage session; the child
 logs to the journal):

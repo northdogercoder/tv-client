@@ -7,14 +7,17 @@ requests. This isolates decoder or driver failures from the UI and gives the
 video surface an independent fullscreen window.
 
 The kiosk profile sets `TV_PLAYER_BACKEND=mpv`. In that mode the child starts
-mpv 0.40 with its native OSC, so mouse movement reveals seek/time/play controls
-in the same window as the video; there is no transparent overlay and no
-per-frame video filter. The URL and Jellyfin headers are sent only through
-mpv's private JSON IPC, never argv or environment. The mpv child keeps the same
-JSON-lines player protocol and emits real positions, end/stop events and clean
-reaping. The older `player-overlay` Slint window is experimental and is **not**
-shipped in releases: Cage did not composite its transparent full-screen surface
-correctly and produced video artifacts on 0.1.4.
+mpv 0.40 with native OSC, but the bar is shown **only while paused**. Hiding it
+during playback avoids the OSD compositing lag seen over 1080p video on the Pi;
+keyboard and CEC pause/seek/volume/back remain active while video plays. The
+default video path is `dmabuf-wayland` with `v4l2m2m` (zero-copy Pi hardware
+decode); `TV_PLAYER_VO` and `TV_PLAYER_HWDEC` can override both for diagnosis.
+The URL and Jellyfin headers are sent only through mpv's private JSON IPC, never
+argv or environment. The mpv child keeps the same JSON-lines player protocol
+and emits real positions, end/stop events and clean reaping. The older
+`player-overlay` Slint window is experimental and is **not** shipped in
+releases: Cage did not composite its transparent full-screen surface correctly
+and produced video artifacts on 0.1.4.
 
 The child is built only with the `gstreamer-player` feature; `player-overlay`
 implies it and additionally links Slint. The parent-side protocol, state

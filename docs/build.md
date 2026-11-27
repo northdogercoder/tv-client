@@ -69,7 +69,9 @@ and state machine compile, lint and pass their tests on the CI host.
   `ui/player_overlay.slint` into `tv-native-player`. The transparent-window
   path is experimental and failed Cage compositing (video artifacts); the
   release does **not** enable it. The kiosk instead sets
-  `TV_PLAYER_BACKEND=mpv`, which uses mpv's native OSC in one video surface.
+  `TV_PLAYER_BACKEND=mpv`, which uses dmabuf-wayland/v4l2m2m video and mpv's
+  native OSC in one surface; the OSC is hidden during playback and shown while
+  paused to avoid OSD compositing lag on the Pi.
 - The supervisor, protocol and `ProgramChildFactory` are always compiled and
   backend neutral, so a future libmpv/yt-dlp child can be added without
   touching the gated GStreamer code.
@@ -225,8 +227,10 @@ sets the defaults:
 |---|---|---|
 | `TV_AUDIO_SINK` | `alsa` | Prefer `alsasink`; unset keeps `autoaudiosink` for desktop use. |
 | `TV_AUDIO_DEVICE` | `hw:0,0` | ALSA device of `card 0: vc4hdmi`; the child also tries the ALSA `default` device, `autoaudiosink`, and finally a silent `fakesink`. |
-| `TV_PLAYER_BACKEND` | `mpv` | Selects the mpv OSC-backed video surface; unset uses the GStreamer child. |
-| `TV_PLAYER_OVERLAY` | unset (off) | `on`/`1` enables the optional `textoverlay` hint; the default avoids its per-frame `videoconvert` cost on the Pi. |
+| `TV_PLAYER_BACKEND` | `mpv` | Selects the mpv-backed video surface; unset uses the GStreamer child. |
+| `TV_PLAYER_VO` | `dmabuf-wayland` | mpv video output; `gpu` is available for diagnosis but was choppy with the OSC visible on the Pi. |
+| `TV_PLAYER_HWDEC` | `v4l2m2m` for dmabuf-wayland | Overrides mpv hwdec; the default is pinned because auto-safe probed an unusable VDPAU path first. |
+| `TV_PLAYER_OVERLAY` | unset (off) | `on`/`1` enables the optional GStreamer `textoverlay` hint; the default avoids its per-frame `videoconvert` cost on the Pi. |
 
 The overlay needs the Pango-backed `textoverlay` from
 `gstreamer1.0-plugins-base`; the child probes it at startup and falls back to a
