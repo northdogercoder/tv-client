@@ -432,7 +432,10 @@ fn build_arguments(socket: &Path, input_conf: &Path) -> Vec<String> {
             arguments.push(format!("--hwdec={}", hwdec.trim()));
         }
     } else {
-        arguments.push("--hwdec=v4l2m2m".to_string());
+        // Match the proven YouTube mpv path. Forcing v4l2m2m on this GPU/OSC
+        // combination produced choppy Jellyfin video; auto-safe lets mpv pick
+        // the working decoder for the actual codec.
+        arguments.push("--hwdec=auto-safe".to_string());
     }
     if std::env::var("TV_AUDIO_SINK").as_deref() == Ok("alsa") {
         arguments.push("--ao=alsa".to_string());
