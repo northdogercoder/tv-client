@@ -237,3 +237,11 @@ Wayland session) on 2026-11-26.
 
 This is a basic launch/fullscreen proof, not a soak or a physical-input
 acceptance run.
+
+Direct Cage/GLES revalidation on the installed **0.1.0** kiosk (2026-11-27):
+after lightdm was stopped and tty1 activated, `tvkiosk` ran Cage with the
+1920×1080 UI and the operator confirmed it visible on the TV. The bottom status
+strip is clipped by the TV's overscan and Settings is still read-only; both are
+addressed by C014 (safe-area setting and editable settings/Quick Connect). No
+screenshot was captured because the tvkiosk Wayland socket is not readable by
+the admin SSH user.

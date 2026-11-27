@@ -229,6 +229,9 @@ push and local decisions, expired pairing, bounded queue overflow, token
 redaction and offline behavior against a local mock server and a recording HTTP
 transport.
 
-These are contract tests. No test claims a live staging enrollment, pairing or
-remote control session. Live validation requires an operator-minted one-use
-token and is recorded separately when available.
+Live staging validation was run on 2026-11-27 with an operator-minted one-use
+token: the device enrolled, `/v1/device/config` returned `youtube:true`, and
+`/v1/youtube/search` returned 200 with 10 items plus a valid second page;
+unauthenticated search returned 401. The temporary test device was revoked
+afterward. Pairing and a remote browser session were not run (no phone
+approval); those remain contract/mock evidence only.

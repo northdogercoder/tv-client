@@ -19,6 +19,10 @@ switch, typed failures and explicit update policy are part of the contract.
 
 ## Search contract
 
+Live staging check 2026-11-27: device bearer returned 10 items plus a valid
+continuation, and unauthenticated search returned 401. The temporary device was
+revoked.
+
 ```text
 GET https://<control-server>/v1/youtube/search?q=<query>&page_token=<opaque>
 Authorization: Bearer <device token>
