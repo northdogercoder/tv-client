@@ -209,6 +209,49 @@ and no `tv-native-player` or `mpv` process remains.
 Evidence: `<photo or notes: library loaded / playback / audio>`,
 `<paste pgrep before and after teardown>`. Status: **NOT RUN**.
 
+## Native player controls and HDMI audio (next-release candidate)
+
+0.1.1 shipped a native player that preferred `pulsesink`. The kiosk account
+`tvkiosk` has no PulseAudio or PipeWire server, so video was smooth while HDMI
+audio stayed silent; the fullscreen `waylandsink` surface also had no controls
+and swallowed keyboard/remote input. This change is not installed on the lab
+target and **no Pi hardware was used**:
+
+- **NOT RUN** — HDMI audio through `alsasink device=hw:0,0` as `tvkiosk`.
+- **NOT RUN** — ALSA fallback order (`hw:0,0`, then `default`, then
+  `autoaudiosink`, then a silent `fakesink`) with the HDMI card absent.
+- **NOT RUN** — `textoverlay` hint visible over video at 720p30.
+- **NOT RUN** — evdev Esc/Back stop, Space pause, Left/Right seek and Up/Down
+  volume; no child process remains and the launcher returns without a failure.
+- **NOT RUN** — the `input_unavailable` degraded state when `tvkiosk` is not in
+  the `input` group.
+- **NOT RUN** — `usermod --append --groups input tvkiosk` on an existing host
+  and the reinstall that applies the new profile.
+
+A generic desktop keeps `autoaudiosink`; only `deploy/kiosk-profile.sh.example`
+sets `TV_AUDIO_SINK=alsa` and `TV_AUDIO_DEVICE=hw:0,0`. Set
+`TV_PLAYER_OVERLAY=off` to disable the hint. Verification commands to run on
+the Pi after reinstall (status **NOT RUN**):
+
+```sh
+id -nG tvkiosk
+sudo -u tvkiosk aplay -D hw:0,0 /usr/share/sounds/alsa/Front_Center.wav
+journalctl -b -t tv-native-player -n 40 --no-pager
+```
+
+Expected journal lines include `audio plan alsasink device=hw:0,0 > ...;
+selected alsasink device=hw:0,0` and `evdev controls available`. If the log
+says `permission denied`, the `input` group membership was not applied; if it
+says `audio sink fallback to fakesink`, HDMI was absent or busy. Any result
+from the list above remains **NOT RUN** until it is recorded here with
+evidence.
+
+HDMI-CEC remote keys still travel through the parent's CEC bridge; mouse
+control is not implemented on the waylandsink surface. Both are limitations,
+not verified features. The `textoverlay` bin inserts a `videoconvert` copy per
+frame, so 720p30 frame headroom with the hint enabled is **NOT RUN** on
+hardware; `TV_PLAYER_OVERLAY=off` falls back to the plain `waylandsink` path.
+
 ## R3: pairing and cloud control
 
 Only if `cloud_enabled = true` and the control server is enrolled.

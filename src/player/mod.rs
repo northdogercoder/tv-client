@@ -215,6 +215,19 @@ pub enum PlayerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subtitle: Option<String>,
     },
+    /// The user stopped playback from the native surface (`Back`/`Esc`).
+    ///
+    /// The child exits after this event, so the parent returns to the launcher
+    /// instead of reporting an intentional exit as a playback failure.
+    Stopped,
+    /// A capability is missing or degraded but playback continues.
+    Degraded {
+        /// Bounded machine-readable reason, for example `input_unavailable`.
+        code: String,
+        /// Optional bounded detail; the child never sends secrets here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
 impl PlayerEvent {
@@ -241,7 +254,16 @@ impl PlayerEvent {
                 *audio = audio.take().map(|value| sanitize_name(&value));
                 *subtitle = subtitle.take().map(|value| sanitize_name(&value));
             }
-            Self::Position { .. } | Self::Ended => {}
+            Self::Degraded { code, message } => {
+                if sanitize_code(code).is_none() {
+                    *code = "degraded".to_string();
+                }
+                *message = message
+                    .take()
+                    .map(|value| redact_text(&value))
+                    .filter(|value| !value.is_empty());
+            }
+            Self::Position { .. } | Self::Ended | Self::Stopped => {}
         }
         self
     }
@@ -278,6 +300,12 @@ impl fmt::Debug for PlayerEvent {
                 .field("video", video)
                 .field("audio", audio)
                 .field("subtitle", subtitle)
+                .finish(),
+            Self::Stopped => formatter.write_str("Stopped"),
+            Self::Degraded { code, message } => formatter
+                .debug_struct("Degraded")
+                .field("code", code)
+                .field("message", &message.as_deref().map(redact_text))
                 .finish(),
         }
     }
@@ -407,6 +435,12 @@ pub enum PlayerNotification {
     Ended { generation: u64 },
     /// Playback failed; `code` is bounded and `message` is redacted.
     Failed {
+        generation: u64,
+        code: String,
+        message: Option<String>,
+    },
+    /// A capability is degraded but playback continues.
+    Degraded {
         generation: u64,
         code: String,
         message: Option<String>,
@@ -587,6 +621,13 @@ pub fn decode_event_line(line: &str) -> Result<PlayerEvent, PlayerError> {
                 });
             }
         }
+        PlayerEvent::Degraded { code, .. } => {
+            if sanitize_code(code).is_none() {
+                return Err(PlayerError::InvalidEvent {
+                    field: "degraded code",
+                });
+            }
+        }
         PlayerEvent::Position {
             position_ms,
             duration_ms,
@@ -602,7 +643,10 @@ pub fn decode_event_line(line: &str) -> Result<PlayerEvent, PlayerError> {
                 });
             }
         }
-        PlayerEvent::Ready { .. } | PlayerEvent::Ended | PlayerEvent::Tracks { .. } => {}
+        PlayerEvent::Ready { .. }
+        | PlayerEvent::Ended
+        | PlayerEvent::Stopped
+        | PlayerEvent::Tracks { .. } => {}
     }
     Ok(event.sanitized())
 }
@@ -1088,6 +1132,34 @@ impl PlayerMachine {
                     subtitle,
                 }])
             }
+            PlayerEvent::Stopped => {
+                // The child exits after this event. An idempotent stop (for
+                // example the parent already sent `Stop`) changes nothing.
+                if self.state == PlayerState::Idle {
+                    return Ok(Vec::new());
+                }
+                self.state = PlayerState::Idle;
+                self.position_ms = None;
+                self.duration_ms = None;
+                self.tracks = Tracks::default();
+                self.decoder = None;
+                self.sink = None;
+                self.failure = None;
+                Ok(vec![PlayerNotification::State {
+                    generation,
+                    state: PlayerState::Idle,
+                }])
+            }
+            PlayerEvent::Degraded { code, message } => {
+                if self.state == PlayerState::Idle {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![PlayerNotification::Degraded {
+                    generation,
+                    code: sanitize_code(&code).unwrap_or_else(|| "degraded".to_string()),
+                    message,
+                }])
+            }
         }
     }
 
@@ -1272,7 +1344,7 @@ impl SupervisedChild {
         let (control, mut control_rx) = mpsc::channel::<ChildCommand>(8);
         let (message_tx, messages) = mpsc::channel::<ChildMessage>(16);
         let reader_tx = message_tx.clone();
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(stdout);
             loop {
                 match read_bounded_line(&mut reader).await {
@@ -1312,6 +1384,11 @@ impl SupervisedChild {
                         }
                     },
                     status = child.wait() => {
+                        // The stdout reader must finish first: a child that
+                        // wrote `stopped` just before exiting may still have
+                        // that line buffered, and the supervisor must not see
+                        // the exit before the intentional-stop event.
+                        let _ = reader.await;
                         let _ = message_tx.send(ChildMessage::Exited(status.into())).await;
                         return;
                     }
@@ -1321,6 +1398,7 @@ impl SupervisedChild {
                 let _ = child.start_kill();
             }
             let status = child.wait().await;
+            let _ = reader.await;
             let _ = message_tx.send(ChildMessage::Exited(status.into())).await;
         });
         Ok(Self { control, messages })
@@ -1829,5 +1907,384 @@ impl PlayerSession {
             Ok(result) => result,
             Err(_) => Err(PlayerError::Closed),
         }
+    }
+}
+
+/// Planning for the native player's audio output.
+///
+/// The GStreamer child is a separate process. On the kiosk it runs as
+/// `tvkiosk`, which has no PulseAudio or PipeWire session, so a `pulsesink`
+/// builds successfully and then fails (or stays silent) when it opens. The
+/// kiosk profile therefore selects the direct ALSA path with
+/// `TV_AUDIO_SINK=alsa` and `TV_AUDIO_DEVICE=hw:0,0`; a generic desktop keeps
+/// the auto-detected sink. The ordered candidate list is pure so every choice
+/// is testable without GStreamer or an audio device.
+pub mod audio {
+    /// Environment variable selecting the preferred audio sink.
+    ///
+    /// Accepted values are `alsa`, `pulse` and `auto` (the default when unset).
+    pub const SINK_ENV: &str = "TV_AUDIO_SINK";
+    /// Environment variable selecting the ALSA device for `TV_AUDIO_SINK=alsa`.
+    pub const DEVICE_ENV: &str = "TV_AUDIO_DEVICE";
+    /// ALSA device of the Raspberry Pi `vc4hdmi` card (`card 0: vc4hdmi`).
+    pub const DEFAULT_HDMI_DEVICE: &str = "hw:0,0";
+    /// Fallback ALSA device resolved by the host's ALSA configuration.
+    pub const DEFAULT_ALSA_DEVICE: &str = "default";
+    /// Last-resort sink that keeps video playing when no audio device opens.
+    pub const SILENT_FACTORY: &str = "fakesink";
+    /// Largest accepted ALSA device string.
+    pub const MAX_DEVICE_BYTES: usize = 64;
+
+    /// One GStreamer audio sink and its optional ALSA device.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AudioSinkSpec {
+        factory: &'static str,
+        device: Option<String>,
+    }
+
+    impl AudioSinkSpec {
+        /// GStreamer factory name, for example `alsasink`.
+        #[must_use]
+        pub fn factory(&self) -> &'static str {
+            self.factory
+        }
+
+        /// ALSA device when the factory takes one.
+        #[must_use]
+        pub fn device(&self) -> Option<&str> {
+            self.device.as_deref()
+        }
+
+        /// Bounded, secret-free description for logs and the `ready` event.
+        #[must_use]
+        pub fn label(&self) -> String {
+            match self.device.as_deref() {
+                Some(device) => format!("{} device={device}", self.factory),
+                None => self.factory.to_string(),
+            }
+        }
+    }
+
+    /// Ordered audio-sink candidates and the configuration warning, if any.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AudioSinkPlan {
+        candidates: Vec<AudioSinkSpec>,
+        warning: Option<&'static str>,
+    }
+
+    impl AudioSinkPlan {
+        /// Read the plan from `TV_AUDIO_SINK` and `TV_AUDIO_DEVICE`.
+        #[must_use]
+        pub fn from_env() -> Self {
+            Self::from_values(
+                env_value(SINK_ENV).as_deref(),
+                env_value(DEVICE_ENV).as_deref(),
+            )
+        }
+
+        /// Build a plan from explicit values; `None` means unset.
+        #[must_use]
+        pub fn from_values(sink: Option<&str>, device: Option<&str>) -> Self {
+            let requested = sink
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_ascii_lowercase);
+            let device = device.and_then(sanitize_device);
+            match requested.as_deref() {
+                None | Some("auto") => Self {
+                    candidates: vec![auto_sink()],
+                    warning: None,
+                },
+                Some("alsa") => {
+                    let mut candidates = Vec::with_capacity(3);
+                    candidates.push(AudioSinkSpec {
+                        factory: "alsasink",
+                        device: Some(device.unwrap_or_else(|| DEFAULT_HDMI_DEVICE.to_string())),
+                    });
+                    if candidates[0].device.as_deref() != Some(DEFAULT_ALSA_DEVICE) {
+                        candidates.push(AudioSinkSpec {
+                            factory: "alsasink",
+                            device: Some(DEFAULT_ALSA_DEVICE.to_string()),
+                        });
+                    }
+                    candidates.push(auto_sink());
+                    Self {
+                        candidates,
+                        warning: None,
+                    }
+                }
+                Some("pulse") | Some("pulseaudio") => Self {
+                    candidates: vec![
+                        AudioSinkSpec {
+                            factory: "pulsesink",
+                            device: None,
+                        },
+                        auto_sink(),
+                    ],
+                    warning: None,
+                },
+                Some(_) => Self {
+                    candidates: vec![auto_sink()],
+                    warning: Some("unknown_audio_sink"),
+                },
+            }
+        }
+
+        /// Candidates in preference order.
+        #[must_use]
+        pub fn candidates(&self) -> &[AudioSinkSpec] {
+            &self.candidates
+        }
+
+        /// Bounded warning code when the environment value was not recognized.
+        #[must_use]
+        pub fn warning(&self) -> Option<&'static str> {
+            self.warning
+        }
+
+        /// One-line, secret-free summary for diagnostics.
+        #[must_use]
+        pub fn describe(&self) -> String {
+            let mut text = String::new();
+            for candidate in &self.candidates {
+                if !text.is_empty() {
+                    text.push_str(" > ");
+                }
+                text.push_str(&candidate.label());
+            }
+            text
+        }
+    }
+
+    /// Final fallback used by the child after every real audio sink failed.
+    #[must_use]
+    pub fn silent_fallback() -> AudioSinkSpec {
+        AudioSinkSpec {
+            factory: SILENT_FACTORY,
+            device: None,
+        }
+    }
+
+    /// Reject newlines, whitespace and control bytes in a device string.
+    #[must_use]
+    pub fn sanitize_device(value: &str) -> Option<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed.len() > MAX_DEVICE_BYTES {
+            return None;
+        }
+        let valid = trimmed.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b':' | b',' | b'-' | b'_' | b'=' | b'+' | b'.' | b'/')
+        });
+        valid.then(|| trimmed.to_string())
+    }
+
+    /// ALSA card number of `hw:N,D` or `plughw:N,D`.
+    #[must_use]
+    pub fn alsa_card(device: &str) -> Option<u32> {
+        let device = device.trim();
+        let rest = device
+            .strip_prefix("plughw:")
+            .or_else(|| device.strip_prefix("hw:"))?;
+        rest.split(',').next()?.parse::<u32>().ok()
+    }
+
+    fn auto_sink() -> AudioSinkSpec {
+        AudioSinkSpec {
+            factory: "autoaudiosink",
+            device: None,
+        }
+    }
+
+    fn env_value(name: &str) -> Option<String> {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+}
+
+/// Remote/keyboard mapping for the fullscreen native-player surface.
+///
+/// `waylandsink` owns a separate Wayland surface, so cage delivers keyboard
+/// events to that surface and the UI process cannot see them. The child reads
+/// Linux evdev key events directly instead of inventing a second window. This
+/// module is the pure, bounded mapping from evdev key codes to player actions,
+/// plus the status text of the on-screen `textoverlay` hint.
+pub mod controls {
+    use super::truncate_bytes;
+
+    /// EV_KEY events are the only ones mapped.
+    pub const EVDEV_KEY: u16 = 1;
+    /// Size of one Linux `input_event` structure on this pointer width.
+    #[cfg(target_pointer_width = "64")]
+    pub const EVDEV_EVENT_BYTES: usize = 24;
+    /// Size of one Linux `input_event` structure on 32-bit targets.
+    #[cfg(target_pointer_width = "32")]
+    pub const EVDEV_EVENT_BYTES: usize = 16;
+    /// evdev `KEY_ESC`.
+    pub const KEY_ESC: u16 = 1;
+    /// evdev `KEY_SPACE`.
+    pub const KEY_SPACE: u16 = 57;
+    /// evdev `KEY_UP`.
+    pub const KEY_UP: u16 = 103;
+    /// evdev `KEY_LEFT`.
+    pub const KEY_LEFT: u16 = 105;
+    /// evdev `KEY_RIGHT`.
+    pub const KEY_RIGHT: u16 = 106;
+    /// evdev `KEY_DOWN`.
+    pub const KEY_DOWN: u16 = 108;
+    /// evdev `KEY_VOLUMEDOWN`.
+    pub const KEY_VOLUMEDOWN: u16 = 114;
+    /// evdev `KEY_VOLUMEUP`.
+    pub const KEY_VOLUMEUP: u16 = 115;
+    /// evdev `KEY_STOP`.
+    pub const KEY_STOP: u16 = 128;
+    /// evdev `KEY_BACK` (remote Back).
+    pub const KEY_BACK: u16 = 158;
+    /// evdev `KEY_PLAYPAUSE`.
+    pub const KEY_PLAYPAUSE: u16 = 164;
+    /// evdev `KEY_REWIND`.
+    pub const KEY_REWIND: u16 = 168;
+    /// evdev `KEY_EXIT`.
+    pub const KEY_EXIT: u16 = 174;
+    /// evdev `KEY_FASTFORWARD`.
+    pub const KEY_FASTFORWARD: u16 = 208;
+    /// Seek distance for one Left/Right press.
+    pub const SEEK_STEP_MS: u64 = 10_000;
+    /// Volume change for one Up/Down press, in protocol units.
+    pub const VOLUME_STEP: u8 = 5;
+    /// Longest hint text handed to `textoverlay`.
+    pub const MAX_HINT_BYTES: usize = 240;
+    /// Key legend shown while evdev input is available.
+    pub const LEGEND: &str = "ESC stop   SPACE pause   LEFT/RIGHT seek 10s   UP/DOWN volume";
+    /// Legend shown when no input device could be opened.
+    pub const NO_INPUT_LEGEND: &str = "TV controls unavailable - check the input group";
+
+    /// One bounded action derived from a key press.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum KeyAction {
+        /// Stop playback and exit the child.
+        Stop,
+        /// Toggle between playing and paused.
+        TogglePause,
+        /// Seek backwards by [`SEEK_STEP_MS`].
+        SeekBackward,
+        /// Seek forwards by [`SEEK_STEP_MS`].
+        SeekForward,
+        /// Raise the volume by [`VOLUME_STEP`].
+        VolumeUp,
+        /// Lower the volume by [`VOLUME_STEP`].
+        VolumeDown,
+    }
+
+    /// Map one evdev key press to an action.
+    ///
+    /// Only `value == 1` (press) is accepted: releases and kernel repeats are
+    /// ignored so a held or noisy device cannot create an unbounded action
+    /// stream. Unknown codes are ignored, never executed.
+    #[must_use]
+    pub fn map_key(code: u16, value: i32) -> Option<KeyAction> {
+        if value != 1 {
+            return None;
+        }
+        Some(match code {
+            KEY_ESC | KEY_BACK | KEY_STOP | KEY_EXIT => KeyAction::Stop,
+            KEY_SPACE | KEY_PLAYPAUSE => KeyAction::TogglePause,
+            KEY_LEFT | KEY_REWIND => KeyAction::SeekBackward,
+            KEY_RIGHT | KEY_FASTFORWARD => KeyAction::SeekForward,
+            KEY_UP | KEY_VOLUMEUP => KeyAction::VolumeUp,
+            KEY_DOWN | KEY_VOLUMEDOWN => KeyAction::VolumeDown,
+            _ => return None,
+        })
+    }
+
+    /// Parse one Linux `input_event` buffer and map a key press.
+    #[must_use]
+    pub fn parse_evdev(bytes: &[u8]) -> Option<KeyAction> {
+        if bytes.len() != EVDEV_EVENT_BYTES {
+            return None;
+        }
+        let tail = &bytes[EVDEV_EVENT_BYTES - 8..];
+        let event_type = u16::from_ne_bytes([tail[0], tail[1]]);
+        if event_type != EVDEV_KEY {
+            return None;
+        }
+        let code = u16::from_ne_bytes([tail[2], tail[3]]);
+        let value = i32::from_ne_bytes([tail[4], tail[5], tail[6], tail[7]]);
+        map_key(code, value)
+    }
+
+    /// New absolute position for a seek action, clamped to the known duration.
+    #[must_use]
+    pub fn seek_target(position_ms: u64, duration_ms: Option<u64>, forward: bool) -> u64 {
+        let target = if forward {
+            position_ms.saturating_add(SEEK_STEP_MS)
+        } else {
+            position_ms.saturating_sub(SEEK_STEP_MS)
+        };
+        let target = duration_ms.map_or(target, |duration| target.min(duration));
+        target.min(super::MAX_POSITION_MS)
+    }
+
+    /// Volume after one step, clamped to the protocol range.
+    #[must_use]
+    pub fn volume_step(volume: u8, up: bool) -> u8 {
+        if up {
+            volume.saturating_add(VOLUME_STEP).min(super::MAX_VOLUME)
+        } else {
+            volume.saturating_sub(VOLUME_STEP)
+        }
+    }
+
+    /// Compose the `textoverlay` hint, bounded and free of control bytes.
+    #[must_use]
+    pub fn hint_text(controls_available: bool, status: &str) -> String {
+        let legend = if controls_available {
+            LEGEND
+        } else {
+            NO_INPUT_LEGEND
+        };
+        let status: String = status
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect();
+        let status = status.trim();
+        let text = if status.is_empty() {
+            legend.to_string()
+        } else {
+            format!("{legend}\n{status}")
+        };
+        truncate_bytes(&text, MAX_HINT_BYTES)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_process_tests {
+    use super::*;
+
+    /// Regression guard for the intentional-stop path: a child that writes one
+    /// final line and exits must have that line delivered before `Exited`, or
+    /// the supervisor reports a clean local stop as `child_exited`.
+    #[tokio::test]
+    async fn final_stdout_line_is_delivered_before_the_exit_notification() {
+        let mut command = tokio::process::Command::new("/bin/echo");
+        command.arg("{\"type\":\"stopped\"}");
+        let mut child = SupervisedChild::spawn_process(command)
+            .await
+            .expect("echo child starts");
+        let first = child.messages.recv().await.expect("first message");
+        match first {
+            ChildMessage::Line(line) => assert!(line.contains("stopped"), "line was {line:?}"),
+            other => panic!("expected the child line first, got {other:?}"),
+        }
+        let second = child.messages.recv().await.expect("second message");
+        assert!(matches!(second, ChildMessage::Exited(_)));
     }
 }

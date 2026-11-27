@@ -204,6 +204,29 @@ reboot. Use one compiler job (`CARGO_BUILD_JOBS=1`) and no debug info
 (`CARGO_PROFILE_DEV_DEBUG=0`) on the 1 GiB Pi 3B. These C002/C006 build notes
 are unchanged by the Slint window.
 
+### Native player audio and controls
+
+The native player opens audio through ALSA on the kiosk. The session profile
+sets the defaults:
+
+| Variable | Kiosk value | Meaning |
+|---|---|---|
+| `TV_AUDIO_SINK` | `alsa` | Prefer `alsasink`; unset keeps `autoaudiosink` for desktop use. |
+| `TV_AUDIO_DEVICE` | `hw:0,0` | ALSA device of `card 0: vc4hdmi`; the child also tries the ALSA `default` device, `autoaudiosink`, and finally a silent `fakesink`. |
+| `TV_PLAYER_OVERLAY` | unset (on) | `off`/`0` disables the `textoverlay` control hint. |
+
+The overlay needs the Pango-backed `textoverlay` from
+`gstreamer1.0-plugins-base`; the child probes it at startup and falls back to a
+plain `waylandsink` when the probe fails. The installer adds `tvkiosk` to the
+least-privilege `input` group so the child can read `/dev/input/event*` while
+its own waylandsink surface has keyboard focus. The target already installs
+`gstreamer1.0-plugins-base`; no extra build-time package is required.
+
+The ALSA HDMI path, the overlay, evdev controls and the `input` group change
+are **NOT RUN** on Raspberry Pi hardware in this change; only the
+feature-independent headless tests cover the pure sink plan and key mapping.
+See [`release.md`](release.md) for the operator steps.
+
 ## Dependencies
 
 The direct dependencies are:

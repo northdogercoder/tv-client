@@ -1137,3 +1137,46 @@ fn release_inventory_is_cyclonedx_and_lists_licenses() {
     assert!(notices.contains("GPL-3.0-only"));
     assert!(notices.contains("serde 1.0.0"));
 }
+
+#[test]
+fn native_player_hardware_path_is_configured_and_documented_as_unrun() {
+    let profile = read("deploy/kiosk-profile.sh.example");
+    for needle in ["TV_AUDIO_SINK=alsa", "TV_AUDIO_DEVICE=hw:0,0"] {
+        assert!(
+            profile.contains(needle),
+            "kiosk profile is missing {needle:?}"
+        );
+    }
+
+    let install = read("scripts/install-release.sh");
+    assert!(
+        install.contains("for group in input video render audio"),
+        "the installer must grant the least-privilege input group"
+    );
+
+    let build = read("docs/build.md");
+    for needle in [
+        "TV_AUDIO_SINK",
+        "TV_AUDIO_DEVICE",
+        "TV_PLAYER_OVERLAY",
+        "input",
+        "NOT RUN",
+    ] {
+        assert!(build.contains(needle), "build docs are missing {needle:?}");
+    }
+
+    let release = read("docs/release.md");
+    for needle in [
+        "Native player controls and HDMI audio",
+        "TV_AUDIO_SINK=alsa",
+        "TV_AUDIO_DEVICE=hw:0,0",
+        "`input` group",
+        "textoverlay",
+        "NOT RUN",
+    ] {
+        assert!(
+            release.contains(needle),
+            "release docs are missing {needle:?}"
+        );
+    }
+}

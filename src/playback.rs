@@ -973,6 +973,13 @@ impl PlaybackController {
                 updates
             }
             PlayerNotification::Ended { .. } => self.end_active(false, now, cancel).await,
+            PlayerNotification::Degraded { code, message, .. } => {
+                // Playback continues; surface the missing capability once as a
+                // bounded message instead of turning it into a failure.
+                vec![PlaybackUpdate::Message {
+                    text: degraded_message(&code, message.as_deref()),
+                }]
+            }
             PlayerNotification::Failed { code, message, .. } => {
                 let Some(active) = self.active.take() else {
                     return Vec::new();
@@ -1577,7 +1584,22 @@ fn notification_generation(notification: &PlayerNotification) -> Option<u64> {
         | PlayerNotification::Position { generation, .. }
         | PlayerNotification::Tracks { generation, .. }
         | PlayerNotification::Ended { generation }
-        | PlayerNotification::Failed { generation, .. } => Some(*generation),
+        | PlayerNotification::Failed { generation, .. }
+        | PlayerNotification::Degraded { generation, .. } => Some(*generation),
+    }
+}
+
+/// Human-readable, bounded text for a degraded player capability.
+fn degraded_message(code: &str, message: Option<&str>) -> String {
+    let base = match code {
+        "input_unavailable" => "TV controls unavailable: check the kiosk input group",
+        "overlay_unavailable" => "On-screen player controls unavailable",
+        "audio_unavailable" => "Audio device unavailable; video continues without sound",
+        _ => "Player capability degraded",
+    };
+    match message.filter(|detail| !detail.is_empty()) {
+        Some(detail) => format!("{base} ({detail})"),
+        None => base.to_string(),
     }
 }
 

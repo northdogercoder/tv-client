@@ -519,8 +519,12 @@ ensure_kiosk_user() {
   # getty --autologin does not need an account password. Locking it keeps
   # password logins and SSH password authentication unusable.
   run passwd -l "$TV_KIOSK_USER"
+  # `input` is the least-privilege group for reading /dev/input/event*; the
+  # fullscreen native player needs it to see keyboard/remote keys that the
+  # compositor delivers to its own waylandsink surface. `audio` is needed for
+  # the direct ALSA HDMI path (the kiosk has no PulseAudio/PipeWire session).
   local group
-  for group in video render audio; do
+  for group in input video render audio; do
     if getent group "$group" >/dev/null 2>&1; then
       run usermod --append --groups "$group" "$TV_KIOSK_USER"
     fi
