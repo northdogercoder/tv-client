@@ -714,21 +714,27 @@ async fn browse_query_is_parent_scoped_fielded_and_bounded() {
 
 #[test]
 fn browse_queries_map_each_library_collection_type() {
+    let all = [
+        "Movie",
+        "Episode",
+        "Video",
+        "MusicVideo",
+        "Audio",
+        "MusicAlbum",
+        "AudioBook",
+        "Book",
+    ];
     let cases: &[(Option<&str>, &[&str], &[&str])] = &[
         (Some("movies"), &["Movie", "Episode", "Video"], &["Video"]),
         (Some("tvshows"), &["Movie", "Episode", "Video"], &["Video"]),
-        (None, &["Movie", "Episode", "Video"], &["Video"]),
+        (None, &all, &[]),
         (Some("musicvideos"), &["MusicVideo"], &["Video"]),
-        (Some("MUSIC"), &["Audio", "MusicAlbum"], &[]),
-        (Some("audiobooks"), &["AudioBook"], &["Audio"]),
-        (Some("books"), &["Book"], &[]),
-        // Unknown collection types keep the video default rather than
-        // widening the query.
-        (
-            Some("playlists"),
-            &["Movie", "Episode", "Video"],
-            &["Video"],
-        ),
+        (Some("MUSIC"), &all, &[]),
+        (Some("audiobooks"), &all, &[]),
+        (Some("books"), &all, &[]),
+        // Unknown collection types get the broad query so a view with an
+        // omitted/renamed CollectionType still shows its media.
+        (Some("playlists"), &all, &[]),
     ];
 
     for (collection_type, item_types, media_types) in cases {
@@ -838,7 +844,7 @@ async fn music_library_browse_requests_audio_and_albums_without_a_video_filter()
             .get("IncludeItemTypes")
             .map(|value| decode(value))
             .as_deref(),
-        Some("Audio,MusicAlbum")
+        Some("Movie,Episode,Video,MusicVideo,Audio,MusicAlbum,AudioBook,Book")
     );
     assert!(
         !query.contains_key("MediaTypes"),

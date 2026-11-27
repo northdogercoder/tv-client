@@ -24,11 +24,17 @@ pub const MAX_LIBRARIES: usize = 32;
 
 const VIDEO_ITEM_TYPES: &[&str] = &BROWSE_INCLUDE_ITEM_TYPES;
 const MUSIC_VIDEO_ITEM_TYPES: &[&str] = &["MusicVideo"];
-const MUSIC_ITEM_TYPES: &[&str] = &["Audio", "MusicAlbum"];
-const AUDIOBOOK_ITEM_TYPES: &[&str] = &["AudioBook"];
-const BOOK_ITEM_TYPES: &[&str] = &["Book"];
+const ALL_ITEM_TYPES: &[&str] = &[
+    "Movie",
+    "Episode",
+    "Video",
+    "MusicVideo",
+    "Audio",
+    "MusicAlbum",
+    "AudioBook",
+    "Book",
+];
 const VIDEO_MEDIA_TYPES: &[&str] = &["Video"];
-const AUDIO_MEDIA_TYPES: &[&str] = &["Audio"];
 const ANY_MEDIA_TYPES: &[&str] = &[];
 
 /// Item and media types requested for one Jellyfin collection type.
@@ -47,10 +53,11 @@ pub fn browse_types(
         .as_str()
     {
         "musicvideos" => (MUSIC_VIDEO_ITEM_TYPES, VIDEO_MEDIA_TYPES),
-        "music" => (MUSIC_ITEM_TYPES, ANY_MEDIA_TYPES),
-        "audiobooks" => (AUDIOBOOK_ITEM_TYPES, AUDIO_MEDIA_TYPES),
-        "books" => (BOOK_ITEM_TYPES, ANY_MEDIA_TYPES),
-        _ => (VIDEO_ITEM_TYPES, VIDEO_MEDIA_TYPES),
+        "movies" | "tvshows" => (VIDEO_ITEM_TYPES, VIDEO_MEDIA_TYPES),
+        // Music, audiobooks, books and views whose server omits CollectionType
+        // need a broad item query. The preview classifies unsupported types and
+        // never fabricates a Play action.
+        _ => (ALL_ITEM_TYPES, ANY_MEDIA_TYPES),
     }
 }
 

@@ -1912,13 +1912,14 @@ async fn library_items_command_selects_item_and_media_types_per_collection() {
     };
     let mut fixture = fixture(handler, PlaybackConfig::default(), 60_000).await;
 
+    let all = "Movie,Episode,Video,MusicVideo,Audio,MusicAlbum,AudioBook,Book";
     let cases = [
         (Some("movies"), "Movie,Episode,Video", Some("Video")),
         (Some("musicvideos"), "MusicVideo", Some("Video")),
-        (Some("music"), "Audio,MusicAlbum", None),
-        (Some("audiobooks"), "AudioBook", Some("Audio")),
-        (Some("books"), "Book", None),
-        (None, "Movie,Episode,Video", Some("Video")),
+        (Some("music"), all, None),
+        (Some("audiobooks"), all, None),
+        (Some("books"), all, None),
+        (None, all, None),
     ];
     for (collection_type, _, _) in cases {
         let updates = fixture

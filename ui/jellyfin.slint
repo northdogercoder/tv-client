@@ -441,7 +441,8 @@ export component JellyfinPreviewScreen inherits Rectangle {
         padding-left: root.base / 20;
         padding-right: root.base / 20;
         padding-top: root.base / 24;
-        padding-bottom: root.base / 24;
+        // Keep the Play/Back row clear of the fixed footer and TV overscan.
+        padding-bottom: root.base / 9;
         spacing: root.base / 20;
 
         Rectangle {
