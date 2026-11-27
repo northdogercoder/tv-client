@@ -42,6 +42,7 @@ Commands are proposed greenfield gates, not previously executed on this repo. Th
 - `src/ui.rs`
 - `ui/`
 - `tests/airplay.rs`
+- `tests/cast_airplay.rs`
 - `docs/casting.md`
 
 **Out of scope**: sibling repository, protocol contract edits (coordinate separate reviewed change), plans index edits by executor, unrelated refactoring, production secrets, destructive infrastructure changes. If a required file is missing from scope, STOP and request a scope amendment. `Cargo.lock` changes only where in scope and justified.

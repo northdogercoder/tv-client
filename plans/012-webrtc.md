@@ -39,9 +39,12 @@ Commands are proposed greenfield gates, not previously executed on this repo. Th
 - `src/main.rs`
 - `src/cast/mod.rs`
 - `src/cast/webrtc.rs`
+- `src/cast/gst.rs`
 - `src/ui.rs`
 - `ui/`
+- `src/cloud/` (optional cast request/decision/signal transport only)
 - `tests/webrtc.rs`
+- `tests/cloud_cast.rs`
 - `docs/webrtc.md`
 
 **Out of scope**: sibling repository, protocol contract edits (coordinate separate reviewed change), plans index edits by executor, unrelated refactoring, production secrets, destructive infrastructure changes. If a required file is missing from scope, STOP and request a scope amendment. `Cargo.lock` changes only where in scope and justified.
