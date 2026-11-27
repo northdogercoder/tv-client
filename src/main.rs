@@ -193,9 +193,11 @@ fn route_command(command: &tv_client::ui::UiCommand) -> Option<RouteCommand> {
             UiBrowseCommand::LoadLibraries => PlaybackCommand::LoadJellyfinLibraries,
             UiBrowseCommand::LoadItems {
                 library_id,
+                collection_type,
                 start_index,
             } => PlaybackCommand::LoadJellyfinItems {
                 library_id: library_id.clone(),
+                collection_type: collection_type.clone(),
                 start_index: *start_index,
             },
             UiBrowseCommand::LoadArtwork {

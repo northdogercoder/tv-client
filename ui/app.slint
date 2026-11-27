@@ -86,6 +86,8 @@ export component AppWindow inherits Window {
     in-out property <string> jf-preview-overview;
     in-out property <int> jf-preview-focus: 0;
     in-out property <bool> jf-preview-playable: false;
+    in-out property <bool> jf-preview-planned: false;
+    in-out property <string> jf-preview-planned-note;
     in-out property <string> cast-state: "No receiver attached";
     in-out property <string> settings-version;
     in-out property <[SettingsRow]> settings-left;
@@ -345,6 +347,8 @@ export component AppWindow inherits Window {
                 overview: root.jf-preview-overview;
                 focus-index: root.jf-preview-focus;
                 play-enabled: root.jf-preview-playable;
+                planned: root.jf-preview-planned;
+                planned-note: root.jf-preview-planned-note;
                 action-activated(index) => {
                     root.jellyfin-preview-activated(index);
                 }

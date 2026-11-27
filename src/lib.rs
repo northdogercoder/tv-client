@@ -32,7 +32,8 @@ pub use input::{
 };
 pub use jellyfin::{
     ArtworkClass, BaseItem, BrowseItem, CachedArtwork, CancelHandle, CancelToken, ImageRequest,
-    JellyfinClient, JellyfinError, LibraryEntry, Page, QueryResult, Session, cancellation,
+    JellyfinClient, JellyfinError, LibraryEntry, Page, PreviewKind, QueryResult, Session,
+    cancellation,
 };
 pub use model::{Action, AppState, Effect, Event, InputOrigin, Mode, Source, StateError};
 pub use playback::{

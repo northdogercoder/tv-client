@@ -84,7 +84,7 @@ Reads are strictly typed with serde and use PascalCase Jellyfin fields.
 |---|---|---|
 | `views` | `GET /Users/{userId}/Views` | Top-level Movies, TV Shows, Music, Books, etc. |
 | `libraries` | `GET /Users/{userId}/Views` | Bounded `Vec<LibraryEntry>`: id, name, collection type (max 32) |
-| `browse` | `GET /Users/{userId}/Items` | One 24-item page below a library: `IncludeItemTypes=Movie,Episode,Video`, `MediaTypes=Video`, `Fields=UserData,ImageTags,Overview` |
+| `browse` | `GET /Users/{userId}/Items` | One 24-item page below a library; `collection_type` selects `IncludeItemTypes`/`MediaTypes` (video default `Movie,Episode,Video` + `Video`), always `Fields=UserData,ImageTags,Overview` |
 | `items` | `GET /Users/{userId}/Items` | Typed `ItemQuery`: parent, types, media types, recursion, search, sort, filters, fields |
 | `resume` | `GET /Users/{userId}/Items` | `Filters=IsResumable`, `MediaTypes=Video`, sorted by `DatePlayed` descending |
 | `latest` | `GET /Users/{userId}/Items/Latest` | Optional parent, bounded limit |
@@ -284,9 +284,39 @@ these values.
 
 Home's Jellyfin row now opens `JellyfinLibraries`, not the text YouTube library
 screen. The flow is libraries (4 columns) -> items (5-column poster grid) ->
-preview (large image plus Play/Back) -> the existing `PlayJellyfin` action.
-Escape and Back move one level; Home returns to the launcher. Focus is stored
-as an opaque identifier so a refresh keeps the same library or item selected.
+preview (large image plus Play/Back, or a typed planned badge for audio and
+books) -> the existing `PlayJellyfin` action for video items. Escape and Back
+move one level; Home returns to the launcher. Focus is stored as an opaque
+identifier so a refresh keeps the same library or item selected.
+
+Each library keeps the Jellyfin `CollectionType` in `LibraryEntry`. The UI
+forwards it in `UiBrowseCommand::LoadItems` / `PlaybackCommand::LoadJellyfinItems`
+so the parent-scoped query matches the library instead of always asking for
+video:
+
+| Collection type | `IncludeItemTypes` | `MediaTypes` | Preview action |
+|---|---|---|---|
+| `movies`, `tvshows`, missing/unknown | `Movie,Episode,Video` | `Video` | Play (`PlayJellyfin`) |
+| `musicvideos` | `MusicVideo` | `Video` | Play (`PlayJellyfin`) |
+| `music` | `Audio,MusicAlbum` | none (no video filter) | Player planned (C015) |
+| `audiobooks` | `AudioBook` | `Audio` | Player planned (C015) |
+| `books` | `Book` | none (no video filter) | Reader planned (C016) |
+
+Matching is exact and case-insensitive; any unrecognised collection type keeps
+the video default, so a hostile view name cannot widen the query. Every page is
+still 24 items and requests only `UserData,ImageTags,Overview`.
+
+The preview decides from the item's `Type`: `Movie`, `Episode`, `Video` and
+`MusicVideo` use the existing video player, while `Audio`, `MusicAlbum`,
+`AudioBook` and `Book` are browse-only in this build. Their preview focuses
+`Back`, shows a typed "Audio player planned (C015)" or "Book reader planned
+(C016)" note, and never emits `PlayJellyfin`; the dedicated players are C015
+(`plans/015-music-audiobooks.md`) and C016 (`plans/016-books.md`). A missing or
+unknown type is shown as `Unavailable` rather than being sent to the player.
+
+The preview keeps its action row inside the screen host at both 720p and 1080p:
+title, subtitle and overview scroll in the upper area while Play/Back stay
+pinned above the fixed global footer.
 
 The UI sends typed `UiBrowseCommand`s (`LoadLibraries`, `LoadItems`,
 `LoadArtwork`) through the router to the controller's existing
@@ -306,7 +336,10 @@ sign-out clear libraries, items, preview, image paths and the bridge cache.
 Known limits: the verified `/Users/{id}/Views` route is used with no
 `/UserViews` fallback; backdrops are not modelled, so the Primary image is used
 for posters and preview; and hardware image rendering (femtovg on the target
-TV) has **NOT RUN**.
+TV) has **NOT RUN**. Music, audiobooks and books are **browse and preview only**
+in this build: C015 will add the dedicated audio player and queue, and C016 the
+bounded EPUB/PDF/CBZ reader. No audio or book stream URL, download or reader is
+implemented here.
 
 ## Cancellation and failures
 

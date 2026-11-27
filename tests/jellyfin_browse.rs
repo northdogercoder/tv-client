@@ -93,6 +93,7 @@ fn home_jellyfin_opens_the_library_grid_and_enter_requests_a_parent_page() {
         open_items(&mut model),
         UiOutcome::Browse(UiBrowseCommand::LoadItems {
             library_id: "library-1".to_owned(),
+            collection_type: Some("movies".to_owned()),
             start_index: 0,
         })
     );
@@ -224,6 +225,7 @@ fn items_ready_requests_bounded_posters_and_more_is_an_explicit_page() {
         press(&mut model, Key::Enter, 0),
         UiOutcome::Browse(UiBrowseCommand::LoadItems {
             library_id: "library-1".to_owned(),
+            collection_type: Some("movies".to_owned()),
             start_index: 24,
         })
     );
@@ -313,6 +315,7 @@ fn items_failure_has_a_retry_target_for_the_same_page() {
         model.retry_jellyfin_items(),
         UiOutcome::Browse(UiBrowseCommand::LoadItems {
             library_id: "library-1".to_owned(),
+            collection_type: Some("movies".to_owned()),
             start_index: 0,
         })
     );
@@ -330,6 +333,7 @@ fn items_failure_has_a_retry_target_for_the_same_page() {
         press(&mut model, Key::Enter, 0),
         UiOutcome::Browse(UiBrowseCommand::LoadItems {
             library_id: "library-1".to_owned(),
+            collection_type: Some("movies".to_owned()),
             start_index: 24,
         })
     );
@@ -341,8 +345,46 @@ fn items_failure_has_a_retry_target_for_the_same_page() {
         model.retry_jellyfin_items(),
         UiOutcome::Browse(UiBrowseCommand::LoadItems {
             library_id: "library-1".to_owned(),
+            collection_type: Some("movies".to_owned()),
             start_index: 24,
         })
+    );
+}
+
+#[test]
+fn library_collection_type_is_forwarded_to_item_queries_and_retries() {
+    let mut model = UiModel::new();
+    model.set_home_focus(HomeRow::Jellyfin.index());
+    let _ = press(&mut model, Key::Enter, 0);
+    model.apply_browse_update(&BrowseUpdate::LibrariesReady {
+        libraries: vec![LibraryEntry {
+            id: "library-music".to_owned(),
+            name: "Music".to_owned(),
+            collection_type: Some("music".to_owned()),
+        }],
+    });
+
+    assert_eq!(
+        open_items(&mut model),
+        UiOutcome::Browse(UiBrowseCommand::LoadItems {
+            library_id: "library-music".to_owned(),
+            collection_type: Some("music".to_owned()),
+            start_index: 0,
+        })
+    );
+
+    model.apply_browse_update(&BrowseUpdate::ItemsFailed {
+        library_id: "library-music".to_owned(),
+        message: "upstream timeout".to_owned(),
+    });
+    assert_eq!(
+        model.retry_jellyfin_items(),
+        UiOutcome::Browse(UiBrowseCommand::LoadItems {
+            library_id: "library-music".to_owned(),
+            collection_type: Some("music".to_owned()),
+            start_index: 0,
+        }),
+        "a retry keeps the library's query shape"
     );
 }
 
@@ -422,6 +464,89 @@ fn preview_back_and_play_are_explicit_actions() {
     assert_eq!(model.screen(), Screen::Player);
     assert!(model.player_loading());
     assert_eq!(model.player_source_label(), "Jellyfin");
+}
+
+fn typed_item(id: &str, title: &str, item_type: &str) -> BrowseItem {
+    BrowseItem {
+        id: id.to_owned(),
+        title: title.to_owned(),
+        subtitle: item_type.to_owned(),
+        overview: None,
+        primary_tag: None,
+        item_type: Some(item_type.to_owned()),
+    }
+}
+
+fn preview_for(item_type: &str) -> UiModel {
+    let mut model = open_library_grid();
+    let _ = open_items(&mut model);
+    model.apply_browse_update(&BrowseUpdate::ItemsReady {
+        library_id: "library-1".to_owned(),
+        items: vec![typed_item("item-1", "Item", item_type)],
+        total: 1,
+        next_start: None,
+    });
+    let _ = press(&mut model, Key::Enter, 0);
+    assert_eq!(model.screen(), Screen::Preview);
+    model
+}
+
+#[test]
+fn audio_and_book_previews_show_planned_state_and_never_play() {
+    for (item_type, note) in [
+        ("Audio", "Audio player planned (C015)"),
+        ("MusicAlbum", "Audio player planned (C015)"),
+        ("AudioBook", "Audio player planned (C015)"),
+        ("Book", "Book reader planned (C016)"),
+    ] {
+        let mut model = preview_for(item_type);
+        assert!(
+            !model.jellyfin_preview_playable(),
+            "{item_type} must not offer Play"
+        );
+        assert_eq!(
+            model.jellyfin_preview_focus(),
+            1,
+            "{item_type} preview focuses the visible Back action"
+        );
+        assert_eq!(model.jellyfin_preview_planned_note(), Some(note));
+        assert!(
+            model.status_text().contains(note),
+            "typed planned state is visible in the status"
+        );
+
+        // Asking the UI to focus Play is clamped to Back.
+        model.set_jellyfin_preview_focus(0);
+        assert_eq!(model.jellyfin_preview_focus(), 1);
+        press(&mut model, Key::Right, 10);
+        assert_eq!(model.jellyfin_preview_focus(), 1);
+
+        let outcome = press(&mut model, Key::Enter, 20);
+        assert_eq!(
+            outcome,
+            UiOutcome::Navigated {
+                screen: Screen::JellyfinItems,
+                focus: 0,
+            },
+            "{item_type} Enter must act on Back, not emit a fake Play"
+        );
+        assert_eq!(model.screen(), Screen::JellyfinItems);
+    }
+}
+
+#[test]
+fn music_videos_use_the_regular_video_play_path() {
+    let mut model = preview_for("MusicVideo");
+    assert!(model.jellyfin_preview_playable());
+    assert_eq!(model.jellyfin_preview_focus(), 0);
+    assert_eq!(model.jellyfin_preview_planned_note(), None);
+    assert_eq!(
+        press(&mut model, Key::Enter, 10),
+        UiOutcome::PlayJellyfin {
+            item_id: "item-1".to_owned(),
+        }
+    );
+    assert_eq!(model.screen(), Screen::Player);
 }
 
 #[test]

@@ -204,10 +204,12 @@ pub enum PlaybackCommand {
     RetryLibrary,
     /// Fetch the user's top-level Jellyfin library views.
     LoadJellyfinLibraries,
-    /// Fetch one bounded page of playable items below a library view.
+    /// Fetch one bounded page of items below a library view.
     LoadJellyfinItems {
         /// Library (view) identifier used as `ParentId`.
         library_id: String,
+        /// Jellyfin collection type, used to choose item/media types.
+        collection_type: Option<String>,
         /// Zero-based first item index.
         start_index: u32,
     },
@@ -1165,10 +1167,16 @@ impl PlaybackController {
             PlaybackCommand::LoadJellyfinLibraries => self.load_jellyfin_libraries(cancel).await,
             PlaybackCommand::LoadJellyfinItems {
                 library_id,
+                collection_type,
                 start_index,
             } => {
-                self.load_jellyfin_items(&library_id, start_index, cancel)
-                    .await
+                self.load_jellyfin_items(
+                    &library_id,
+                    collection_type.as_deref(),
+                    start_index,
+                    cancel,
+                )
+                .await
             }
             PlaybackCommand::LoadArtwork {
                 item_id,
@@ -1245,10 +1253,15 @@ impl PlaybackController {
     async fn load_jellyfin_items(
         &mut self,
         library_id: &str,
+        collection_type: Option<&str>,
         start_index: u32,
         cancel: &CancelToken,
     ) -> Vec<PlaybackUpdate> {
-        match self.client.browse(library_id, start_index, cancel).await {
+        match self
+            .client
+            .browse(library_id, collection_type, start_index, cancel)
+            .await
+        {
             Ok(result) => {
                 let items: Vec<BrowseItem> = result
                     .items
