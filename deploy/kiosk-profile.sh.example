@@ -1,18 +1,58 @@
-# Install as /home/tvkiosk/.profile, root-owned and readable by tvkiosk.
-# Only auto-start on physical tty1. Never use this for admin login.
+# Installed by scripts/install-release.sh as /home/tvkiosk/.profile, root-owned
+# (0644) and readable by tvkiosk. It is sourced by the login shell that getty
+# starts on tty1; never use this file for an administrator login.
+#
+# The session is Cage on the DRM backend with the GLES2 renderer. This is the
+# renderer combination accepted for local YouTube 720p30 (see docs/youtube.md);
+# labwc and the pixman/software path are not supported playback sessions.
 if [ "$(tty)" = /dev/tty1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
-  export SLINT_BACKEND=winit-software
   export XDG_SESSION_TYPE=wayland
-  # Login PAM must supply XDG_RUNTIME_DIR and an active seat. Verify before enabling.
+  export WLR_RENDERER=gles2
+  # A direct DRM kiosk must not inherit a nested-Wayland backend from the
+  # service manager or an interactive shell.
+  unset WLR_BACKENDS
+  export SLINT_BACKEND=winit-femtovg
+
+  # Login PAM must supply XDG_RUNTIME_DIR and an active seat. Do not guess a
+  # runtime directory: a wrong one starts a broken Wayland session.
   if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
     logger -t tv-kiosk 'PAM runtime directory missing; use admin recovery tty2'
-    sleep 10
+    sleep 30
     exit 1
   fi
-  # getty restarts after this login session ends. A small delay avoids tight crash loops.
-  cage -- /opt/tv-client/current/tv-client --config /etc/tv-client/client.toml --state-dir /var/lib/tv-client
-  rc=$?
-  logger -t tv-kiosk "kiosk exited ($rc)"
-  sleep 5
-  exit "$rc"
+  if [ ! -x /opt/tv-client/current/tv-client ]; then
+    logger -t tv-kiosk 'no current tv-client release; use admin recovery tty2'
+    sleep 30
+    exit 1
+  fi
+  if ! command -v cage >/dev/null 2>&1; then
+    logger -t tv-kiosk 'cage is not installed; use admin recovery tty2'
+    sleep 30
+    exit 1
+  fi
+  if ! /opt/tv-client/current/tv-client \
+    --config /etc/tv-client/client.toml --check-config >/dev/null; then
+    logger -t tv-kiosk 'configuration check failed; use admin recovery tty2'
+    sleep 60
+    exit 1
+  fi
+
+  # Watchdog with bounded exponential backoff. getty@tty1 also restarts the
+  # login session, but keeping the loop here prevents a fast crash loop from
+  # hammering the GPU, the state database or the journal. The cap is 60 s.
+  backoff=5
+  while :; do
+    cage -- /opt/tv-client/current/tv-client \
+      --config /etc/tv-client/client.toml \
+      --state-dir /var/lib/tv-client
+    rc=$?
+    logger -t tv-kiosk "kiosk exited ($rc); restarting in ${backoff}s"
+    sleep "$backoff"
+    if [ "$backoff" -lt 60 ]; then
+      backoff=$((backoff * 2))
+      if [ "$backoff" -gt 60 ]; then
+        backoff=60
+      fi
+    fi
+  done
 fi
