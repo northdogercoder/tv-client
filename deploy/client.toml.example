@@ -1,12 +1,16 @@
-# Operator configuration template for /etc/tv-client/client.toml.
+# Operator configuration template for /etc/tv-client/client.toml and for the
+# writable state copy at /var/lib/tv-client/client.toml.
 #
-# The installer copies this file only when /etc/tv-client/client.toml does not
-# already exist. Unknown keys are rejected by the client, so keep this file in
-# sync with src/config.rs. Replace the placeholder hosts and enable cloud or
-# YouTube only after the matching gate in docs/release.md has passed.
+# The installer copies this file only when the target file does not already
+# exist. The state copy (owned by tvkiosk, mode 0600) takes precedence over
+# /etc/tv-client/client.toml, which remains the root-owned operator fallback.
+# The kiosk profile passes the state copy explicitly. Unknown keys are rejected
+# by the client, so keep this file in sync with src/config.rs. Replace the
+# placeholder hosts and enable cloud or YouTube only after the matching gate in
+# docs/release.md has passed.
 
 jellyfin_url = "https://jellyfin.YOUR-TAILNET.ts.net"
-server_url = "https://tv-control.YOUR-TAILNET.ts.net"
+server_url = "https://ovh-anders.minotaur-gacrux.ts.net"
 
 # Cloud control, pairing and remote commands. Off until the control server is
 # validated; enabling it requires server_url above.
@@ -40,3 +44,8 @@ bitrate_bps = 6000000
 max_bitrate_bps = 10000000
 artwork_cache_bytes = 134217728
 share_titles = false
+
+# Overscan-safe inset around the UI, in whole percent of the short edge
+# (0..=10, default 3). Increase it if the panel crops the bottom status strip;
+# decrease it to use more of the screen. Applied at startup and after restart.
+ui_safe_area_percent = 3

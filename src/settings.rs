@@ -1,7 +1,7 @@
-//! On-device settings: writable state configuration and the pure edit model.
+//! On-device settings: writable state configuration, the pure edit model and
+//! the local-first Jellyfin sign-out helper.
 //!
-//! Two responsibilities live here, both free of Slint and blocking I/O on the
-//! UI thread:
+//! All three are free of Slint and of blocking I/O on the UI thread:
 //!
 //! * [`save_state_config`] validates a [`ClientConfig`] and replaces
 //!   `<state-dir>/client.toml` atomically with a 0600 file inside a 0700
@@ -9,11 +9,15 @@
 //! * [`SettingsForm`] is the keyboard-driven editor rendered by the settings
 //!   screen. It owns only buffers, focus and validation messages; the caller
 //!   performs the write and the process restart.
+//! * [`sign_out_jellyfin`] removes the local token before a bounded server
+//!   revocation, so settings can never report a sign-out that left credentials
+//!   behind.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -21,6 +25,8 @@ use crate::config::{
     ClientConfig, ConfigError, MAX_UI_SAFE_AREA_PERCENT, MAX_YOUTUBE_TIMEOUT_SECS,
     MIN_UI_SAFE_AREA_PERCENT, MIN_YOUTUBE_TIMEOUT_SECS, YoutubeHwdec, state_config_path,
 };
+use crate::jellyfin::{CLIENT_NAME, JellyfinClient, JellyfinError};
+use crate::storage::{Storage, StorageError};
 use crate::ui::Key;
 
 /// Number of editable settings rows.
@@ -94,9 +100,11 @@ impl SettingRow {
     #[must_use]
     pub const fn kind(self) -> RowKind {
         match self {
-            Self::JellyfinUrl | Self::ServerUrl | Self::YtdlpPath | Self::Timeout | Self::SafeArea => {
-                RowKind::Text
-            }
+            Self::JellyfinUrl
+            | Self::ServerUrl
+            | Self::YtdlpPath
+            | Self::Timeout
+            | Self::SafeArea => RowKind::Text,
             Self::CloudEnabled | Self::YoutubeEnabled | Self::YoutubePlayback => RowKind::Toggle,
             Self::Hwdec => RowKind::Choice,
             Self::PairRemote | Self::JellyfinSignIn | Self::Save | Self::Restart | Self::Back => {
@@ -132,9 +140,9 @@ impl SettingRow {
 pub enum RowKind {
     /// Editable text; Enter starts editing.
     Text,
-    /// Boolean toggle; Enter or Left/Right flips it.
+    /// Boolean toggle; only Enter flips it (arrows move focus).
     Toggle,
-    /// Fixed choice; Enter or Left/Right cycles it.
+    /// Fixed choice; only Enter cycles it (arrows move focus).
     Choice,
     /// Immediate action.
     Action,
@@ -232,13 +240,81 @@ pub enum SettingsError {
 /// directory is created if absent and forced to 0700; the document is written
 /// to a fresh 0600 temporary file in the same directory, `fsync`ed, renamed
 /// over the target and the directory is `fsync`ed. No value is logged.
-pub fn save_state_config(state_dir: &Path, config: &ClientConfig) -> Result<PathBuf, SettingsError> {
+pub fn save_state_config(
+    state_dir: &Path,
+    config: &ClientConfig,
+) -> Result<PathBuf, SettingsError> {
     config.validate()?;
     let document = config.to_toml_string()?;
     ensure_private_dir(state_dir)?;
     let target = state_config_path(state_dir);
     atomic_replace(&target, document.as_bytes())?;
     Ok(target)
+}
+
+/// Remove the stored Jellyfin access token without contacting the server.
+///
+/// Local state is authoritative: a missing credential is not an error, so this
+/// is safe to call on every sign-out path. It never reads or returns the token.
+pub fn clear_jellyfin_access_token(storage: &Storage) -> Result<(), StorageError> {
+    let path = storage.credential_path(crate::jellyfin::ACCESS_TOKEN_CREDENTIAL)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StorageError::Io(error)),
+    }
+}
+
+/// Why a Jellyfin sign-out did not revoke the server session.
+///
+/// Every variant other than [`Self::Storage`] means the local access token was
+/// already removed, so the device can be treated as signed out.
+#[derive(Debug, Error)]
+pub enum JellyfinSignOutError {
+    /// Local storage or the credential file could not be handled; a local
+    /// token may still exist.
+    #[error("the Jellyfin session storage is unavailable")]
+    Storage,
+    /// The local token was removed before the revocation request timed out.
+    #[error("Jellyfin sign-out timed out")]
+    Timeout,
+    /// The local token was removed before revocation failed.
+    #[error("Jellyfin sign-out failed")]
+    Revoke(#[source] JellyfinError),
+}
+
+/// Sign out of Jellyfin with the local token as the source of truth.
+///
+/// The stored access token is removed before `Sessions/Logout` is attempted,
+/// so a timeout or transport failure cannot leave a usable local session
+/// behind. Server revocation is bounded by `revoke_timeout`.
+pub async fn sign_out_jellyfin(
+    config: &ClientConfig,
+    state_directory: &Path,
+    revoke_timeout: Duration,
+) -> Result<(), JellyfinSignOutError> {
+    let mut storage = Storage::open(state_directory, config.artwork_cache_bytes)
+        .map_err(|_| JellyfinSignOutError::Storage)?;
+    let mut client = match JellyfinClient::new(config, CLIENT_NAME, &mut storage) {
+        Ok(client) => client,
+        Err(error) => {
+            // A client that cannot be built cannot revoke anything either, but
+            // the local token still must not survive sign-out.
+            return match clear_jellyfin_access_token(&storage) {
+                Ok(()) => Err(JellyfinSignOutError::Revoke(error)),
+                Err(_) => Err(JellyfinSignOutError::Storage),
+            };
+        }
+    };
+    clear_jellyfin_access_token(&storage).map_err(|_| JellyfinSignOutError::Storage)?;
+    let (cancel, token) = crate::jellyfin::cancellation();
+    let revoked = tokio::time::timeout(revoke_timeout, client.logout(&mut storage, &token)).await;
+    cancel.cancel();
+    match revoked {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(JellyfinSignOutError::Revoke(error)),
+        Err(_) => Err(JellyfinSignOutError::Timeout),
+    }
 }
 
 fn ensure_private_dir(directory: &Path) -> Result<(), SettingsError> {
@@ -278,10 +354,7 @@ fn atomic_replace(target: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
 
     let mut attempt = 0u32;
     let (temporary, mut file) = loop {
-        let candidate = directory.join(format!(
-            "{name}.tmp.{}.{attempt}",
-            std::process::id()
-        ));
+        let candidate = directory.join(format!("{name}.tmp.{}.{attempt}", std::process::id()));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -289,26 +362,18 @@ fn atomic_replace(target: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
             .open(&candidate)
         {
             Ok(file) => break (candidate, file),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 =>
-            {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 => {
                 attempt += 1;
             }
             Err(error) => return Err(error.into()),
         }
     };
 
-    let written = file
-        .write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            drop(file);
-            Ok(())
-        });
-    if let Err(error) = written {
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         let _ = fs::remove_file(&temporary);
         return Err(error.into());
     }
+    drop(file);
     if let Err(error) = fs::rename(&temporary, target) {
         let _ = fs::remove_file(&temporary);
         return Err(error.into());
@@ -617,11 +682,7 @@ impl SettingsForm {
             if self.focus >= SETTINGS_COLUMN_BREAK {
                 return;
             }
-            (
-                self.focus,
-                SETTINGS_COLUMN_BREAK,
-                SETTINGS_ROW_COUNT - 1,
-            )
+            (self.focus, SETTINGS_COLUMN_BREAK, SETTINGS_ROW_COUNT - 1)
         } else {
             if self.focus < SETTINGS_COLUMN_BREAK {
                 return;

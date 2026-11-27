@@ -18,7 +18,7 @@ use crate::model::{
     Action, AppState, Direction, InputOrigin, Mode, Source, is_valid_item_id, is_valid_youtube_id,
 };
 use crate::playback::{LibraryFilter, PlaybackUpdate};
-use crate::settings::{SettingRow, SettingsEvent, SettingsForm, SettingsRowView};
+use crate::settings::{SettingsEvent, SettingsForm, SettingsRowView};
 
 /// Number of entries on the home screen.
 pub const HOME_ROW_COUNT: usize = 5;
@@ -846,13 +846,24 @@ impl UiModel {
 
     /// Replace the settings draft with an externally loaded configuration.
     pub fn reset_settings(&mut self, config: &crate::config::ClientConfig) {
+        let user = self.settings.jellyfin_user().map(str::to_owned);
+        let code = self.settings.quick_connect_code().map(str::to_owned);
+        let active = self.settings.quick_connect_active();
         self.settings = SettingsForm::new(config);
+        self.settings.set_jellyfin_user(user);
+        self.settings.set_quick_connect_code(code);
+        self.settings.set_quick_connect_active(active);
     }
 
     /// Show a Quick Connect code and mark the poll active.
     pub fn set_quick_connect_code(&mut self, code: Option<String>) {
         self.settings.set_quick_connect_code(code.clone());
         self.settings.set_quick_connect_active(code.is_some());
+    }
+
+    /// Mark the Quick Connect poll as active or finished.
+    pub fn set_quick_connect_active(&mut self, active: bool) {
+        self.settings.set_quick_connect_active(active);
     }
 
     /// Set or clear the signed-in Jellyfin user.
@@ -2664,10 +2675,7 @@ impl UiModel {
     }
 
     fn handle_settings_key(&mut self, key: Key) -> UiOutcome {
-        if !self.settings.editing()
-            && key == Key::Escape
-            && self.settings.quick_connect_active()
-        {
+        if !self.settings.editing() && key == Key::Escape && self.settings.quick_connect_active() {
             self.settings.set_quick_connect_active(false);
             self.settings.set_message("Quick Connect cancelled");
             return UiOutcome::CancelQuickConnect;
@@ -2878,8 +2886,8 @@ mod native {
     use uuid::Uuid;
 
     use super::{
-        Key, LoadState, MediaItem, PairChoice, PlayerMenu, Screen, UiInput, UiModel, UiOutcome,
-        UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, source_label,
+        Key, LoadState, MediaItem, PairChoice, PlayerMenu, Screen, SettingsRowView, UiInput,
+        UiModel, UiOutcome, UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, source_label,
     };
     use crate::model::Action;
 
@@ -3641,6 +3649,40 @@ mod native {
         window.set_track_focus(model.player_menu_focus() as i32);
         window.set_cast_state(model.cast_state().into());
         window.set_settings_version(VERSION_LABEL.into());
+
+        let mut left_rows = Vec::new();
+        let mut right_rows = Vec::new();
+        for row in model.settings_rows() {
+            let SettingsRowView {
+                index,
+                label,
+                value,
+                kind,
+                toggle_on,
+                editing,
+            } = row;
+            let rendered = SettingsRow {
+                index,
+                label: label.as_str().into(),
+                value: value.as_str().into(),
+                kind,
+                toggle_on,
+                editing,
+            };
+            if (index as usize) < crate::settings::SETTINGS_COLUMN_BREAK {
+                left_rows.push(rendered);
+            } else {
+                right_rows.push(rendered);
+            }
+        }
+        window.set_settings_left(ModelRc::new(VecModel::from(left_rows)));
+        window.set_settings_right(ModelRc::new(VecModel::from(right_rows)));
+        window.set_settings_editing(model.settings_editing());
+        window.set_settings_edit_value(model.settings_edit_value().into());
+        window.set_settings_message(model.settings_message().into());
+        window.set_settings_error(model.settings_error().unwrap_or("").into());
+        window.set_settings_quick_code(model.settings_quick_code().unwrap_or("").into());
+        window.set_jellyfin_user(model.settings_jellyfin_user().unwrap_or("").into());
 
         window.set_pair_code(model.pairing_code().into());
         window.set_cloud_status(model.cloud_status().into());

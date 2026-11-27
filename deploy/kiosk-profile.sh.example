@@ -25,13 +25,19 @@ if [ "$(tty)" = /dev/tty1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
     sleep 30
     exit 1
   fi
+  # The writable state copy takes precedence; /etc remains the operator
+  # fallback for a freshly installed host before the state copy is seeded.
+  kiosk_config=/var/lib/tv-client/client.toml
+  if [ ! -f "$kiosk_config" ]; then
+    kiosk_config=/etc/tv-client/client.toml
+  fi
   if ! command -v cage >/dev/null 2>&1; then
     logger -t tv-kiosk 'cage is not installed; use admin recovery tty2'
     sleep 30
     exit 1
   fi
   if ! /opt/tv-client/current/tv-client \
-    --config /etc/tv-client/client.toml --check-config >/dev/null; then
+    --config "$kiosk_config" --check-config >/dev/null; then
     logger -t tv-kiosk 'configuration check failed; use admin recovery tty2'
     sleep 60
     exit 1
@@ -43,7 +49,7 @@ if [ "$(tty)" = /dev/tty1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
   backoff=5
   while :; do
     cage -- /opt/tv-client/current/tv-client \
-      --config /etc/tv-client/client.toml \
+      --config "$kiosk_config" \
       --state-dir /var/lib/tv-client
     rc=$?
     logger -t tv-kiosk "kiosk exited ($rc); restarting in ${backoff}s"

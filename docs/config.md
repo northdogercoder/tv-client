@@ -6,20 +6,39 @@ validated before any network, UI or player work starts.
 
 ## Configuration file
 
-Default path:
+Precedence:
 
-- `$XDG_CONFIG_HOME/tv-client/client.toml` when `XDG_CONFIG_HOME` is set.
-- `$HOME/.config/tv-client/client.toml` otherwise.
+1. `--config PATH` — explicit file; it must exist.
+2. `<state-dir>/client.toml` — the writable copy owned by the kiosk user.
+3. `/etc/tv-client/client.toml` — the root-owned operator fallback.
+4. Built-in defaults when no file exists.
 
-`--config PATH` overrides the path. A named file must exist; if the default
-path is absent, the built-in defaults below are used. The file is limited to
-64 KiB.
+The state directory defaults to `$XDG_STATE_HOME/tv-client` when set, otherwise
+`$HOME/.local/state/tv-client`. On the installed kiosk it is
+`/var/lib/tv-client` (`tvkiosk`, 0700), so the effective file is
+`/var/lib/tv-client/client.toml` (`tvkiosk`, 0600). Only existence selects a
+candidate; a selected but invalid file fails startup instead of silently
+falling through to the next one. The file is limited to 64 KiB.
+
+On install, `scripts/install-release.sh` seeds the state copy only when it does
+not exist. If the operator fallback `/etc/tv-client/client.toml` exists (for
+example during a 0.1.0 to 0.1.1 upgrade), that file is copied verbatim to
+`/var/lib/tv-client/client.toml` with mode 0600 and owner/group `tvkiosk`. The
+shipped `deploy/client.toml.example` is used only when neither file exists.
+An existing state copy is never overwritten, and `--dry-run` reports the source
+that would be seeded without modifying either file. Values are never logged.
+
+The Settings screen writes the state copy through
+`tv_client::settings::save_state_config`: the new document is validated first,
+written to a fresh 0600 temporary file inside the same 0700 directory,
+`fsync`ed, renamed over the target and the directory is `fsync`ed. A failed
+validation or write leaves the previous file intact. Values are never logged.
 
 Keys and defaults (identical to `deploy/client.toml.example`):
 
 ```toml
 jellyfin_url = "https://jellyfin.example.ts.net"
-server_url = "https://tv-control.example.ts.net"
+server_url = "https://ovh-anders.minotaur-gacrux.ts.net"
 cloud_enabled = false
 youtube_enabled = false
 youtube_playback_enabled = false
@@ -36,6 +55,7 @@ bitrate_bps = 6000000
 max_bitrate_bps = 10000000
 artwork_cache_bytes = 134217728
 share_titles = false
+ui_safe_area_percent = 3
 ```
 
 | Key | Type | Default | Validation |
@@ -58,6 +78,7 @@ share_titles = false
 | `max_bitrate_bps` | integer | `10000000` | `64000..=100000000` and at least `bitrate_bps` |
 | `artwork_cache_bytes` | integer | `134217728` | `0..=134217728` (128 MiB) |
 | `share_titles` | boolean | `false` | Metadata-sharing consent; never enables credentials or media upload |
+| `ui_safe_area_percent` | integer | `3` | `0..=10` percent of the short edge used as an overscan inset around the UI |
 
 Every key is optional and missing keys take the defaults above. A present but
 invalid value, an unknown key or a duplicate key fails startup. TOML syntax and
@@ -82,8 +103,8 @@ is not copied into logs.
 
 | Flag | Effect |
 |---|---|
-| `--config PATH` | Read the given TOML file |
-| `--state-dir DIR` | Use the given state directory |
+| `--config PATH` | Read the given TOML file; it must exist |
+| `--state-dir DIR` | Use the given state directory (and its `client.toml`) |
 | `--check-config` | Validate configuration, print `configuration OK`, exit without opening state |
 | `--version` | Print package name and version |
 | `--help` | Print usage |
@@ -102,6 +123,7 @@ Default state directory:
 
 ```text
 <state-dir>/                    0700
+├── client.toml                 0600 writable configuration when present
 ├── client.db                   0600 SQLite database
 ├── client.db-wal               WAL when present, inside the 0700 directory
 ├── client.db-shm               shared memory when present
@@ -113,8 +135,9 @@ Default state directory:
 ```
 
 The state directory, `artwork/` and `credentials/` are set to 0700. The
-database, artwork files and credential files are set to 0600. Symbolic links
-are rejected for the state directory, database and credential files.
+configuration, database, artwork files and credential files are set to 0600.
+Symbolic links are rejected for the state directory, configuration, database
+and credential files.
 
 ### Database contents
 

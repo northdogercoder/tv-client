@@ -590,7 +590,7 @@ fn shipped_example_config_matches_the_documented_contract() {
     );
     assert_eq!(
         config.server_url.as_deref(),
-        Some("https://tv-control.YOUR-TAILNET.ts.net")
+        Some("https://ovh-anders.minotaur-gacrux.ts.net")
     );
     assert!(!config.cloud_enabled);
     assert!(!config.youtube_enabled);

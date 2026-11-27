@@ -1223,7 +1223,7 @@ async fn offline_and_unreachable_cloud_is_not_fatal() {
         .expect("link stops")
         .expect("join");
     assert_eq!(end, LinkEnd::Shutdown);
-    assert_eq!(tv_client::version(), "0.1.0");
+    assert_eq!(tv_client::version(), env!("CARGO_PKG_VERSION"));
 }
 
 #[tokio::test]

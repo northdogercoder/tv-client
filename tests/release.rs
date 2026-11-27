@@ -8,6 +8,7 @@
 //! exists.
 
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -118,9 +119,20 @@ fn deploy_example_parses_with_youtube_playback_contract() {
         "max_bitrate_bps",
         "artwork_cache_bytes",
         "share_titles",
+        "ui_safe_area_percent",
     ] {
         assert!(has_active_key(&raw, key), "example is missing key {key}");
     }
+
+    assert_eq!(config.ui_safe_area_percent, 3);
+    assert!(
+        raw.contains("https://ovh-anders.minotaur-gacrux.ts.net"),
+        "the example must use the staging control-server origin"
+    );
+    assert!(
+        !raw.contains("ovh-1"),
+        "the retired ovh-1 hostname must not reappear"
+    );
 
     assert!(
         raw.contains("HDMI-CEC") && raw.contains("no configuration key"),
@@ -327,7 +339,9 @@ fn kiosk_session_uses_cage_gles_and_an_unprivileged_user() {
         "unset WLR_BACKENDS",
         "SLINT_BACKEND=winit-femtovg",
         "cage -- /opt/tv-client/current/tv-client",
-        "--config /etc/tv-client/client.toml",
+        "/var/lib/tv-client/client.toml",
+        "/etc/tv-client/client.toml",
+        r#"--config "$kiosk_config""#,
         "--state-dir /var/lib/tv-client",
         "/dev/tty1",
         "SSH_CONNECTION",
@@ -364,6 +378,14 @@ fn kiosk_session_uses_cage_gles_and_an_unprivileged_user() {
         "mv -T",
         "/var/lib/tv-client",
         "/etc/tv-client",
+        "TV_STATE_CONFIG",
+        "install_state_config",
+        "lightdm",
+        "gdm3",
+        "sddm",
+        "systemctl disable --now",
+        "chvt 1",
+        "--keep-display-manager",
     ] {
         assert!(install.contains(needle), "installer is missing {needle:?}");
     }
@@ -448,6 +470,355 @@ fn install_dry_run_creates_state_directory_under_staging_prefix() {
         "{stderr}"
     );
     assert!(!prefix.exists(), "dry-run must not create files");
+}
+
+fn build_fake_artifact(directory: &Path) -> PathBuf {
+    let build = directory.join("build");
+    fs::create_dir_all(&build).expect("build directory");
+    for binary in ["tv-client", "tv-native-player"] {
+        let path = build.join(binary);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write binary");
+        let mut permissions = fs::metadata(&path).expect("stat binary").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("chmod binary");
+    }
+    fs::write(build.join("NOTICES"), "test notices\n").expect("write notices");
+    fs::write(build.join("SBOM.cdx.json"), "{}\n").expect("write SBOM");
+
+    let artifact = directory.join("tv-client-linux-arm64-0.1.1.tar.gz");
+    let status = Command::new("tar")
+        .args([
+            "-czf",
+            artifact.to_str().expect("artifact path"),
+            "-C",
+            build.to_str().expect("build path"),
+            "tv-client",
+            "tv-native-player",
+            "NOTICES",
+            "SBOM.cdx.json",
+        ])
+        .status()
+        .expect("run tar");
+    assert!(status.success(), "tar failed");
+
+    let hash_output = Command::new("sha256sum")
+        .arg(&artifact)
+        .output()
+        .expect("run sha256sum");
+    assert!(hash_output.status.success(), "sha256sum failed");
+    let hash_text = String::from_utf8_lossy(&hash_output.stdout);
+    let hash = hash_text.split_whitespace().next().expect("sha256 output");
+    let artifact_name = artifact
+        .file_name()
+        .expect("artifact name")
+        .to_string_lossy();
+    fs::write(
+        directory.join("SHA256SUMS"),
+        format!("{hash}  {artifact_name}\n"),
+    )
+    .expect("write checksums");
+    artifact
+}
+
+fn run_staged_install(prefix: &Path, artifact: &Path) -> Output {
+    run_bash(
+        "scripts/install-release.sh",
+        &[
+            "--staging-install",
+            prefix.to_str().expect("prefix path"),
+            "--allow-foreign-arch",
+            "--allow-unsupported-os",
+            "--artifact",
+            artifact.to_str().expect("artifact path"),
+        ],
+    )
+}
+
+fn run_staged_dry_run(prefix: &Path, artifact: &Path) -> Output {
+    run_bash(
+        "scripts/install-release.sh",
+        &[
+            "--dry-run",
+            "--allow-foreign-arch",
+            "--allow-unsupported-os",
+            "--prefix",
+            prefix.to_str().expect("prefix path"),
+            "--artifact",
+            artifact.to_str().expect("artifact path"),
+        ],
+    )
+}
+
+fn write_config(path: &Path, contents: &[u8]) {
+    fs::create_dir_all(path.parent().expect("config parent")).expect("config directory");
+    fs::write(path, contents).expect("write config");
+    let mut permissions = fs::metadata(path).expect("stat config").permissions();
+    permissions.set_mode(0o644);
+    fs::set_permissions(path, permissions).expect("chmod config");
+}
+
+fn file_mode(path: &Path) -> u32 {
+    fs::metadata(path)
+        .unwrap_or_else(|error| panic!("could not stat {}: {error}", path.display()))
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+fn id_value(flag: &str) -> u32 {
+    let output = Command::new("id")
+        .arg(flag)
+        .output()
+        .unwrap_or_else(|error| panic!("could not run id {flag}: {error}"));
+    assert!(output.status.success(), "id {flag} failed");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or_else(|error| panic!("id {flag} did not print a number: {error}"))
+}
+
+#[test]
+fn install_seeds_state_config_from_existing_operator_config() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let artifact = build_fake_artifact(temporary.path());
+    let prefix = temporary.path().join("stage");
+    let operator_path = prefix.join("etc/tv-client/client.toml");
+    let operator_config =
+        b"# operator-secret-sentinel\njellyfin_url = \"http://jellyfin.local\"\nserver_url = \"https://control.example\"\ncloud_enabled = false\n"
+            .to_vec();
+    write_config(&operator_path, &operator_config);
+
+    let output = run_staged_install(&prefix, &artifact);
+    assert!(output.status.success(), "{}", describe(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let state_path = prefix.join("var/lib/tv-client/client.toml");
+    assert_eq!(
+        fs::read(&state_path).expect("read state config"),
+        operator_config,
+        "the upgrade must seed the state copy from the existing operator config"
+    );
+    assert_eq!(file_mode(&state_path), 0o600, "state config must be 0600");
+    let state_metadata = fs::metadata(&state_path).expect("stat state config");
+    assert_eq!(
+        state_metadata.uid(),
+        id_value("-u"),
+        "state config must be owned by the kiosk-staging user"
+    );
+    assert_eq!(
+        state_metadata.gid(),
+        id_value("-g"),
+        "state config must use the kiosk-staging group"
+    );
+    assert_eq!(
+        file_mode(&prefix.join("var/lib/tv-client")),
+        0o700,
+        "state directory must be 0700"
+    );
+    assert_eq!(
+        fs::read(&operator_path).expect("read operator config"),
+        operator_config,
+        "the operator config must not be rewritten"
+    );
+    assert_eq!(file_mode(&operator_path), 0o644);
+    assert!(
+        stderr.contains("seeded") && stderr.contains("from the operator config"),
+        "the install must report the operator source: {stderr}"
+    );
+    assert!(
+        !stderr.contains("client.toml.example"),
+        "an upgrade must not seed from the placeholder example: {stderr}"
+    );
+    assert!(
+        !stderr.contains("operator-secret-sentinel"),
+        "the installer must never log configuration contents: {stderr}"
+    );
+    assert!(
+        prefix.join("releases/0.1.1/tv-client").is_file(),
+        "the staged install must extract the release"
+    );
+    assert_eq!(
+        fs::read_link(prefix.join("current")).expect("current symlink"),
+        prefix.join("releases/0.1.1")
+    );
+
+    // A rerun must keep the seeded file even when /etc changes afterwards.
+    let changed = b"server_url = \"https://changed.example\"\n";
+    write_config(&operator_path, changed);
+    let output = run_staged_install(&prefix, &artifact);
+    assert!(output.status.success(), "{}", describe(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        fs::read(&state_path).expect("read state config"),
+        operator_config,
+        "a rerun must not overwrite the existing state config"
+    );
+    assert!(
+        stderr.contains("keeping existing")
+            && stderr.contains(state_path.to_str().expect("state path")),
+        "the rerun must report that the state config is kept: {stderr}"
+    );
+    assert!(
+        !stderr.contains("operator-secret-sentinel"),
+        "the rerun must not log configuration contents: {stderr}"
+    );
+}
+
+#[test]
+fn install_seeds_state_config_from_example_without_operator_config() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let artifact = build_fake_artifact(temporary.path());
+    let prefix = temporary.path().join("stage");
+    let example = fs::read(repo_path("deploy/client.toml.example")).expect("read example");
+
+    let output = run_staged_install(&prefix, &artifact);
+    assert!(output.status.success(), "{}", describe(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let state_path = prefix.join("var/lib/tv-client/client.toml");
+    assert_eq!(
+        fs::read(&state_path).expect("read state config"),
+        example,
+        "a fresh install must seed the state copy from the example"
+    );
+    assert_eq!(file_mode(&state_path), 0o600, "state config must be 0600");
+    let state_metadata = fs::metadata(&state_path).expect("stat state config");
+    assert_eq!(state_metadata.uid(), id_value("-u"));
+    assert_eq!(state_metadata.gid(), id_value("-g"));
+    assert_eq!(
+        fs::read(prefix.join("etc/tv-client/client.toml")).expect("read operator config"),
+        example,
+        "the operator config must be created from the same example"
+    );
+    assert_eq!(file_mode(&prefix.join("etc/tv-client/client.toml")), 0o644);
+    assert!(
+        stderr.contains("client.toml.example"),
+        "the fallback seed must name the example source: {stderr}"
+    );
+}
+
+#[test]
+fn install_dry_run_reports_operator_config_seed_source_without_mutation() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let artifact = build_fake_artifact(temporary.path());
+    let prefix = temporary.path().join("stage");
+    let operator_path = prefix.join("etc/tv-client/client.toml");
+    let operator_config = b"# existing operator config\ncloud_enabled = false\n".to_vec();
+    write_config(&operator_path, &operator_config);
+
+    let output = run_staged_dry_run(&prefix, &artifact);
+    assert!(output.status.success(), "{}", describe(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("would seed")
+            && stderr.contains(operator_path.to_str().expect("operator path")),
+        "dry-run must report the existing operator config as the seed source: {stderr}"
+    );
+    assert!(
+        !stderr.contains("client.toml.example"),
+        "dry-run must not plan the example when the operator config exists: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&operator_path).expect("read operator config"),
+        operator_config,
+        "dry-run must not modify the operator config"
+    );
+    assert!(
+        !prefix.join("var/lib/tv-client").exists(),
+        "dry-run must not create the state directory"
+    );
+    assert!(
+        !prefix.join("releases").exists(),
+        "dry-run must not install a release"
+    );
+}
+
+#[test]
+fn installer_display_manager_handling_is_dry_run_safe_and_opt_out() {
+    let help = run_bash("scripts/install-release.sh", &["--help"]);
+    assert!(help.status.success(), "{}", describe(&help));
+    let help_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&help.stdout),
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(
+        help_text.contains("--keep-display-manager"),
+        "installer --help must document the display-manager opt-out: {help_text}"
+    );
+
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let artifact = build_fake_artifact(temporary.path());
+    let prefix = temporary.path().join("stage");
+    fs::create_dir_all(prefix.join("etc/systemd/system")).expect("systemd staging directory");
+    fs::write(
+        prefix.join("etc/systemd/system/lightdm.service"),
+        "[Unit]\nDescription=test display manager\n",
+    )
+    .expect("write fake lightdm unit");
+
+    let output = run_bash(
+        "scripts/install-release.sh",
+        &[
+            "--dry-run",
+            "--allow-foreign-arch",
+            "--allow-unsupported-os",
+            "--prefix",
+            prefix.to_str().expect("prefix path"),
+            "--artifact",
+            artifact.to_str().expect("artifact path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", describe(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("+ systemctl disable --now lightdm"),
+        "dry-run must print the disable plan: {stderr}"
+    );
+    assert!(
+        stderr.contains("+ chvt 1") || stderr.contains("chvt is unavailable"),
+        "dry-run must plan tty1 activation or report it unavailable: {stderr}"
+    );
+    assert!(
+        stderr.contains("would seed")
+            && stderr.contains("client.toml")
+            && stderr.contains("client.toml.example")
+            && stderr.contains("0600"),
+        "dry-run must plan the state configuration seed from the example: {stderr}"
+    );
+    assert!(
+        !prefix.join("var/lib/tv-client").exists(),
+        "dry-run must not create the state directory"
+    );
+    assert!(
+        !prefix.join("opt/tv-client/releases").exists(),
+        "dry-run must not create a release"
+    );
+
+    let output = run_bash(
+        "scripts/install-release.sh",
+        &[
+            "--dry-run",
+            "--keep-display-manager",
+            "--allow-foreign-arch",
+            "--allow-unsupported-os",
+            "--prefix",
+            prefix.to_str().expect("prefix path"),
+            "--artifact",
+            artifact.to_str().expect("artifact path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", describe(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("systemctl disable --now lightdm"),
+        "--keep-display-manager must not disable lightdm: {stderr}"
+    );
+    assert!(
+        stderr.contains("--keep-display-manager"),
+        "the opt-out must be logged: {stderr}"
+    );
 }
 
 fn set_directory_mtime(path: &Path, stamp: &str) {

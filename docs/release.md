@@ -17,7 +17,7 @@ copy values from a plan or a previous release.
 
 | Field | Value |
 |---|---|
-| Version | `<0.1.0>` |
+| Version | `<0.1.1>` |
 | Git commit | `<git rev-parse HEAD>` |
 | Workflow run | `<URL / run id>` |
 | Artifact | `tv-client-linux-arm64-<version>.tar.gz` |
@@ -66,15 +66,15 @@ production credentials.
 Build on a tag or by manual dispatch:
 
 ```sh
-git tag -s v0.1.0 -m 'tv-client 0.1.0'   # operator only; do not push from C013
-git push origin v0.1.0                    # operator only
+git tag -s v0.1.1 -m 'tv-client 0.1.1'   # operator only; do not push from C013
+git push origin v0.1.1                    # operator only
 # or: gh workflow run release.yml --ref <branch-or-tag>
 ```
 
 Download and verify:
 
 ```sh
-version=0.1.0
+version=0.1.1
 gh run download <run-id> -n "tv-client-linux-arm64-$version" -D dist
 cd dist
 sha256sum -c SHA256SUMS
@@ -116,7 +116,7 @@ sudo scripts/install-release.sh \
   --artifact dist/tv-client-linux-arm64-$version.tar.gz
 readlink -f /opt/tv-client/current
 find /opt/tv-client/releases -mindepth 1 -maxdepth 1 -type d
-stat -c '%U:%G %a %n' /etc/tv-client/client.toml /var/lib/tv-client
+stat -c '%U:%G %a %n' /etc/tv-client/client.toml /var/lib/tv-client/client.toml /var/lib/tv-client
 id -nG tvkiosk
 ```
 
@@ -135,9 +135,11 @@ test ! -e /var/tmp/tv-client-stage   # read-only preflight creates nothing
 ```
 
 Pass requires: only the intended version directory; `current` points at it;
-`/var/lib/tv-client` exists owned by `tvkiosk` with mode 0700; config and state
-unchanged by the second run; `tvkiosk` groups contain no `sudo`, `wheel` or
-`admin`; `/home/tvkiosk/.ssh` is absent or empty.
+`/var/lib/tv-client` exists owned by `tvkiosk` with mode 0700;
+`/var/lib/tv-client/client.toml` is seeded once, owned by `tvkiosk`, mode 0600;
+`/etc/tv-client/client.toml` stays the operator fallback and is not replaced;
+config and state are unchanged by the second run; `tvkiosk` groups contain no
+`sudo`, `wheel` or `admin`; `/home/tvkiosk/.ssh` is absent or empty.
 
 The scripts come from the repository checkout at the same tag; the release
 tarball contains the two binaries, `NOTICES` and `SBOM.cdx.json` only.
@@ -145,8 +147,47 @@ tarball contains the two binaries, `NOTICES` and `SBOM.cdx.json` only.
 is an explicit operator override that is also accepted for a real install.
 `--prefix` is rejected for a real install.
 
+### Display manager and tty1
+
+The kiosk needs the DRM seat on tty1. A graphical display manager left enabled
+on tty7 keeps a VT in front of the autologin session, so the 0.1.0 install
+stayed black until the operator ran `systemctl disable --now lightdm` and
+`chvt 1` by hand. The installer now detects `lightdm`, `gdm3`, `gdm` and
+`sddm` (unit file or `systemctl is-enabled`/`is-active`), disables and stops
+the detected unit, and activates tty1 with `chvt 1` when available. `--check`
+and `--dry-run` only report the plan; they never disable a service.
+
+Re-run the install (or the display-manager step) and verify:
+
+```sh
+systemctl status lightdm gdm3 gdm sddm --no-pager   # inactive and disabled
+systemctl is-enabled getty@tty1.service
+systemctl status getty@tty1.service --no-pager
+pgrep -a cage
+```
+
+Pass requires the kiosk to appear on tty1 without a manual `chvt`. Recovery
+console remains tty2.
+
+Keep a display manager deliberately (for example on a lab host that still
+needs the desktop) only with the explicit opt-out:
+
+```sh
+sudo scripts/install-release.sh --artifact ... --keep-display-manager
+```
+
+`--no-restart` also skips all display-manager and getty changes. Restore the
+previous graphical autologin if the host is repurposed:
+
+```sh
+sudo systemctl enable --now lightdm   # or gdm3/gdm/sddm, whichever was disabled
+sudo systemctl set-default graphical.target
+```
+
+Record which unit was disabled.
 Evidence: `<paste preflight output>`, `<paste both install summaries>`,
-`<paste id/stat output>`. Status: **NOT RUN**.
+`<paste id/stat output>`, `<paste systemctl status for the display manager>`,
+`<paste the tty1 kiosk check>`. Status: **NOT RUN**.
 
 ## R2: core local Jellyfin
 
@@ -157,7 +198,7 @@ systemctl status getty@tty1.service --no-pager
 pgrep -a cage
 pgrep -a tv-client
 sudo -u tvkiosk /opt/tv-client/current/tv-client \
-  --config /etc/tv-client/client.toml --check-config
+  --config /var/lib/tv-client/client.toml --check-config
 journalctl -b -u getty@tty1.service -n 80 --no-pager
 ```
 
@@ -246,7 +287,7 @@ After boot:
 
 ```sh
 sudo -u tvkiosk /opt/tv-client/current/tv-client \
-  --config /etc/tv-client/client.toml --check-config
+  --config /var/lib/tv-client/client.toml --check-config
 journalctl -b -p warning --no-pager
 ls -la /var/lib/tv-client
 ```
@@ -311,7 +352,8 @@ Install a newer version first (or use the previously installed one), then:
 
 ```sh
 sudo scripts/rollback.sh --list
-sudo sha256sum /etc/tv-client/client.toml /var/lib/tv-client/client.db \
+sudo sha256sum /etc/tv-client/client.toml \
+  /var/lib/tv-client/client.toml /var/lib/tv-client/client.db \
   > /tmp/tv-client-before-rollback.sha256
 sudo scripts/rollback.sh --check --to <previous-version>
 sudo scripts/rollback.sh --to <previous-version>

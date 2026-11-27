@@ -436,11 +436,7 @@ impl ConfigSelection {
 /// existence selects a candidate; validity is checked when it is read.
 #[must_use]
 pub fn select_config(explicit: Option<&Path>, state_dir: Option<&Path>) -> ConfigSelection {
-    select_config_with(
-        explicit,
-        state_dir,
-        Path::new(SYSTEM_CONFIG_PATH),
-    )
+    select_config_with(explicit, state_dir, Path::new(SYSTEM_CONFIG_PATH))
 }
 
 /// [`select_config`] with an explicit system path, for tests and staging.
@@ -456,7 +452,10 @@ pub fn select_config_with(
             origin: ConfigOrigin::Explicit,
         };
     }
-    if let Some(path) = state_dir.map(state_config_path).filter(|path| path.is_file()) {
+    if let Some(path) = state_dir
+        .map(state_config_path)
+        .filter(|path| path.is_file())
+    {
         return ConfigSelection {
             path: Some(path),
             origin: ConfigOrigin::State,
