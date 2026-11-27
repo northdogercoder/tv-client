@@ -16,7 +16,7 @@ Greenfield backlog, 2026-11-25. All rows begin TODO; no application code exists 
 | [C010](010-youtube.md) | Implement YouTube discovery and native local playback | P1 | L | HIGH | C006, C008, C009 | DONE |
 | [C011](011-airplay.md) | Add opt-in LAN AirPlay mirroring | P2 | M | HIGH | C006, C008, C004 | TODO |
 | [C012](012-webrtc.md) | Add optional browser screen sharing receiver | P3 | L | HIGH | C006, C008, C009 | TODO |
-| [C013](013-release.md) | Package, deploy and recover the Pi kiosk | P1 | L | HIGH | C007, C008, C009, C010 | TODO |
+| [C013](013-release.md) | Package, deploy and recover the Pi kiosk | P1 | L | HIGH | C007, C008, C009, C010 | BLOCKED (artifact/hardware NOT RUN) |
 
 ## Dependency notes
 
@@ -37,6 +37,7 @@ Status: TODO / IN PROGRESS / DONE / BLOCKED (reason) / REJECTED (rationale). Mar
 - **C008 DONE 2026-11-26**: merged in `c80b560` from `advisor/c008-input` @ `7c3a7c8`; reviewer APPROVE after one revision; 27 input tests, combined clippy; kernel CEC bridge via `/dev/cec0`; Fire TV remote emitted no CEC user-control messages, USB keyboard fallback; remote CEC NOT VERIFIED.
 - **C009 DONE 2026-11-26**: merged in `a5ed6d6` from `advisor/c009-cloud-device` @ `533aa4f`; reviewer APPROVE after two revisions; 28 cloud + 24 cloud-lib tests, combined clippy; enrollment/pairing/device WS/remote actions wired; live enrollment/pairing pending an operator-minted one-use token.
 - **C010 DONE 2026-11-26**: merged in `bf4a3ad` from `advisor/c010-youtube` @ `be41709`; reviewer APPROVE after two revisions; 23 YouTube + 40 lib tests, combined clippy; accepted Pi gate **720p30 under Cage/GLES** (2/240 drops), 1080p unsupported, labwc FAIL, BBB 480p30 smooth; C013 kiosk uses Cage; C004 Cage revalidation pending; live search token pending.
+- **C013 BLOCKED 2026-11-26**: code merged in `e74bd3b` from `advisor/c013-release` @ `92dbb66`; reviewer APPROVE as code; ARM64 artifact **NOT BUILT**, attestation NOT RUN, hardware matrix R1–R11 **NOT RUN**, no install/deployment. Operator gates: tag/release workflow, artifact checks, Pi install/rollback/reboot/soak/Cage acceptance. Gate flake fix `4306780` retries transient extractor spawns; five consecutive full gates pass.
 - **Repository public**: switched to public 2026-11-25 after a history scan found no credentials; GitHub-hosted arm64 runners (`ubuntu-24.04-arm`) are available for C013.
 - **C010 amended 2026-11-25**: server owns YouTube API search/browse only; Pi playback uses yt-dlp + libmpv + ffmpeg. Chromium/IFrame, player tickets, the server player bridge and server-side download/relay are removed/rejected. The TV is 1080p: target H.264 1080p30, fall back to 720p30; 1080p60 hardware-decodes with v4l2m2m but currently desyncs, so do not offer it. Measure a working renderer (Wayland/OpenGL/wlshm); Vulkan/libplacebo is not assumed. The distro yt-dlp is unreliable; a managed version/update policy, client kill switch and typed extractor-unavailable state are required. Depends on C006's exclusive supervisor, C008 input and C009 device auth. `HANDOFF.md` is the live cross-repo contract; re-read it before C010 dispatch.
 
