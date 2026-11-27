@@ -10,14 +10,16 @@
 - **Risk**: HIGH
 - **Depends on**: C006, C008, C004
 - **Category**: direction
-- **Planned at**: UNBOUND (greenfield), 2026-11-25
+- **Planned at**: 6f06424 (2026-11-27)
 - **State**: TODO (index authoritative)
 
 ## Why this matters
 AirPlay is optional, UxPlay is a separate process, not a Chromecast clone. Discovery on local network only; do not broadcast across tailnet.
 
 ## Current state
-No repository source was provided. Expected state: prerequisite plans merged, with their tested interfaces available. Before dispatch, advisor confirms actual tree and adds excerpts if needed. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
+Baseline `6f06424`: C004/C006/C008 are merged. `Screen::Cast` and `ui/cast.slint` already exist; the `airplay` feature is empty and `src/cast/` is absent. The Pi has `/usr/bin/uxplay` 1.71 with `-pin[xxxx]`, `-fs`, `-n`, `-vsync`; `avahi-daemon` is active. No real AirPlay sender/Mac proof exists yet; UxPlay's Cage/Wayland window and GStreamer sink behavior are unverified.
+
+New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
 
 ## Commands you will need
 | Purpose | Command | Expected |
@@ -35,6 +37,7 @@ Commands are proposed greenfield gates, not previously executed on this repo. Th
 - `Cargo.lock`
 - `src/lib.rs`
 - `src/main.rs`
+- `src/cast/mod.rs`
 - `src/cast/airplay.rs`
 - `src/ui.rs`
 - `ui/`

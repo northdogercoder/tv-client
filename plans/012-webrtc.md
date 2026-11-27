@@ -10,14 +10,16 @@
 - **Risk**: HIGH
 - **Depends on**: C006, C008, C009
 - **Category**: direction
-- **Planned at**: UNBOUND (greenfield), 2026-11-25
+- **Planned at**: 6f06424 (2026-11-27)
 - **State**: TODO (index authoritative)
 
 ## Why this matters
 Browser capture is distinct from URL handoff. Keep disabled until paired consent, H264 negotiation and network reliability verified.
 
 ## Current state
-No repository source was provided. Expected state: prerequisite plans merged, with their tested interfaces available. Before dispatch, advisor confirms actual tree and adds excerpts if needed. New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
+Baseline `6f06424`: C006/C008/C009 are merged. `Screen::Cast` and `ui/cast.slint` already exist; the `webrtc` feature is empty and `src/cast/` is absent. Pi has GStreamer 1.26.2 with `webrtcbin`, `rtph264depay`, `avdec_h264`; Chromium is installed. `docs/protocol-v1.md` has the optional WebRTC cast extension, but no server S009 deployment/join test exists yet, and `src/cloud/` does not currently route `cast_request`/`cast_signal`. Implement the strict local receiver state machine, consent, SDP/ICE validation and GStreamer pipeline; mock signaling and mark the live S009/browser test blocked until the server is deployed. Never log SDP/ICE/tokens or claim joint integration.
+
+New files listed below are target paths; existing code must not be overwritten. Rust package is `tv-client`; use typed errors, structured redacted tracing, bounded queues, explicit cancellation, committed Cargo.lock and non-root services. For cross-boundary behavior follow `docs/protocol-v1.md` and fixture examples. Core local Jellyfin must not depend on cloud; no arbitrary remote shell, URL proxy, or credentials in logs.
 
 ## Commands you will need
 | Purpose | Command | Expected |
@@ -35,6 +37,7 @@ Commands are proposed greenfield gates, not previously executed on this repo. Th
 - `Cargo.lock`
 - `src/lib.rs`
 - `src/main.rs`
+- `src/cast/mod.rs`
 - `src/cast/webrtc.rs`
 - `src/ui.rs`
 - `ui/`
