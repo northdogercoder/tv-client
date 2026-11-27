@@ -18,6 +18,7 @@ use crate::model::{
     Action, AppState, Direction, InputOrigin, Mode, Source, is_valid_item_id, is_valid_youtube_id,
 };
 use crate::playback::{LibraryFilter, PlaybackUpdate};
+use crate::settings::{SettingsEvent, SettingsForm, SettingsRowView};
 
 /// Number of entries on the home screen.
 pub const HOME_ROW_COUNT: usize = 5;
@@ -27,6 +28,8 @@ pub const MAX_LIBRARY_ITEMS: usize = 64;
 pub const MAX_QUERY_CHARS: usize = 48;
 /// Maximum error text length in characters.
 pub const MAX_ERROR_CHARS: usize = 160;
+/// Maximum Jellyfin display-name length shown on the settings screen.
+pub const MAX_QUICK_CONNECT_USER_CHARS: usize = 48;
 /// Minimum interval between accepted repeats of a navigation key.
 pub const REPEAT_INTERVAL: Duration = crate::input::REPEAT_INTERVAL;
 
@@ -401,6 +404,16 @@ pub enum UiOutcome {
     DenyPairing { request_id: Uuid },
     /// Start a pairing-code request from the local settings screen.
     StartPairing,
+    /// Start the Jellyfin Quick Connect flow.
+    JellyfinSignIn,
+    /// Revoke and clear the Jellyfin session.
+    JellyfinSignOut,
+    /// Cancel an in-flight Quick Connect poll.
+    CancelQuickConnect,
+    /// A validated configuration is ready for the worker to write.
+    SaveSettings(crate::config::ClientConfig),
+    /// Exit cleanly so the supervisor restarts the process.
+    Restart,
     /// Submit one explicit YouTube search after local input.
     YoutubeSearch {
         /// Monotonic request identifier used to drop late results.
@@ -726,7 +739,7 @@ pub struct UiModel {
     screen: Screen,
     home_focus: usize,
     library: LibraryView,
-    settings_focus: usize,
+    settings: SettingsForm,
     player_focus: usize,
     player: PlayerView,
     cast_state: String,
@@ -747,7 +760,7 @@ impl Default for UiModel {
             screen: Screen::Home,
             home_focus: 0,
             library: LibraryView::default(),
-            settings_focus: 0,
+            settings: SettingsForm::new(&crate::config::ClientConfig::default()),
             player_focus: 0,
             player: PlayerView::default(),
             cast_state: "No receiver attached".to_owned(),
@@ -785,8 +798,100 @@ impl UiModel {
 
     /// Focused settings row index.
     #[must_use]
-    pub const fn settings_focus(&self) -> usize {
-        self.settings_focus
+    pub fn settings_focus(&self) -> usize {
+        self.settings.focus()
+    }
+
+    /// Row projections rendered by the settings screen.
+    #[must_use]
+    pub fn settings_rows(&self) -> Vec<SettingsRowView> {
+        self.settings.rows()
+    }
+
+    /// Whether the focused text row owns typed characters.
+    #[must_use]
+    pub fn settings_editing(&self) -> bool {
+        self.settings.editing()
+    }
+
+    /// Current text edit buffer.
+    #[must_use]
+    pub fn settings_edit_value(&self) -> &str {
+        self.settings.edit_value()
+    }
+
+    /// Settings status message.
+    #[must_use]
+    pub fn settings_message(&self) -> &str {
+        self.settings.message()
+    }
+
+    /// Settings validation error.
+    #[must_use]
+    pub fn settings_error(&self) -> Option<&str> {
+        self.settings.error()
+    }
+
+    /// Quick Connect code shown on the TV, when a request is pending.
+    #[must_use]
+    pub fn settings_quick_code(&self) -> Option<&str> {
+        self.settings.quick_connect_code()
+    }
+
+    /// Signed-in Jellyfin user.
+    #[must_use]
+    pub fn settings_jellyfin_user(&self) -> Option<&str> {
+        self.settings.jellyfin_user()
+    }
+
+    /// Replace the settings draft with an externally loaded configuration.
+    pub fn reset_settings(&mut self, config: &crate::config::ClientConfig) {
+        let user = self.settings.jellyfin_user().map(str::to_owned);
+        let code = self.settings.quick_connect_code().map(str::to_owned);
+        let active = self.settings.quick_connect_active();
+        self.settings = SettingsForm::new(config);
+        self.settings.set_jellyfin_user(user);
+        self.settings.set_quick_connect_code(code);
+        self.settings.set_quick_connect_active(active);
+    }
+
+    /// Show a Quick Connect code and mark the poll active.
+    pub fn set_quick_connect_code(&mut self, code: Option<String>) {
+        self.settings.set_quick_connect_code(code.clone());
+        self.settings.set_quick_connect_active(code.is_some());
+    }
+
+    /// Mark the Quick Connect poll as active or finished.
+    pub fn set_quick_connect_active(&mut self, active: bool) {
+        self.settings.set_quick_connect_active(active);
+    }
+
+    /// Set or clear the signed-in Jellyfin user.
+    pub fn set_jellyfin_user(&mut self, user: Option<String>) {
+        let display = user.map(|user| sanitize(&user, MAX_QUICK_CONNECT_USER_CHARS, "Jellyfin"));
+        self.settings.set_jellyfin_user(display);
+    }
+
+    /// Set a settings status message without an error.
+    pub fn set_settings_message(&mut self, message: &str) {
+        self.settings
+            .set_message(sanitize(message, MAX_ERROR_CHARS, "Saved"));
+    }
+
+    /// Set a settings validation error without echoing any secret value.
+    pub fn set_settings_error(&mut self, message: &str) {
+        self.settings
+            .set_error(sanitize(message, MAX_ERROR_CHARS, "Settings failed"));
+    }
+
+    /// Confirm a successful configuration write.
+    pub fn settings_saved(&mut self) {
+        self.settings.mark_saved();
+    }
+
+    /// Confirm a failed configuration write.
+    pub fn settings_save_failed(&mut self) {
+        self.settings.mark_save_failed();
     }
 
     /// Focused player control index.
@@ -1269,7 +1374,7 @@ impl UiModel {
 
     /// Set settings focus, clamped to the row list.
     pub fn set_settings_focus(&mut self, index: usize) {
-        self.settings_focus = index.min(SETTINGS_ROWS.len() - 1);
+        self.settings.set_focus(index);
     }
 
     /// Set player control focus, clamped to the control row.
@@ -2570,63 +2675,39 @@ impl UiModel {
     }
 
     fn handle_settings_key(&mut self, key: Key) -> UiOutcome {
-        match key {
-            Key::Up => {
-                self.settings_focus = self.settings_focus.saturating_sub(1);
-                UiOutcome::Action(Action::Navigate {
-                    direction: Direction::Up,
-                })
-            }
-            Key::Down => {
-                self.settings_focus = (self.settings_focus + 1).min(SETTINGS_ROWS.len() - 1);
-                UiOutcome::Action(Action::Navigate {
-                    direction: Direction::Down,
-                })
-            }
-            Key::Left => UiOutcome::Action(Action::Navigate {
-                direction: Direction::Left,
-            }),
-            Key::Right => UiOutcome::Action(Action::Navigate {
-                direction: Direction::Right,
-            }),
-            Key::Enter => self.activate_settings(),
-            Key::Escape => {
-                self.go_home();
-                UiOutcome::Action(Action::Navigate {
-                    direction: Direction::Back,
-                })
-            }
-            Key::Home => {
-                self.go_home();
-                UiOutcome::Action(Action::Navigate {
-                    direction: Direction::Home,
-                })
-            }
-            Key::Backspace | Key::Char(_) => UiOutcome::Ignored,
+        if !self.settings.editing() && key == Key::Escape && self.settings.quick_connect_active() {
+            self.settings.set_quick_connect_active(false);
+            self.settings.set_message("Quick Connect cancelled");
+            return UiOutcome::CancelQuickConnect;
         }
-    }
-
-    fn activate_settings(&mut self) -> UiOutcome {
-        match self.settings_focus {
-            0 => {
-                self.status = "Video follows the 720p/1080p compositor mode".to_owned();
+        let event = self.settings.handle_key(key);
+        let direction = match key {
+            Key::Up => Some(Direction::Up),
+            Key::Down => Some(Direction::Down),
+            Key::Left => Some(Direction::Left),
+            Key::Right => Some(Direction::Right),
+            Key::Enter | Key::Escape | Key::Home | Key::Backspace | Key::Char(_) => None,
+        };
+        match event {
+            SettingsEvent::Navigated => match direction {
+                Some(direction) => UiOutcome::Action(Action::Navigate { direction }),
+                None => self.navigated(),
+            },
+            SettingsEvent::Editing | SettingsEvent::Edited | SettingsEvent::Rejected => {
                 self.navigated()
             }
-            1 => {
-                self.status = "Audio follows the HDMI sink selected by the compositor".to_owned();
-                self.navigated()
-            }
-            2 => {
-                self.status = "tv-client is licensed GPL-3.0-only".to_owned();
-                self.navigated()
-            }
-            3 => UiOutcome::StartPairing,
-            _ => {
+            SettingsEvent::StartPairing => UiOutcome::StartPairing,
+            SettingsEvent::StartJellyfinSignIn => UiOutcome::JellyfinSignIn,
+            SettingsEvent::SignOutJellyfin => UiOutcome::JellyfinSignOut,
+            SettingsEvent::Save(config) => UiOutcome::SaveSettings(config),
+            SettingsEvent::Restart => UiOutcome::Restart,
+            SettingsEvent::Back => {
                 self.go_home();
                 UiOutcome::Action(Action::Navigate {
                     direction: Direction::Back,
                 })
             }
+            SettingsEvent::Ignored => UiOutcome::Ignored,
         }
     }
 
@@ -2689,7 +2770,7 @@ impl UiModel {
             Screen::Home => self.home_focus,
             Screen::Library => self.library.focus,
             Screen::Player => self.player_focus,
-            Screen::Settings => self.settings_focus,
+            Screen::Settings => self.settings.focus(),
             Screen::Cast => 0,
         }
     }
@@ -2754,15 +2835,6 @@ impl UiModel {
 /// Number of player controls: pause, subtitles, audio, next, retry, stop, back.
 const PLAYER_CONTROLS: usize = 7;
 
-/// Settings rows, in display order.
-pub const SETTINGS_ROWS: [&str; 5] = [
-    "Video: 720p / 1080p auto",
-    "Audio: HDMI (compositor)",
-    "Licence: GPL-3.0-only",
-    "Pair a remote",
-    "Back to home",
-];
-
 /// Package version rendered on the settings screen.
 pub const VERSION_LABEL: &str = concat!("tv-client ", env!("CARGO_PKG_VERSION"));
 
@@ -2814,8 +2886,8 @@ mod native {
     use uuid::Uuid;
 
     use super::{
-        Key, LoadState, MediaItem, PairChoice, PlayerMenu, Screen, UiInput, UiModel, UiOutcome,
-        UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, source_label,
+        Key, LoadState, MediaItem, PairChoice, PlayerMenu, Screen, SettingsRowView, UiInput,
+        UiModel, UiOutcome, UiPlaybackCommand, UiReject, UiTrack, VERSION_LABEL, source_label,
     };
     use crate::model::Action;
 
@@ -2835,6 +2907,16 @@ mod native {
         DenyPairing { request_id: Uuid },
         /// The operator asked to start a pairing-code request.
         StartPairing,
+        /// Start the Jellyfin Quick Connect flow.
+        JellyfinSignIn,
+        /// Revoke and clear the Jellyfin session.
+        JellyfinSignOut,
+        /// Cancel an in-flight Quick Connect poll.
+        CancelQuickConnect,
+        /// Write a validated configuration to the state directory.
+        SaveSettings { config: crate::config::ClientConfig },
+        /// Exit cleanly for the supervisor to restart.
+        Restart,
         /// The operator asked to retry the current library load.
         Retry,
         /// The operator opened a library source; the controller should fetch it.
@@ -3091,6 +3173,64 @@ mod native {
         /// Update the persistent cloud status line.
         pub fn set_cloud_status(&self, status: String) {
             self.post(move |model| model.set_cloud_status(&status));
+        }
+
+        /// Replace the settings draft from the effective configuration.
+        pub fn set_settings_config(&self, config: crate::config::ClientConfig) {
+            self.post(move |model| model.reset_settings(&config));
+        }
+
+        /// Show a Quick Connect code and mark the poll active.
+        pub fn set_quick_connect_code(&self, code: String) {
+            self.post(move |model| model.set_quick_connect_code(Some(code)));
+        }
+
+        /// Clear the Quick Connect code and stop showing the poll as active.
+        pub fn clear_quick_connect_code(&self) {
+            self.post(move |model| {
+                model.set_quick_connect_code(None);
+                model.set_quick_connect_active(false);
+            });
+        }
+
+        /// Set or clear the signed-in Jellyfin user.
+        pub fn set_jellyfin_user(&self, user: Option<String>) {
+            self.post(move |model| model.set_jellyfin_user(user));
+        }
+
+        /// Post a non-error settings status message.
+        pub fn set_settings_message(&self, message: String) {
+            self.post(move |model| model.set_settings_message(&message));
+        }
+
+        /// Post a settings error; the caller must not include secrets.
+        pub fn set_settings_error(&self, message: String) {
+            self.post(move |model| model.set_settings_error(&message));
+        }
+
+        /// Confirm that the state configuration was written.
+        pub fn settings_saved(&self) {
+            self.post(UiModel::settings_saved);
+        }
+
+        /// Confirm that the state configuration could not be written.
+        pub fn settings_save_failed(&self) {
+            self.post(UiModel::settings_save_failed);
+        }
+
+        /// Apply the overscan inset without waiting for a restart.
+        pub fn set_safe_area_percent(&self, percent: u8) {
+            let percent = i32::from(percent.min(crate::config::MAX_UI_SAFE_AREA_PERCENT));
+            let _ = self.window.upgrade_in_event_loop(move |window| {
+                window.set_safe_area_percent(percent);
+            });
+        }
+
+        /// Ask the Slint event loop to exit so the supervisor restarts us.
+        pub fn request_restart(&self) {
+            let _ = slint::invoke_from_event_loop(|| {
+                slint::quit_event_loop().ok();
+            });
         }
 
         /// Snapshot the presentation state for cloud publication.
@@ -3393,6 +3533,13 @@ mod native {
                 (**on_command)(UiCommand::DenyPairing { request_id });
             }
             UiOutcome::StartPairing => (**on_command)(UiCommand::StartPairing),
+            UiOutcome::JellyfinSignIn => (**on_command)(UiCommand::JellyfinSignIn),
+            UiOutcome::JellyfinSignOut => (**on_command)(UiCommand::JellyfinSignOut),
+            UiOutcome::CancelQuickConnect => (**on_command)(UiCommand::CancelQuickConnect),
+            UiOutcome::SaveSettings(config) => {
+                (**on_command)(UiCommand::SaveSettings { config });
+            }
+            UiOutcome::Restart => (**on_command)(UiCommand::Restart),
             UiOutcome::YoutubeSearch { request_id, query } => {
                 (**on_command)(UiCommand::YoutubeSearch { request_id, query });
             }
@@ -3502,6 +3649,40 @@ mod native {
         window.set_track_focus(model.player_menu_focus() as i32);
         window.set_cast_state(model.cast_state().into());
         window.set_settings_version(VERSION_LABEL.into());
+
+        let mut left_rows = Vec::new();
+        let mut right_rows = Vec::new();
+        for row in model.settings_rows() {
+            let SettingsRowView {
+                index,
+                label,
+                value,
+                kind,
+                toggle_on,
+                editing,
+            } = row;
+            let rendered = SettingsRow {
+                index,
+                label: label.as_str().into(),
+                value: value.as_str().into(),
+                kind,
+                toggle_on,
+                editing,
+            };
+            if (index as usize) < crate::settings::SETTINGS_COLUMN_BREAK {
+                left_rows.push(rendered);
+            } else {
+                right_rows.push(rendered);
+            }
+        }
+        window.set_settings_left(ModelRc::new(VecModel::from(left_rows)));
+        window.set_settings_right(ModelRc::new(VecModel::from(right_rows)));
+        window.set_settings_editing(model.settings_editing());
+        window.set_settings_edit_value(model.settings_edit_value().into());
+        window.set_settings_message(model.settings_message().into());
+        window.set_settings_error(model.settings_error().unwrap_or("").into());
+        window.set_settings_quick_code(model.settings_quick_code().unwrap_or("").into());
+        window.set_jellyfin_user(model.settings_jellyfin_user().unwrap_or("").into());
 
         window.set_pair_code(model.pairing_code().into());
         window.set_cloud_status(model.cloud_status().into());

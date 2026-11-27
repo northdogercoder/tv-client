@@ -15,7 +15,10 @@ fn version_flag_exits_zero_and_reports_name_and_version() {
 
     assert!(status.success(), "stderr: {stderr}");
     assert!(stdout.contains("tv-client"), "stdout: {stdout:?}");
-    assert!(stdout.contains("0.1.0"), "stdout: {stdout:?}");
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "stdout: {stdout:?}"
+    );
 }
 
 #[test]
@@ -33,5 +36,5 @@ fn help_flag_exits_zero_and_prints_usage() {
 
 #[test]
 fn library_reports_package_version() {
-    assert_eq!(tv_client::version(), "0.1.0");
+    assert_eq!(tv_client::version(), env!("CARGO_PKG_VERSION"));
 }

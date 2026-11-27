@@ -9,7 +9,7 @@ import { HomeScreen } from "home.slint";
 import { LibraryScreen, MediaCard } from "library.slint";
 import { PairDialog } from "pair.slint";
 import { PlayerScreen, TrackRow } from "player.slint";
-import { SettingsScreen } from "settings.slint";
+import { SettingsScreen, SettingsRow } from "settings.slint";
 
 export component AppWindow inherits Window {
     title: "tv-client";
@@ -54,6 +54,15 @@ export component AppWindow inherits Window {
     in-out property <[TrackRow]> track-items;
     in-out property <string> cast-state: "No receiver attached";
     in-out property <string> settings-version;
+    in-out property <[SettingsRow]> settings-left;
+    in-out property <[SettingsRow]> settings-right;
+    in-out property <bool> settings-editing: false;
+    in-out property <string> settings-edit-value;
+    in-out property <string> settings-message;
+    in-out property <string> settings-error;
+    in-out property <string> settings-quick-code;
+    in-out property <string> jellyfin-user;
+    in-out property <int> safe-area-percent: 3;
     in-out property <bool> pair-visible: false;
     in-out property <string> pair-message;
     in-out property <int> pair-choice: 0;
@@ -71,6 +80,11 @@ export component AppWindow inherits Window {
     callback back-requested();
 
     VerticalLayout {
+        // Overscan inset: the panel may crop the outer few percent. The
+        // configured percentage of the short edge keeps the bottom status
+        // strip and every focused row inside the visible area.
+        padding: root.base * root.safe-area-percent / 100;
+
         Rectangle {
             height: root.base / 10;
             background: #141a22;
@@ -173,6 +187,13 @@ export component AppWindow inherits Window {
             base: root.base;
             focus-index: root.settings-focus;
             version: root.settings-version;
+            rows-left: root.settings-left;
+            rows-right: root.settings-right;
+            editing: root.settings-editing;
+            edit-value: root.settings-edit-value;
+            message: root.settings-message;
+            error: root.settings-error;
+            quick-code: root.settings-quick-code;
             activated(index) => {
                 root.settings-activated(index);
             }

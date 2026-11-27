@@ -363,7 +363,7 @@ async fn authorization_header_is_mediabrowser_with_stable_device_id() {
     assert!(
         initial.starts_with("MediaBrowser Client=\"tv-client\", Device=\"test-tv\", DeviceId=\"")
     );
-    assert!(initial.contains(", Version=\"0.1.0\""));
+    assert!(initial.contains(&format!(", Version=\"{}\"", env!("CARGO_PKG_VERSION"))));
     assert!(
         !initial.contains("Token="),
         "unauthenticated header: {initial}"

@@ -14,6 +14,7 @@ pub mod jellyfin;
 pub mod model;
 pub mod playback;
 pub mod player;
+pub mod settings;
 pub mod state;
 pub mod storage;
 pub mod ui;
@@ -45,6 +46,7 @@ pub use player::{
     PlayerFailure, PlayerMachine, PlayerNotification, PlayerRequest, PlayerSession, PlayerState,
     ProgramChildFactory, SupervisorConfig, Tracks,
 };
+pub use settings::{SettingsError, SettingsForm, SettingsRowView, save_state_config};
 pub use state::{Reducer, event_channel, run_state_loop, shutdown_channel};
 pub use storage::{LastView, ProgressRecord, Storage, StorageError};
 

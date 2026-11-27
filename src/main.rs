@@ -1,6 +1,8 @@
 //! Command-line entry point for `tv-client`.
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "native-ui")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
@@ -70,18 +72,18 @@ fn run(cli: Cli) -> Result<(), CliError> {
     if let Some(CliCommand::Enroll(args)) = command {
         return run_enroll(args, config_argument, state_dir_argument);
     }
-    let explicit_config = config_argument.is_some();
-    let config_path = config_argument.or_else(config::default_config_path);
-    let config = load_config(config_path.as_deref(), explicit_config)?;
+    let state_directory = match state_dir_argument {
+        Some(path) => Some(path),
+        None => storage::default_state_dir(),
+    };
+    let selection = config::select_config(config_argument.as_deref(), state_directory.as_deref());
+    let config = load_selected_config(&selection)?;
     if check_config {
         println!("configuration OK");
         return Ok(());
     }
 
-    let state_directory = match state_dir_argument {
-        Some(path) => path,
-        None => storage::default_state_dir().ok_or(CliError::MissingHome)?,
-    };
+    let state_directory = state_directory.ok_or(CliError::MissingHome)?;
     let storage = Storage::open(&state_directory, config.artwork_cache_bytes)?;
     let schema_version = storage.schema_version()?;
     tracing::debug!(
@@ -191,7 +193,12 @@ fn route_command(command: &tv_client::ui::UiCommand) -> Option<RouteCommand> {
         | UiCommand::YoutubeCancel
         | UiCommand::ApprovePairing { .. }
         | UiCommand::DenyPairing { .. }
-        | UiCommand::StartPairing => None,
+        | UiCommand::StartPairing
+        | UiCommand::JellyfinSignIn
+        | UiCommand::JellyfinSignOut
+        | UiCommand::CancelQuickConnect
+        | UiCommand::SaveSettings { .. }
+        | UiCommand::Restart => None,
     }
 }
 
@@ -240,6 +247,9 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
     let ui_routes = route_commands.clone();
     let ui_search = search_commands.clone();
     let (cloud_control, cloud_control_rx) = mpsc::channel::<CloudControl>(32);
+    let (settings_requests, settings_rx) = mpsc::channel::<SettingsRequest>(16);
+    let quick_connect: QuickConnectCancellation = Default::default();
+    let ui_quick_connect = quick_connect.clone();
     let (shutdown, signal) = tv_client::state::shutdown_channel();
     let (media_shutdown, media_signal) = tv_client::state::shutdown_channel();
     let ui = tv_client::ui::NativeUi::new(tv_client::AppState::default(), move |command| {
@@ -259,6 +269,27 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
                     accept: false,
                 });
             }
+            UiCommand::SaveSettings { config } => {
+                let _ = settings_requests.try_send(SettingsRequest::Save(config.clone()));
+            }
+            UiCommand::JellyfinSignIn => {
+                // Signal an in-flight poll/token exchange before the queued
+                // request reaches the worker.
+                cancel_active_quick_connect(&ui_quick_connect);
+                let _ = settings_requests.try_send(SettingsRequest::JellyfinSignIn);
+            }
+            UiCommand::JellyfinSignOut => {
+                cancel_active_quick_connect(&ui_quick_connect);
+                let _ = settings_requests.try_send(SettingsRequest::JellyfinSignOut);
+            }
+            UiCommand::CancelQuickConnect => {
+                cancel_active_quick_connect(&ui_quick_connect);
+                let _ = settings_requests.try_send(SettingsRequest::CancelQuickConnect);
+            }
+            UiCommand::Restart => {
+                cancel_active_quick_connect(&ui_quick_connect);
+                let _ = settings_requests.try_send(SettingsRequest::Restart);
+            }
             other => {
                 // The Slint callback never blocks and never performs I/O: a
                 // full queue drops the command rather than stalling the UI.
@@ -273,6 +304,8 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
         }
     })?;
     let handle = ui.handle();
+    handle.set_settings_config(config.clone());
+    handle.set_safe_area_percent(config.ui_safe_area_percent);
     let cec_bridge = start_cec_bridge(&handle);
 
     #[cfg(feature = "gstreamer-player")]
@@ -317,6 +350,16 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
         cloud_signal,
     );
 
+    let (settings_shutdown, settings_signal) = tv_client::state::shutdown_channel();
+    let settings_thread = start_settings_thread(
+        config.clone(),
+        state_directory.to_path_buf(),
+        handle.clone(),
+        settings_rx,
+        settings_signal,
+        quick_connect.clone(),
+    );
+
     let result = ui.run();
     if let Some(bridge) = cec_bridge {
         match bridge.shutdown(std::time::Duration::from_secs(2)) {
@@ -329,12 +372,83 @@ fn launch_native_ui(config: &ClientConfig, state_directory: &Path) -> Result<(),
     shutdown.cancel();
     media_shutdown.cancel();
     cloud_shutdown.cancel();
+    // Stop an in-flight poll or token exchange before waiting for the worker.
+    cancel_active_quick_connect(&quick_connect);
+    settings_shutdown.cancel();
     #[cfg(feature = "gstreamer-player")]
     join_playback_thread(playback_thread);
     join_media_thread(media_thread);
     join_cloud_thread(cloud_thread);
+    join_settings_thread(settings_thread);
     result?;
     Ok(())
+}
+
+/// Local settings and Quick Connect requests handled off the Slint loop.
+#[cfg(feature = "native-ui")]
+#[derive(Debug)]
+enum SettingsRequest {
+    /// Atomically write a validated configuration to the state directory.
+    Save(ClientConfig),
+    /// Start the Jellyfin Quick Connect flow.
+    JellyfinSignIn,
+    /// Revoke and clear the Jellyfin session.
+    JellyfinSignOut,
+    /// Cancel an in-flight Quick Connect poll.
+    CancelQuickConnect,
+    /// Exit cleanly for the supervisor to restart.
+    Restart,
+}
+
+/// Shared handle to the Quick Connect request currently owned by the worker.
+///
+/// The UI callback and shutdown path cancel this handle directly so an
+/// in-flight poll or token exchange stops before the queued request is
+/// processed. The worker clears the slot whenever the flow ends.
+#[cfg(feature = "native-ui")]
+type QuickConnectCancellation =
+    std::sync::Arc<std::sync::Mutex<Option<tv_client::jellyfin::CancelHandle>>>;
+
+#[cfg(feature = "native-ui")]
+fn quick_connect_guard(
+    slot: &QuickConnectCancellation,
+) -> std::sync::MutexGuard<'_, Option<tv_client::jellyfin::CancelHandle>> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Cancel and forget the active Quick Connect request, if any.
+#[cfg(feature = "native-ui")]
+fn cancel_active_quick_connect(slot: &QuickConnectCancellation) {
+    let handle = quick_connect_guard(slot).take();
+    if let Some(handle) = handle {
+        handle.cancel();
+    }
+}
+
+/// Forget the active Quick Connect request without cancelling it.
+#[cfg(feature = "native-ui")]
+fn clear_active_quick_connect(slot: &QuickConnectCancellation) {
+    let _ = quick_connect_guard(slot).take();
+}
+
+/// Stop the active flow and shared handle; returns whether anything was active.
+#[cfg(feature = "native-ui")]
+fn stop_quick_connect(
+    flow: &mut Option<QuickConnectFlow>,
+    slot: &QuickConnectCancellation,
+) -> bool {
+    let mut stopped = false;
+    if let Some(active) = flow.take() {
+        active.cancel.cancel();
+        stopped = true;
+    }
+    let handle = quick_connect_guard(slot).take();
+    if let Some(handle) = handle {
+        handle.cancel();
+        stopped = true;
+    }
+    stopped
 }
 
 #[cfg(feature = "native-ui")]
@@ -1049,6 +1163,466 @@ fn join_cloud_thread(handle: Option<std::thread::JoinHandle<()>>) {
         let _ = handle.join();
     } else {
         tracing::warn!("cloud thread did not stop within 8 s");
+    }
+}
+
+#[cfg(feature = "native-ui")]
+fn start_settings_thread(
+    config: ClientConfig,
+    state_directory: PathBuf,
+    ui: tv_client::ui::UiHandle,
+    requests: tokio::sync::mpsc::Receiver<SettingsRequest>,
+    shutdown: tv_client::state::ShutdownSignal,
+    quick_connect: QuickConnectCancellation,
+) -> Option<std::thread::JoinHandle<()>> {
+    let status_ui = ui.clone();
+    let thread = std::thread::Builder::new()
+        .name("tv-settings".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::error!(%error, "cannot start the settings runtime");
+                    ui.set_settings_error("Settings are unavailable".to_string());
+                    return;
+                }
+            };
+            runtime.block_on(run_settings(
+                config,
+                state_directory,
+                ui,
+                requests,
+                shutdown,
+                quick_connect,
+            ));
+        });
+    match thread {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            tracing::error!(%error, "cannot spawn the settings thread");
+            status_ui.set_settings_error("Settings are unavailable".to_string());
+            None
+        }
+    }
+}
+
+#[cfg(feature = "native-ui")]
+fn join_settings_thread(handle: Option<std::thread::JoinHandle<()>>) {
+    let Some(handle) = handle else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while !handle.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+    } else {
+        tracing::warn!("settings thread did not stop within 8 s");
+    }
+}
+
+/// One in-flight Jellyfin Quick Connect request.
+#[cfg(feature = "native-ui")]
+struct QuickConnectFlow {
+    client: tv_client::jellyfin::JellyfinClient,
+    storage: Storage,
+    initiation: tv_client::jellyfin::QuickConnectInitiation,
+    cancel: tv_client::jellyfin::CancelHandle,
+    token: tv_client::jellyfin::CancelToken,
+}
+
+/// Result of one Quick Connect poll.
+#[cfg(feature = "native-ui")]
+enum QuickConnectStep {
+    Pending,
+    Approved(String),
+    Expired,
+    Cancelled,
+    Failed(&'static str),
+    Retry,
+}
+
+/// Settings notice asking the operator to apply a restart.
+#[cfg(feature = "native-ui")]
+enum RestartNotice {
+    Info(String),
+    Error(String),
+}
+
+/// Show the restart notice without exiting the worker.
+///
+/// The playback thread builds its Jellyfin client once at startup, and a
+/// client that started without a token is parked in `run_unavailable`. Only
+/// the settings Restart row can rebuild that client. The worker stays alive so
+/// a Save queued during Quick Connect or sign-out is still processed; the
+/// notice tells the operator to apply the restart.
+#[cfg(feature = "native-ui")]
+fn show_restart_notice(ui: &tv_client::ui::UiHandle, notice: RestartNotice) {
+    match notice {
+        RestartNotice::Info(message) => ui.set_settings_message(message),
+        RestartNotice::Error(message) => ui.set_settings_error(message),
+    }
+}
+
+/// Settings worker: configuration writes and Jellyfin sign-in.
+///
+/// All blocking file writes run on `spawn_blocking`; network calls are
+/// bounded and cancellable. The Slint loop only receives posted updates.
+#[cfg(feature = "native-ui")]
+async fn run_settings(
+    mut config: ClientConfig,
+    state_directory: PathBuf,
+    ui: tv_client::ui::UiHandle,
+    mut requests: tokio::sync::mpsc::Receiver<SettingsRequest>,
+    mut shutdown: tv_client::state::ShutdownSignal,
+    quick_connect: QuickConnectCancellation,
+) {
+    use std::time::Duration;
+
+    if let Some(user) = restore_jellyfin_session(&config, &state_directory).await {
+        ui.set_jellyfin_user(Some(user));
+    }
+    let mut flow: Option<QuickConnectFlow> = None;
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                stop_quick_connect(&mut flow, &quick_connect);
+                break;
+            }
+            request = requests.recv() => {
+                let Some(request) = request else {
+                    stop_quick_connect(&mut flow, &quick_connect);
+                    break;
+                };
+                match request {
+                    SettingsRequest::Save(new_config) => {
+                        let directory = state_directory.clone();
+                        let document = new_config.clone();
+                        let written = tokio::task::spawn_blocking(move || {
+                            tv_client::settings::save_state_config(&directory, &document)
+                        })
+                        .await;
+                        match written {
+                            Ok(Ok(_)) => {
+                                config = new_config;
+                                ui.set_settings_config(config.clone());
+                                ui.settings_saved();
+                                tracing::info!("state configuration written");
+                            }
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "state configuration write failed");
+                                ui.settings_save_failed();
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "state configuration worker failed");
+                                ui.settings_save_failed();
+                            }
+                        }
+                    }
+                    SettingsRequest::JellyfinSignIn => {
+                        stop_quick_connect(&mut flow, &quick_connect);
+                        ui.set_settings_message("Starting Jellyfin Quick Connect".to_string());
+                        let (cancel, token) = tv_client::jellyfin::cancellation();
+                        *quick_connect_guard(&quick_connect) = Some(cancel.clone());
+                        match begin_quick_connect(&config, &state_directory, cancel, token).await {
+                            Ok(active) => {
+                                ui.set_quick_connect_code(active.initiation.code().to_owned());
+                                ui.set_settings_message(
+                                    "Enter the code in Jellyfin, then approve it".to_string(),
+                                );
+                                flow = Some(active);
+                            }
+                            Err(message) => {
+                                cancel_active_quick_connect(&quick_connect);
+                                ui.clear_quick_connect_code();
+                                ui.set_settings_error(message.to_string());
+                            }
+                        }
+                    }
+                    SettingsRequest::JellyfinSignOut => {
+                        stop_quick_connect(&mut flow, &quick_connect);
+                        use tv_client::settings::JellyfinSignOutError;
+                        match tv_client::settings::sign_out_jellyfin(
+                            &config,
+                            &state_directory,
+                            Duration::from_secs(15),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                ui.set_jellyfin_user(None);
+                                ui.clear_quick_connect_code();
+                                show_restart_notice(
+                                    &ui,
+                                    RestartNotice::Info(
+                                        "Signed out of Jellyfin; press Restart to apply".to_string(),
+                                    ),
+                                );
+                            }
+                            Err(JellyfinSignOutError::Storage) => {
+                                // Local cleanup failed, so the stored token may
+                                // still be valid. Keep the signed-in row rather
+                                // than claiming a sign-out that did not happen;
+                                // restarting would not clear anything here.
+                                ui.set_settings_error("Jellyfin storage is unavailable".to_string());
+                            }
+                            Err(JellyfinSignOutError::Timeout) => {
+                                ui.set_jellyfin_user(None);
+                                ui.clear_quick_connect_code();
+                                show_restart_notice(
+                                    &ui,
+                                    RestartNotice::Error(
+                                        "Jellyfin sign-out timed out; local token cleared; press Restart to finish signing out"
+                                            .to_string(),
+                                    ),
+                                );
+                            }
+                            Err(JellyfinSignOutError::Revoke(error)) => {
+                                ui.set_jellyfin_user(None);
+                                ui.clear_quick_connect_code();
+                                show_restart_notice(
+                                    &ui,
+                                    RestartNotice::Error(format!(
+                                        "{}; local token cleared; press Restart to finish signing out",
+                                        jellyfin_error_text(&error)
+                                    )),
+                                );
+                            }
+                        }
+                    }
+                    SettingsRequest::CancelQuickConnect => {
+                        let was_active = stop_quick_connect(&mut flow, &quick_connect);
+                        ui.clear_quick_connect_code();
+                        if was_active {
+                            ui.set_settings_message("Quick Connect cancelled".to_string());
+                        }
+                    }
+                    SettingsRequest::Restart => {
+                        stop_quick_connect(&mut flow, &quick_connect);
+                        tracing::info!("restart requested from settings");
+                        ui.request_restart();
+                    }
+                }
+            }
+            _ = tick.tick(), if flow.is_some() => {
+                let Some(active) = flow.as_mut() else {
+                    continue;
+                };
+                match poll_quick_connect(active).await {
+                    QuickConnectStep::Pending => {}
+                    QuickConnectStep::Retry => {}
+                    QuickConnectStep::Approved(user) => {
+                        // The UI or shutdown path empties the slot to cancel.
+                        // If that happened after the token exchange's own
+                        // check, drop the token before accepting the sign-in.
+                        let cancelled_late = quick_connect_guard(&quick_connect).is_none();
+                        let active = flow.take();
+                        clear_active_quick_connect(&quick_connect);
+                        if cancelled_late {
+                            if let Some(active) = active {
+                                discard_stored_jellyfin_token(&active.storage);
+                            }
+                            ui.set_settings_message("Quick Connect cancelled".to_string());
+                            ui.clear_quick_connect_code();
+                        } else {
+                            ui.set_jellyfin_user(Some(user));
+                            ui.clear_quick_connect_code();
+                            // The playback thread already reached
+                            // `run_unavailable` without a token at startup, so
+                            // the library is not usable until the supervisor
+                            // rebuilds the process with the stored token.
+                            show_restart_notice(
+                                &ui,
+                                RestartNotice::Info(
+                                    "Quick Connect succeeded; press Restart to load Jellyfin"
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                    }
+                    QuickConnectStep::Expired => {
+                        flow = None;
+                        clear_active_quick_connect(&quick_connect);
+                        ui.set_settings_error(
+                            "Quick Connect expired; start sign-in again".to_string(),
+                        );
+                        ui.clear_quick_connect_code();
+                    }
+                    QuickConnectStep::Cancelled => {
+                        flow = None;
+                        clear_active_quick_connect(&quick_connect);
+                        ui.set_settings_message("Quick Connect cancelled".to_string());
+                        ui.clear_quick_connect_code();
+                    }
+                    QuickConnectStep::Failed(message) => {
+                        flow = None;
+                        clear_active_quick_connect(&quick_connect);
+                        ui.set_settings_error(message.to_string());
+                        ui.clear_quick_connect_code();
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "native-ui")]
+async fn begin_quick_connect(
+    config: &ClientConfig,
+    state_directory: &Path,
+    cancel: tv_client::jellyfin::CancelHandle,
+    token: tv_client::jellyfin::CancelToken,
+) -> Result<QuickConnectFlow, &'static str> {
+    use std::time::Duration;
+
+    let mut storage = Storage::open(state_directory, config.artwork_cache_bytes)
+        .map_err(|_| "Jellyfin storage is unavailable")?;
+    let client = tv_client::jellyfin::JellyfinClient::new(config, "tv-client", &mut storage)
+        .map_err(|error| jellyfin_error_text(&error))?;
+    let initiation = match tokio::time::timeout(
+        Duration::from_secs(15),
+        client.quick_connect_initiate(&token),
+    )
+    .await
+    {
+        Ok(Ok(initiation)) => initiation,
+        Ok(Err(error)) => return Err(jellyfin_error_text(&error)),
+        Err(_) => return Err("Quick Connect timed out"),
+    };
+    Ok(QuickConnectFlow {
+        client,
+        storage,
+        initiation,
+        cancel,
+        token,
+    })
+}
+
+#[cfg(feature = "native-ui")]
+async fn poll_quick_connect(flow: &mut QuickConnectFlow) -> QuickConnectStep {
+    use std::time::Duration;
+
+    use tv_client::jellyfin::{JellyfinError, QuickConnectPoll};
+
+    if flow.initiation.is_expired() {
+        return QuickConnectStep::Expired;
+    }
+    let QuickConnectFlow {
+        client,
+        storage,
+        initiation,
+        cancel,
+        token,
+        ..
+    } = flow;
+    if cancel.is_cancelled() {
+        return QuickConnectStep::Cancelled;
+    }
+    let polled = tokio::time::timeout(
+        Duration::from_secs(15),
+        client.quick_connect_poll(initiation, token),
+    )
+    .await;
+    match polled {
+        Ok(Ok(QuickConnectPoll::Pending)) => QuickConnectStep::Pending,
+        Ok(Ok(QuickConnectPoll::Approved)) => {
+            if cancel.is_cancelled() {
+                return QuickConnectStep::Cancelled;
+            }
+            let authenticated = tokio::time::timeout(
+                Duration::from_secs(20),
+                client.quick_connect_authenticate(storage, initiation, token),
+            )
+            .await;
+            match authenticated {
+                Ok(Ok(session)) => {
+                    if cancel.is_cancelled() {
+                        // Cancellation landed while the token exchange was
+                        // completing; remove the token that was just written.
+                        discard_stored_jellyfin_token(storage);
+                        QuickConnectStep::Cancelled
+                    } else {
+                        QuickConnectStep::Approved(
+                            session
+                                .user_name()
+                                .map_or_else(|| session.user_id().to_owned(), str::to_owned),
+                        )
+                    }
+                }
+                Ok(Err(JellyfinError::Cancelled)) => QuickConnectStep::Cancelled,
+                Ok(Err(JellyfinError::QuickConnectExpired)) => QuickConnectStep::Expired,
+                Ok(Err(error)) => QuickConnectStep::Failed(jellyfin_error_text(&error)),
+                Err(_) if cancel.is_cancelled() => QuickConnectStep::Cancelled,
+                Err(_) => QuickConnectStep::Failed("Jellyfin sign-in timed out"),
+            }
+        }
+        Ok(Err(JellyfinError::QuickConnectExpired)) => QuickConnectStep::Expired,
+        Ok(Err(JellyfinError::Cancelled)) => QuickConnectStep::Cancelled,
+        Ok(Err(JellyfinError::Timeout | JellyfinError::Network)) => QuickConnectStep::Retry,
+        Ok(Err(error)) => QuickConnectStep::Failed(jellyfin_error_text(&error)),
+        Err(_) if cancel.is_cancelled() => QuickConnectStep::Cancelled,
+        Err(_) => QuickConnectStep::Retry,
+    }
+}
+
+/// Remove a token written by an exchange that was cancelled at the last moment.
+#[cfg(feature = "native-ui")]
+fn discard_stored_jellyfin_token(storage: &Storage) {
+    if let Err(error) = tv_client::settings::clear_jellyfin_access_token(storage) {
+        tracing::warn!(%error, "could not remove a cancelled Jellyfin token");
+    }
+}
+
+#[cfg(feature = "native-ui")]
+async fn restore_jellyfin_session(config: &ClientConfig, state_directory: &Path) -> Option<String> {
+    use std::time::Duration;
+
+    let mut storage = Storage::open(state_directory, config.artwork_cache_bytes).ok()?;
+    let mut client =
+        tv_client::jellyfin::JellyfinClient::new(config, "tv-client", &mut storage).ok()?;
+    let (cancel, token) = tv_client::jellyfin::cancellation();
+    let restored = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.restore_session(&mut storage, &token),
+    )
+    .await;
+    cancel.cancel();
+    match restored {
+        Ok(Ok(true)) => client.session().map(|session| {
+            session
+                .user_name()
+                .map_or_else(|| session.user_id().to_owned(), str::to_owned)
+        }),
+        _ => None,
+    }
+}
+
+/// Static, value-free text for a typed Jellyfin failure.
+#[cfg(feature = "native-ui")]
+fn jellyfin_error_text(error: &tv_client::jellyfin::JellyfinError) -> &'static str {
+    use tv_client::jellyfin::JellyfinError;
+
+    match error {
+        JellyfinError::NotConfigured => "Set the Jellyfin URL first",
+        JellyfinError::QuickConnectUnavailable => "Quick Connect is disabled on the server",
+        JellyfinError::QuickConnectExpired => "Quick Connect expired",
+        JellyfinError::QuickConnectNotApproved => "The code was not approved on the server",
+        JellyfinError::AuthenticationRejected => "Jellyfin rejected the sign-in",
+        JellyfinError::Timeout => "Jellyfin timed out",
+        JellyfinError::Network => "Jellyfin is not reachable",
+        JellyfinError::Cancelled => "Jellyfin sign-in was cancelled",
+        JellyfinError::Unauthorized | JellyfinError::Forbidden => "Jellyfin rejected the session",
+        JellyfinError::NotAuthenticated => "Jellyfin is not signed in",
+        _ => "Jellyfin sign-in failed",
     }
 }
 
@@ -1824,20 +2398,20 @@ fn run_enroll(
     parent_config: Option<PathBuf>,
     parent_state_dir: Option<PathBuf>,
 ) -> Result<(), CliError> {
-    let config_path = args
-        .config
-        .or(parent_config)
-        .or_else(config::default_config_path);
-    let config = load_config(config_path.as_deref(), true)?;
+    let state_directory = args
+        .state_dir
+        .or(parent_state_dir)
+        .or_else(storage::default_state_dir);
+    let selection = config::select_config(
+        args.config.as_deref().or(parent_config.as_deref()),
+        state_directory.as_deref(),
+    );
+    let config = load_selected_config(&selection)?;
     let server_url = config
         .server_url
         .clone()
         .ok_or(CliError::MissingServerUrl)?;
-    let state_directory = args
-        .state_dir
-        .or(parent_state_dir)
-        .or_else(storage::default_state_dir)
-        .ok_or(CliError::MissingHome)?;
+    let state_directory = state_directory.ok_or(CliError::MissingHome)?;
     let mut storage = Storage::open(&state_directory, config.artwork_cache_bytes)?;
     let token = read_enrollment_token()?;
     let http = CloudHttp::new(&server_url)?;
@@ -1872,18 +2446,16 @@ fn read_enrollment_token() -> Result<EnrollmentToken, CliError> {
     EnrollmentToken::new(token).map_err(|_| CliError::InvalidEnrollmentToken)
 }
 
-fn load_config(path: Option<&Path>, explicit: bool) -> Result<ClientConfig, CliError> {
-    if let Some(path) = path {
-        if path.exists() {
-            return Ok(ClientConfig::load(path)?);
-        }
-        if explicit {
-            return Err(CliError::MissingConfig {
-                path: path.to_path_buf(),
-            });
-        }
+fn load_selected_config(selection: &config::ConfigSelection) -> Result<ClientConfig, CliError> {
+    if selection.origin == config::ConfigOrigin::Explicit
+        && let Some(path) = selection.path.as_deref()
+        && !path.exists()
+    {
+        return Err(CliError::MissingConfig {
+            path: path.to_path_buf(),
+        });
     }
-    Ok(ClientConfig::default())
+    Ok(selection.load()?)
 }
 
 #[derive(Debug, Error)]

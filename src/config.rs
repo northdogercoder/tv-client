@@ -43,6 +43,18 @@ pub const MAX_YOUTUBE_TIMEOUT_SECS: u64 = 300;
 /// Default resolve-and-start budget for local YouTube playback.
 pub const DEFAULT_YOUTUBE_TIMEOUT_SECS: u64 = 60;
 
+/// Lowest accepted UI safe-area inset, as a percentage of the short edge.
+pub const MIN_UI_SAFE_AREA_PERCENT: u8 = 0;
+/// Highest accepted UI safe-area inset, as a percentage of the short edge.
+pub const MAX_UI_SAFE_AREA_PERCENT: u8 = 10;
+/// Default UI safe-area inset for the 1080p kiosk panel.
+pub const DEFAULT_UI_SAFE_AREA_PERCENT: u8 = 3;
+
+/// File name of the writable configuration inside the state directory.
+pub const STATE_CONFIG_FILE: &str = "client.toml";
+/// Operator-owned fallback configuration path.
+pub const SYSTEM_CONFIG_PATH: &str = "/etc/tv-client/client.toml";
+
 /// Hardware decoding preference for the local YouTube libmpv child.
 ///
 /// The value becomes an mpv `--hwdec=` argument from a fixed allowlist; it is
@@ -79,8 +91,10 @@ impl YoutubeHwdec {
 #[serde(default, deny_unknown_fields)]
 pub struct ClientConfig {
     /// Direct Jellyfin origin. May be absent for a cloud-only client.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub jellyfin_url: Option<String>,
     /// Optional control-server origin. Required for cloud features.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
     pub cloud_enabled: bool,
     pub youtube_enabled: bool,
@@ -91,8 +105,10 @@ pub struct ClientConfig {
     /// disabled rather than failing startup.
     pub youtube_playback_enabled: bool,
     /// Absolute path to the managed `yt-dlp` release used for extraction.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub youtube_ytdlp_path: Option<PathBuf>,
     /// Optional absolute path to the mpv binary; the default is `mpv` on PATH.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub youtube_mpv_path: Option<PathBuf>,
     /// Bounded resolve-and-start budget in whole seconds.
     pub youtube_playback_timeout_secs: u64,
@@ -107,6 +123,8 @@ pub struct ClientConfig {
     pub max_bitrate_bps: u64,
     pub artwork_cache_bytes: u64,
     pub share_titles: bool,
+    /// Overscan-safe inset applied around the UI, in whole percent (0..=10).
+    pub ui_safe_area_percent: u8,
 }
 
 impl Default for ClientConfig {
@@ -130,6 +148,7 @@ impl Default for ClientConfig {
             max_bitrate_bps: 10_000_000,
             artwork_cache_bytes: MAX_ARTWORK_CACHE_BYTES,
             share_titles: false,
+            ui_safe_area_percent: DEFAULT_UI_SAFE_AREA_PERCENT,
         }
     }
 }
@@ -160,6 +179,16 @@ impl ClientConfig {
         }
         let document = fs::read_to_string(path)?;
         Self::from_toml_str(&document)
+    }
+
+    /// Validate and serialize this configuration as TOML.
+    ///
+    /// Absent optional keys are omitted. The result is written only through
+    /// [`crate::settings::save_state_config`], which applies the 0600/atomic
+    /// rules; this method performs no I/O.
+    pub fn to_toml_string(&self) -> Result<String, ConfigError> {
+        self.validate()?;
+        toml::to_string(self).map_err(|_| ConfigError::Serialize)
     }
 
     /// Validate cross-field constraints and URL policy.
@@ -204,6 +233,14 @@ impl ClientConfig {
             return Err(ConfigError::InvalidValue {
                 field: "artwork_cache_bytes",
                 reason: "must not exceed 134217728",
+            });
+        }
+        if !(MIN_UI_SAFE_AREA_PERCENT..=MAX_UI_SAFE_AREA_PERCENT)
+            .contains(&self.ui_safe_area_percent)
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "ui_safe_area_percent",
+                reason: "must be within 0..=10",
             });
         }
 
@@ -287,6 +324,8 @@ pub enum ConfigError {
     },
     #[error("configuration file is too large")]
     TooLarge,
+    #[error("could not serialize the configuration")]
+    Serialize,
     #[error("could not read configuration file")]
     Io(#[from] std::io::Error),
 }
@@ -330,6 +369,108 @@ pub fn default_config_path() -> Option<PathBuf> {
     env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(|home| PathBuf::from(home).join(".config/tv-client/client.toml"))
+}
+
+/// Path of the writable configuration inside one state directory.
+#[must_use]
+pub fn state_config_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(STATE_CONFIG_FILE)
+}
+
+/// Validate one Jellyfin origin for the settings editor.
+///
+/// The error names the field only and never echoes the supplied URL.
+pub fn validate_jellyfin_origin(value: &str) -> Result<(), ConfigError> {
+    validate_url("jellyfin_url", value, true)
+}
+
+/// Validate one control-server origin for the settings editor.
+pub fn validate_server_origin(value: &str) -> Result<(), ConfigError> {
+    validate_url("server_url", value, false)
+}
+
+/// Validate one managed extractor path for the settings editor.
+pub fn validate_ytdlp_path(value: &str) -> Result<(), ConfigError> {
+    validate_tool_path("youtube_ytdlp_path", Path::new(value))
+}
+
+/// Where the effective configuration came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigOrigin {
+    /// Explicit `--config PATH`.
+    Explicit,
+    /// `<state-dir>/client.toml` on the writable state volume.
+    State,
+    /// Root-owned `/etc/tv-client/client.toml` operator fallback.
+    System,
+    /// Built-in defaults; no file is read.
+    Defaults,
+}
+
+/// Selected configuration file and its origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSelection {
+    /// File to read, or `None` when built-in defaults apply.
+    pub path: Option<PathBuf>,
+    /// Why this file was selected.
+    pub origin: ConfigOrigin,
+}
+
+impl ConfigSelection {
+    /// Read the selected file, or return built-in defaults.
+    ///
+    /// A selected-but-unreadable file is never silently replaced by the next
+    /// candidate: errors propagate to the caller.
+    pub fn load(&self) -> Result<ClientConfig, ConfigError> {
+        match self.path.as_deref() {
+            Some(path) => ClientConfig::load(path),
+            None => Ok(ClientConfig::default()),
+        }
+    }
+}
+
+/// Resolve the configuration precedence.
+///
+/// Order: explicit `--config`, then `<state-dir>/client.toml` when present,
+/// then [`SYSTEM_CONFIG_PATH`] when present, then built-in defaults. Only
+/// existence selects a candidate; validity is checked when it is read.
+#[must_use]
+pub fn select_config(explicit: Option<&Path>, state_dir: Option<&Path>) -> ConfigSelection {
+    select_config_with(explicit, state_dir, Path::new(SYSTEM_CONFIG_PATH))
+}
+
+/// [`select_config`] with an explicit system path, for tests and staging.
+#[must_use]
+pub fn select_config_with(
+    explicit: Option<&Path>,
+    state_dir: Option<&Path>,
+    system_path: &Path,
+) -> ConfigSelection {
+    if let Some(path) = explicit {
+        return ConfigSelection {
+            path: Some(path.to_path_buf()),
+            origin: ConfigOrigin::Explicit,
+        };
+    }
+    if let Some(path) = state_dir
+        .map(state_config_path)
+        .filter(|path| path.is_file())
+    {
+        return ConfigSelection {
+            path: Some(path),
+            origin: ConfigOrigin::State,
+        };
+    }
+    if system_path.is_file() {
+        return ConfigSelection {
+            path: Some(system_path.to_path_buf()),
+            origin: ConfigOrigin::System,
+        };
+    }
+    ConfigSelection {
+        path: None,
+        origin: ConfigOrigin::Defaults,
+    }
 }
 
 fn validate_tool_path(field: &'static str, path: &Path) -> Result<(), ConfigError> {
