@@ -6,6 +6,7 @@
 //! encoded payload before it is stored.
 
 use crate::jellyfin::JellyfinError;
+use crate::jellyfin::models::ArtworkClass;
 
 /// Largest encoded artwork payload accepted from the server.
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -46,6 +47,25 @@ pub(crate) fn validate_dimensions(width: u32, height: u32) -> Result<(), Jellyfi
         return Err(JellyfinError::ImageTooLarge { width, height });
     }
     Ok(())
+}
+
+/// Parse and validate an artwork payload against a class's byte, pixel and
+/// side caps.
+pub(crate) fn validate_artwork(
+    bytes: &[u8],
+    class: ArtworkClass,
+) -> Result<(u32, u32), JellyfinError> {
+    if bytes.len() > class.max_bytes() {
+        return Err(JellyfinError::ArtworkTooLarge);
+    }
+    let (width, height) = image_dimensions(bytes)?;
+    if width > class.max_width()
+        || height > class.max_height()
+        || u64::from(width) * u64::from(height) > class.max_pixels()
+    {
+        return Err(JellyfinError::ImageTooLarge { width, height });
+    }
+    Ok((width, height))
 }
 
 fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), JellyfinError> {

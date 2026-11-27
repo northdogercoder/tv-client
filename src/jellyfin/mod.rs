@@ -38,6 +38,7 @@ mod library;
 mod models;
 mod playback;
 
+pub use artwork::CachedArtwork;
 pub use auth::{QuickConnectInitiation, QuickConnectPoll};
 pub use cancel::{CancelHandle, CancelToken, cancellation};
 pub use client::{
@@ -46,12 +47,14 @@ pub use client::{
 };
 pub use error::JellyfinError;
 pub use image::{MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS};
-pub use library::ItemQuery;
+pub use library::{
+    BROWSE_INCLUDE_ITEM_TYPES, BROWSE_PAGE_SIZE, BrowseItem, ItemQuery, LibraryEntry, MAX_LIBRARIES,
+};
 pub use models::{
-    AuthenticationResult, BaseItem, DEFAULT_IMAGE_HEIGHT, DEFAULT_IMAGE_WIDTH, ImageRequest,
-    ImageType, ItemFilter, MAX_PAGE_SIZE, MAX_REQUESTED_IMAGE_DIMENSION, MAX_SEARCH_TERM_BYTES,
-    MediaSourceInfo, MediaStreamInfo, PAGE_SIZE, Page, PlaybackInfoResponse, QueryResult,
-    SortOrder, StreamUrl, UserDataUpdate, UserDto, UserItemData,
+    ArtworkClass, AuthenticationResult, BaseItem, DEFAULT_IMAGE_HEIGHT, DEFAULT_IMAGE_WIDTH,
+    ImageRequest, ImageType, ItemFilter, MAX_PAGE_SIZE, MAX_REQUESTED_IMAGE_DIMENSION,
+    MAX_SEARCH_TERM_BYTES, MediaSourceInfo, MediaStreamInfo, PAGE_SIZE, Page, PlaybackInfoResponse,
+    QueryResult, SortOrder, StreamUrl, UserDataUpdate, UserDto, UserItemData,
 };
 pub use playback::{
     CodecProfile, DIRECT_PLAY_CONTAINER, DeviceProfile, DirectPlayProfile, MAX_AUDIO_CHANNELS,

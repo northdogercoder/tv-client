@@ -15,6 +15,118 @@ use crate::jellyfin::models::{
 
 const DEFAULT_FIELDS: &str = "UserData,ImageTags,Overview";
 
+/// Item page size used by a poster/library grid.
+pub const BROWSE_PAGE_SIZE: u32 = 24;
+/// Playable item types shown in a library grid.
+pub const BROWSE_INCLUDE_ITEM_TYPES: [&str; 3] = ["Movie", "Episode", "Video"];
+/// Maximum number of library views handed to the UI in one list.
+pub const MAX_LIBRARIES: usize = 32;
+
+const MAX_LIBRARY_NAME_CHARS: usize = 128;
+const MAX_BROWSE_TITLE_CHARS: usize = 256;
+const MAX_BROWSE_SUBTITLE_CHARS: usize = 96;
+const MAX_BROWSE_OVERVIEW_CHARS: usize = 512;
+
+/// One top-level library view.
+///
+/// Only the display name and collection type are copied; no URL, token or
+/// filesystem path is modeled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibraryEntry {
+    /// Opaque library (view) identifier, usable as a browse parent.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Jellyfin collection type, for example `movies` or `tvshows`.
+    pub collection_type: Option<String>,
+}
+
+impl LibraryEntry {
+    /// Project a server item onto the bounded browse model.
+    #[must_use]
+    pub fn from_base_item(item: &BaseItem) -> Self {
+        let name = item.name.as_deref().unwrap_or("Library");
+        Self {
+            id: item.id.clone(),
+            name: truncate_chars(name, MAX_LIBRARY_NAME_CHARS),
+            collection_type: item.collection_type.clone(),
+        }
+    }
+}
+
+/// One poster-grid item.
+///
+/// The primary image tag is copied so the UI can request artwork through
+/// [`crate::jellyfin::ImageRequest`] without seeing a server URL.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrowseItem {
+    /// Opaque item identifier.
+    pub id: String,
+    /// Display title.
+    pub title: String,
+    /// Secondary line, for example `Movie · 2021 · 1h 52m`.
+    pub subtitle: String,
+    /// Bounded description, when supplied.
+    pub overview: Option<String>,
+    /// Server image tag for the primary artwork, when supplied.
+    pub primary_tag: Option<String>,
+    /// Jellyfin item type, for example `Movie` or `Episode`.
+    pub item_type: Option<String>,
+}
+
+impl BrowseItem {
+    /// Project a server item onto the bounded browse model.
+    #[must_use]
+    pub fn from_base_item(item: &BaseItem) -> Self {
+        let title = item.name.as_deref().unwrap_or("Untitled");
+        let item_type = item.item_type.clone();
+        Self {
+            id: item.id.clone(),
+            title: truncate_chars(title, MAX_BROWSE_TITLE_CHARS),
+            subtitle: truncate_chars(
+                &subtitle_for(item),
+                MAX_BROWSE_SUBTITLE_CHARS,
+            ),
+            overview: item
+                .overview
+                .as_deref()
+                .map(|overview| truncate_chars(overview, MAX_BROWSE_OVERVIEW_CHARS)),
+            primary_tag: item.image_tags.get("Primary").cloned(),
+            item_type,
+        }
+    }
+}
+
+/// Build the bounded secondary line shown under a title.
+fn subtitle_for(item: &BaseItem) -> String {
+    let mut parts = Vec::with_capacity(3);
+    if let Some(item_type) = item.item_type.as_deref() {
+        if !item_type.is_empty() {
+            parts.push(item_type.to_owned());
+        }
+    }
+    if let Some(year) = item.production_year {
+        parts.push(year.to_string());
+    }
+    if let Some(ticks) = item.run_time_ticks {
+        let minutes = ticks / 600_000_000;
+        if minutes >= 60 {
+            parts.push(format!("{}h {}m", minutes / 60, minutes % 60));
+        } else if minutes > 0 {
+            parts.push(format!("{minutes}m"));
+        }
+    }
+    parts.join(" · ")
+}
+
+/// Truncate to a fixed character count without splitting a UTF-8 code point.
+fn truncate_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_owned();
+    }
+    value.chars().take(max).collect()
+}
+
 /// Query parameters for `/Users/{user}/Items`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemQuery {
@@ -66,6 +178,21 @@ impl ItemQuery {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// One bounded page of playable movies, episodes and videos below a
+    /// library view.
+    ///
+    /// The query requests `UserData`, `ImageTags` and `Overview`, restricts
+    /// `IncludeItemTypes` to `Movie,Episode,Video` and `MediaTypes` to `Video`,
+    /// and uses [`BROWSE_PAGE_SIZE`] (24) to bound poster fetches per page.
+    pub fn browse(parent_id: &str, start_index: u32) -> Result<Self, JellyfinError> {
+        Ok(Self::new()
+            .parent(parent_id)
+            .include_types(&BROWSE_INCLUDE_ITEM_TYPES)
+            .media_types(&["Video"])
+            .fields(&["UserData", "ImageTags", "Overview"])
+            .page(Page::new(start_index, BROWSE_PAGE_SIZE)?))
     }
 
     /// Restrict to a parent folder.
@@ -175,6 +302,34 @@ impl JellyfinClient {
         let user = self.user_id()?;
         let url = self.endpoint(&["Users", user, "Views"])?;
         self.get_json(url, cancel).await
+    }
+
+    /// List bounded, UI-ready library views.
+    ///
+    /// At most [`MAX_LIBRARIES`] entries are returned, so a hostile or
+    /// misconfigured server cannot grow the browse model without bound.
+    pub async fn libraries(
+        &self,
+        cancel: &CancelToken,
+    ) -> Result<Vec<LibraryEntry>, JellyfinError> {
+        let views = self.views(cancel).await?;
+        Ok(views
+            .items
+            .iter()
+            .take(MAX_LIBRARIES)
+            .map(LibraryEntry::from_base_item)
+            .collect())
+    }
+
+    /// List one bounded page of playable items below a library view.
+    pub async fn browse(
+        &self,
+        library_id: &str,
+        start_index: u32,
+        cancel: &CancelToken,
+    ) -> Result<QueryResult<BaseItem>, JellyfinError> {
+        let query = ItemQuery::browse(library_id, start_index)?;
+        self.items(&query, cancel).await
     }
 
     /// List items matching a typed query.

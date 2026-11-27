@@ -83,6 +83,8 @@ Reads are strictly typed with serde and use PascalCase Jellyfin fields.
 | Method | Endpoint | Notes |
 |---|---|---|
 | `views` | `GET /Users/{userId}/Views` | Top-level Movies, TV Shows, Music, Books, etc. |
+| `libraries` | `GET /Users/{userId}/Views` | Bounded `Vec<LibraryEntry>`: id, name, collection type (max 32) |
+| `browse` | `GET /Users/{userId}/Items` | One 24-item page below a library: `IncludeItemTypes=Movie,Episode,Video`, `MediaTypes=Video`, `Fields=UserData,ImageTags,Overview` |
 | `items` | `GET /Users/{userId}/Items` | Typed `ItemQuery`: parent, types, media types, recursion, search, sort, filters, fields |
 | `resume` | `GET /Users/{userId}/Items` | `Filters=IsResumable`, `MediaTypes=Video`, sorted by `DatePlayed` descending |
 | `latest` | `GET /Users/{userId}/Items/Latest` | Optional parent, bounded limit |
@@ -93,11 +95,13 @@ Reads are strictly typed with serde and use PascalCase Jellyfin fields.
 | `user_data` | `GET /Users/{userId}/Items/{itemId}/UserData` | Played state, resume ticks, favourite |
 | `update_user_data` | `POST /Users/{userId}/Items/{itemId}/UserData` | Typed played/position/favourite update |
 | `playback_info` | `POST /Items/{itemId}/PlaybackInfo?UserId=...` | Capabilities only; URLs in the upstream JSON are ignored |
-| `image` | `GET /Items/{itemId}/Images/{type}?tag=&maxWidth=&maxHeight=` | Cached artwork |
+| `image` | `GET /Items/{itemId}/Images/{type}?tag=&maxWidth=&maxHeight=&format=jpg` | Typed artwork class, cached `CachedArtwork` |
 
 Pagination defaults to 50 items per page (`PAGE_SIZE`). `Page::new(start, limit)`
 rejects zero or more than 200 items and is emitted as `StartIndex` and `Limit`.
-`Page::next()` advances by the page size.
+`Page::next()` advances by the page size. Library grids use `ItemQuery::browse`,
+which requests 24 items per page (`BROWSE_PAGE_SIZE`) so poster fetches stay
+bounded.
 
 `BaseItem` includes IDs, names, types, collection type, parent/series/season/
 album IDs, artists, indexes, duration ticks, overview, image tags and user
@@ -148,8 +152,9 @@ client nor the controller rewrites a stream through a proxy or another host.
 
 ## Controller, progress and ticks
 
-`playback::PlaybackController` owns one `JellyfinClient` and one C006
-`PlayerSession`. Starting an item:
+`playback::PlaybackController` owns one `JellyfinClient`, one C006
+`PlayerSession` and, when constructed with `with_storage`, the `Storage` handle
+used for artwork caching. Starting an item:
 
 1. reads `GET /Items/{itemId}` and the embedded (or explicit) user data;
 2. resumes from `PlaybackPositionTicks` when the position is at least 30 s and
@@ -214,20 +219,66 @@ Direct-play/remux, HEVC and subtitle burn-in remain open.
 
 ## Artwork cache
 
-Images are cached through `Storage::store_artwork` / `Storage::artwork_path`.
-The cache key contains the server origin, user ID, item ID, image kind and the
-server's image tag, so a new tag replaces stale artwork. Long keys are reduced
-to a stable bounded hash key.
+Artwork is modeled by `ImageRequest` plus a typed `ArtworkClass`; the UI never
+sees a server URL or supplies one.
 
-- The cache cap is the `Storage` cap (maximum 128 MiB); least-recently-used
-  entries are evicted by `Storage`.
-- Each download is capped at 8 MiB. Declared `Content-Length` and streamed
-  chunks are checked, so an oversized response is rejected before storage.
-- `Content-Type` is not trusted. PNG, JPEG, GIF and WebP headers are parsed.
-  Dimensions above 8192 pixels per side or 33,554,432 pixels are rejected as
-  `ImageTooLarge` before a decoder or the artwork store sees the bytes.
-- Cache writes are atomic and private through `Storage`; no artwork path is
-  exposed outside the process state directory.
+| Class | Requested size | Encoded cap | Pixel cap | Side cap |
+|---|---|---|---|---|
+| `ArtworkClass::Poster` | 320x480 | 2 MiB | 1,000,000 | 320x480 |
+| `ArtworkClass::Preview` | 1280x720 | 8 MiB | 2,073,600 | 1280x720 |
+
+`ImageRequest::poster(item_id, tag)` and `ImageRequest::preview(item_id, tag)`
+build the two standard requests; `ImageRequest::class()` reports the class.
+Requests carry `tag`, `maxWidth`, `maxHeight`, `format=jpg` and `quality=90`.
+JPEG is used because every supported Slint backend decodes it; WebP/GIF are not
+required.
+
+`JellyfinClient::image` returns `CachedArtwork { path, width, height, bytes }`.
+The path is produced only by `Storage`; width/height/bytes are validated
+against the class before the value is returned. `CachedArtwork` dereferences to
+`Path` and implements `AsRef<Path>`.
+
+The cache key contains the server origin, user ID, item ID, image kind, the
+server's image tag **and** `class:widthxheight:format`. A poster and a preview
+of the same item/tag therefore never collide (`jf2` key version). A new server
+tag invalidates the old entry. Cached payloads are re-validated (bounded by the
+class byte cap) on every hit; a corrupt or out-of-class file is replaced.
+
+Caps are enforced before storage:
+
+- the encoded payload is capped per class (2 MiB poster, 8 MiB preview); both
+  declared `Content-Length` and streamed chunks are checked;
+- the format header is parsed without a decoder;
+- decoded sides and pixels must fit the class caps, and the global 8192-side /
+  33,554,432-pixel limits still apply;
+- `Content-Type` is never trusted.
+
+A missing image (`HTTP 404`) returns `JellyfinError::ArtworkMissing`, and an
+item with no primary tag is reported as missing without a request. Both are
+normal placeholder outcomes; they are not browse/page failures. The overall
+artwork directory remains bounded by the `Storage` LRU cap (maximum 128 MiB),
+and cache writes are atomic and private.
+
+`PlaybackController` owns the `Storage` handle used by `image`; a controller
+built without one still plays items and only rejects artwork requests. Browse
+and artwork results are published as `PlaybackUpdate::Browse(BrowseUpdate)` so
+they never move the player screen.
+
+| `BrowseUpdate` | Meaning |
+|---|---|
+| `LibrariesReady { libraries }` | `Vec<LibraryEntry>` (id, name, collection type), max 32 |
+| `LibrariesFailed { message }` | Redacted failure text |
+| `ItemsReady { library_id, items, total, next_start }` | Bounded `Vec<BrowseItem>` (max 24); `next_start` is `Some` only when more items remain |
+| `ItemsFailed { library_id, message }` | Redacted failure text |
+| `ArtworkReady { item_id, class, artwork }` | Cached path and validated metadata |
+| `ArtworkMissing { item_id, class }` | 404 or no tag |
+| `ArtworkFailed { item_id, class, message }` | Size/decode/transport failure |
+| `SessionExpired` | HTTP 401 during a browse or artwork request |
+
+`BrowseItem` carries exactly `id`, `title`, `subtitle`, `overview`,
+`primary_tag` and `item_type`. Titles and overview are truncated to fixed
+character counts; no path, URL or token field exists, and `Debug` prints only
+these values.
 
 ## Cancellation and failures
 
@@ -258,6 +309,7 @@ metadata cache.
 | Image payload too large | `ArtworkTooLarge` |
 | Image dimensions above limits | `ImageTooLarge` |
 | Unknown image header | `InvalidImage` |
+| Image absent (HTTP 404) or no primary tag | `ArtworkMissing` |
 | Storage failure | `Storage` or `Artwork` |
 
 Error `Display` and `Debug` output never includes passwords, access tokens,

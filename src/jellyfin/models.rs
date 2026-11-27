@@ -540,6 +540,76 @@ pub struct MediaStreamInfo {
     pub delivery_url: Option<StreamUrl>,
 }
 
+/// UI artwork size class.
+///
+/// The class fixes the requested dimensions, the encoded payload cap and the
+/// decoded pixel/side caps, and is part of the cache identity. It is the only
+/// artwork sizing knob exposed to the UI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArtworkClass {
+    /// Small grid poster, 320x480.
+    Poster,
+    /// Large preview image, 1280x720.
+    #[default]
+    Preview,
+}
+
+impl ArtworkClass {
+    /// Requested width and height.
+    #[must_use]
+    pub const fn dimensions(self) -> (u32, u32) {
+        match self {
+            Self::Poster => (320, 480),
+            Self::Preview => (1280, 720),
+        }
+    }
+
+    /// Largest accepted width.
+    #[must_use]
+    pub const fn max_width(self) -> u32 {
+        self.dimensions().0
+    }
+
+    /// Largest accepted height.
+    #[must_use]
+    pub const fn max_height(self) -> u32 {
+        self.dimensions().1
+    }
+
+    /// Largest encoded payload accepted for this class.
+    #[must_use]
+    pub const fn max_bytes(self) -> usize {
+        match self {
+            Self::Poster => 2 * 1024 * 1024,
+            Self::Preview => 8 * 1024 * 1024,
+        }
+    }
+
+    /// Largest accepted decoded pixel count.
+    #[must_use]
+    pub const fn max_pixels(self) -> u64 {
+        match self {
+            Self::Poster => 1_000_000,
+            Self::Preview => 2_073_600,
+        }
+    }
+
+    /// Requested wire format. JPEG is decoded by every supported backend.
+    #[must_use]
+    pub const fn format(self) -> &'static str {
+        "jpg"
+    }
+
+    /// Stable cache-key label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Poster => "poster",
+            Self::Preview => "preview",
+        }
+    }
+}
+
 /// A request for one cached artwork image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRequest {
@@ -548,6 +618,7 @@ pub struct ImageRequest {
     tag: Option<String>,
     max_width: u32,
     max_height: u32,
+    class: ArtworkClass,
 }
 
 /// Default requested artwork width.
@@ -563,7 +634,7 @@ impl ImageRequest {
         item_id: &str,
         image_type: ImageType,
     ) -> Result<Self, crate::jellyfin::JellyfinError> {
-        Self::with_tag(item_id, image_type, None)
+        Self::with_class(item_id, image_type, None, ArtworkClass::Preview)
     }
 
     /// Request an image variant identified by the server's tag.
@@ -571,6 +642,32 @@ impl ImageRequest {
         item_id: &str,
         image_type: ImageType,
         tag: Option<&str>,
+    ) -> Result<Self, crate::jellyfin::JellyfinError> {
+        Self::with_class(item_id, image_type, tag, ArtworkClass::Preview)
+    }
+
+    /// Request a 320x480 grid poster for the server's primary image.
+    pub fn poster(
+        item_id: &str,
+        tag: Option<&str>,
+    ) -> Result<Self, crate::jellyfin::JellyfinError> {
+        Self::with_class(item_id, ImageType::Primary, tag, ArtworkClass::Poster)
+    }
+
+    /// Request a 1280x720 preview for the server's primary image.
+    pub fn preview(
+        item_id: &str,
+        tag: Option<&str>,
+    ) -> Result<Self, crate::jellyfin::JellyfinError> {
+        Self::with_class(item_id, ImageType::Primary, tag, ArtworkClass::Preview)
+    }
+
+    /// Request an image variant with an explicit size class.
+    pub fn with_class(
+        item_id: &str,
+        image_type: ImageType,
+        tag: Option<&str>,
+        class: ArtworkClass,
     ) -> Result<Self, crate::jellyfin::JellyfinError> {
         if !crate::model::is_valid_item_id(item_id) {
             return Err(crate::jellyfin::JellyfinError::InvalidItemId);
@@ -580,16 +677,18 @@ impl ImageRequest {
         {
             return Err(crate::jellyfin::JellyfinError::InvalidRequest);
         }
+        let (width, height) = class.dimensions();
         Ok(Self {
             item_id: item_id.to_owned(),
             image_type,
             tag: tag.map(str::to_owned),
-            max_width: DEFAULT_IMAGE_WIDTH,
-            max_height: DEFAULT_IMAGE_HEIGHT,
+            max_width: width,
+            max_height: height,
+            class,
         })
     }
 
-    /// Set the maximum produced dimensions.
+    /// Set the maximum produced dimensions, bounded by the class.
     pub fn with_max_size(
         mut self,
         width: u32,
@@ -597,6 +696,8 @@ impl ImageRequest {
     ) -> Result<Self, crate::jellyfin::JellyfinError> {
         if width == 0
             || height == 0
+            || width > self.class.max_width()
+            || height > self.class.max_height()
             || width > MAX_REQUESTED_IMAGE_DIMENSION
             || height > MAX_REQUESTED_IMAGE_DIMENSION
         {
@@ -635,6 +736,18 @@ impl ImageRequest {
     #[must_use]
     pub const fn max_height(&self) -> u32 {
         self.max_height
+    }
+
+    /// Artwork size class that fixes the caps and cache identity.
+    #[must_use]
+    pub const fn class(&self) -> ArtworkClass {
+        self.class
+    }
+
+    /// Requested wire format.
+    #[must_use]
+    pub const fn format(&self) -> &'static str {
+        self.class.format()
     }
 }
 

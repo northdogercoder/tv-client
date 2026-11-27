@@ -31,13 +31,13 @@ pub use input::{
     ShutdownOutcome,
 };
 pub use jellyfin::{
-    BaseItem, CancelHandle, CancelToken, JellyfinClient, JellyfinError, Page, QueryResult, Session,
-    cancellation,
+    ArtworkClass, BaseItem, BrowseItem, CachedArtwork, CancelHandle, CancelToken, ImageRequest,
+    JellyfinClient, JellyfinError, LibraryEntry, Page, QueryResult, Session, cancellation,
 };
 pub use model::{Action, AppState, Effect, Event, InputOrigin, Mode, Source, StateError};
 pub use playback::{
-    LibraryFilter, MAX_PROGRESS_AGE, MAX_PROGRESS_JOURNAL, MAX_PROGRESS_RETRIES, PlayRequest,
-    PlaybackCommand, PlaybackConfig, PlaybackController, PlaybackError, PlaybackItem,
+    BrowseUpdate, LibraryFilter, MAX_PROGRESS_AGE, MAX_PROGRESS_JOURNAL, MAX_PROGRESS_RETRIES,
+    PlayRequest, PlaybackCommand, PlaybackConfig, PlaybackController, PlaybackError, PlaybackItem,
     PlaybackUpdate, ProgressEntry, ProgressJournal, RESUME_END_MARGIN_TICKS, RESUME_MIN_TICKS,
     TrackChoice, millis_from_ticks, ticks_from_millis,
 };

@@ -453,27 +453,32 @@ impl JellyfinClient {
         item_id: &str,
         image_type: crate::jellyfin::ImageType,
         tag: Option<&str>,
+        class: crate::jellyfin::ArtworkClass,
+        width: u32,
+        height: u32,
     ) -> Result<String, JellyfinError> {
         let user = self.user_id()?;
         let tag = tag.unwrap_or("none");
-        for part in [user, item_id, image_type.as_str(), tag] {
+        let class_part = format!("{}:{width}x{height}:{}", class.as_str(), class.format());
+        for part in [user, item_id, image_type.as_str(), tag, class_part.as_str()] {
             if part.is_empty() || part.chars().any(char::is_control) {
                 return Err(JellyfinError::InvalidRequest);
             }
         }
         let readable = format!(
-            "jf1|{}|{}|{}|{}|{}",
+            "jf2|{}|{}|{}|{}|{}|{}",
             self.base.origin().ascii_serialization(),
             user,
             item_id,
             image_type.as_str(),
-            tag
+            tag,
+            class_part
         );
         if readable.len() <= STORAGE_ARTWORK_KEY_BYTES {
             return Ok(readable);
         }
         let hashed = format!(
-            "jf1|{:016x}|{:016x}|{:016x}",
+            "jf2|{:016x}|{:016x}|{:016x}",
             fnv1a(0xcbf29ce484222325, readable.as_bytes()),
             fnv1a(0x84222325cbf29ce4, readable.as_bytes()),
             readable.len()
