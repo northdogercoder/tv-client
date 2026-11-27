@@ -418,7 +418,7 @@ fn build_arguments(socket: &Path, input_conf: &Path) -> Vec<String> {
     let mut arguments = vec![
         "--no-config".to_string(),
         "--terminal=yes".to_string(),
-        "--msg-level=all=no".to_string(),
+        "--msg-level=all=no,vo=error,vd=error".to_string(),
         "--term-status-msg=hwdec=${hwdec-current} codec=${video-codec} size=${width}x${height} fps=${container-fps} vfps=${estimated-vf-fps} drops=${drop-frame-count} mistimed=${mistimed-frame-count} vo-drops=${vo-drop-frame-count} audio=${audio-codec} sync=${video-sync}".to_string(),
         "--idle=yes".to_string(),
         "--force-window=yes".to_string(),
@@ -445,10 +445,11 @@ fn build_arguments(socket: &Path, input_conf: &Path) -> Vec<String> {
         if !hwdec.trim().is_empty() {
             arguments.push(format!("--hwdec={}", hwdec.trim()));
         }
+    } else if arguments.iter().any(|arg| arg == "--vo=dmabuf-wayland") {
+        // dmabuf-wayland only works with a dmabuf-capable decoder. Auto-safe
+        // probes VDPAU first on this image and can fail before trying v4l2m2m.
+        arguments.push("--hwdec=v4l2m2m".to_string());
     } else {
-        // Match the proven YouTube mpv path. Forcing v4l2m2m on this GPU/OSC
-        // combination produced choppy Jellyfin video; auto-safe lets mpv pick
-        // the working decoder for the actual codec.
         arguments.push("--hwdec=auto-safe".to_string());
     }
     if std::env::var("TV_AUDIO_SINK").as_deref() == Ok("alsa") {
