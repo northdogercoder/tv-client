@@ -243,7 +243,12 @@ impl MpvSession {
             stopped: false,
             ended: false,
         };
-        for (id, property) in [(1, "time-pos"), (2, "duration"), (3, "eof-reached")] {
+        for (id, property) in [
+            (1, "time-pos"),
+            (2, "duration"),
+            (3, "eof-reached"),
+            (4, "pause"),
+        ] {
             session.send(&json!({"command": ["observe_property", id, property]}));
         }
         if let Some(headers) = load.headers.as_ref()
@@ -257,6 +262,9 @@ impl MpvSession {
         }
         session.send(&json!({"command": ["loadfile", load.url, "replace"]}));
         session.send(&json!({"command": ["set_property", "pause", false]}));
+        session.send(&json!({
+            "command": ["script-message", "osc-visibility", "never"]
+        }));
         Ok(session)
     }
 
@@ -280,6 +288,17 @@ impl MpvSession {
 
     fn set_paused(&mut self, paused: bool) {
         self.send(&json!({"command": ["set_property", "pause", paused]}));
+        self.set_osc_visibility(paused);
+    }
+
+    fn set_osc_visibility(&mut self, visible: bool) {
+        // The OSC overlay is expensive to composite over 1080p video on the Pi.
+        // Keep it hidden during playback and show it only while paused, when
+        // there are no moving video frames competing with the OSD. Observing
+        // mpv's pause property also covers keyboard/OSC-initiated pauses.
+        self.send(&json!({
+            "command": ["script-message", "osc-visibility", if visible { "always" } else { "never" }]
+        }));
     }
 
     fn seek(&mut self, position_ms: u64) {
@@ -337,6 +356,11 @@ impl MpvSession {
                             events.push(PlayerEvent::Ended);
                         }
                         break;
+                    }
+                    if id == 4
+                        && let Some(paused) = value.get("data").and_then(Value::as_bool)
+                    {
+                        self.set_osc_visibility(paused);
                     }
                 }
                 Err(error)
