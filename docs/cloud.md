@@ -11,7 +11,7 @@ protocol **v1** and rejects any other major version.
 
 ## Staging endpoint
 
-Staging runs at `ovh-1.minotaur-gacrux.ts.net` over Tailscale Serve HTTPS. The
+Staging runs at `ovh-anders.minotaur-gacrux.ts.net` over Tailscale Serve HTTPS. The
 client accepts only an `https://` origin for `server_url`; the WebSocket is
 derived as `wss://<origin>/v1/ws/device`. HTTP is never accepted for the cloud,
 even on loopback, and credentials in an origin are rejected by configuration.
