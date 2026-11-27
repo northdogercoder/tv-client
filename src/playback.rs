@@ -16,16 +16,18 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::jellyfin::{
-    CancelToken, ItemQuery, JellyfinClient, JellyfinError, MAX_PLAYBACK_START_TICKS,
-    MediaSelection, MediaStreamChoice, MediaStreamInfo, Page, PlayMethod, PlaybackInfoOptions,
-    PlaybackProgressInfo, PlaybackStartInfo, PlaybackStopInfo, SelectionError, SelectionOptions,
-    TICKS_PER_MILLISECOND, UserItemData, select_media_source,
+    ArtworkClass, BrowseItem, CachedArtwork, CancelToken, ImageRequest, ImageType, ItemQuery,
+    JellyfinClient, JellyfinError, LibraryEntry, MAX_PLAYBACK_START_TICKS, MediaSelection,
+    MediaStreamChoice, MediaStreamInfo, Page, PlayMethod, PlaybackInfoOptions, PlaybackProgressInfo,
+    PlaybackStartInfo, PlaybackStopInfo, SelectionError, SelectionOptions, TICKS_PER_MILLISECOND,
+    UserItemData, select_media_source,
 };
 use crate::player::{
     LoadRequest, MAX_POSITION_MS, PlayerCommand, PlayerError, PlayerNotification, PlayerSession,
     PlayerState,
 };
 use crate::state::ShutdownSignal;
+use crate::storage::Storage;
 
 /// Progress is reported every ten seconds while playing.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
@@ -200,6 +202,24 @@ pub enum PlaybackCommand {
     },
     /// Retry the last library fetch.
     RetryLibrary,
+    /// Fetch the user's top-level Jellyfin library views.
+    LoadJellyfinLibraries,
+    /// Fetch one bounded page of playable items below a library view.
+    LoadJellyfinItems {
+        /// Library (view) identifier used as `ParentId`.
+        library_id: String,
+        /// Zero-based first item index.
+        start_index: u32,
+    },
+    /// Fetch one cached poster or preview image.
+    LoadArtwork {
+        /// Opaque item identifier.
+        item_id: String,
+        /// Server primary image tag, when the browse item supplied one.
+        tag: Option<String>,
+        /// Requested size class.
+        class: ArtworkClass,
+    },
     /// Report a source this build cannot play.
     Unsupported {
         /// Bounded machine-readable code.
@@ -236,9 +256,75 @@ pub struct PlaybackItem {
     pub title: String,
 }
 
+/// Browse and artwork updates published to the UI.
+///
+/// These are grouped under [`PlaybackUpdate::Browse`] so browse results never
+/// disturb the player screen. Values contain opaque IDs, bounded metadata and
+/// local cache paths only; no server URL or token is present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowseUpdate {
+    /// Top-level library views are ready.
+    LibrariesReady {
+        /// Bounded library list.
+        libraries: Vec<LibraryEntry>,
+    },
+    /// Library listing failed with a redacted message.
+    LibrariesFailed {
+        /// Redacted message.
+        message: String,
+    },
+    /// One bounded item page is ready.
+    ItemsReady {
+        /// Library the page belongs to.
+        library_id: String,
+        /// Bounded item list.
+        items: Vec<BrowseItem>,
+        /// Total matching items reported by the server.
+        total: u64,
+        /// Next page start index, when more items exist.
+        next_start: Option<u32>,
+    },
+    /// Item listing failed with a redacted message.
+    ItemsFailed {
+        /// Library the page belongs to.
+        library_id: String,
+        /// Redacted message.
+        message: String,
+    },
+    /// One artwork image is cached and validated.
+    ArtworkReady {
+        /// Item the artwork belongs to.
+        item_id: String,
+        /// Requested size class.
+        class: ArtworkClass,
+        /// Local cached file and validated metadata.
+        artwork: CachedArtwork,
+    },
+    /// The item has no artwork for the requested class.
+    ArtworkMissing {
+        /// Item the artwork belongs to.
+        item_id: String,
+        /// Requested size class.
+        class: ArtworkClass,
+    },
+    /// Artwork fetching failed for a reason other than absence.
+    ArtworkFailed {
+        /// Item the artwork belongs to.
+        item_id: String,
+        /// Requested size class.
+        class: ArtworkClass,
+        /// Redacted message.
+        message: String,
+    },
+    /// The Jellyfin token was rejected during a browse request.
+    SessionExpired,
+}
+
 /// Updates published to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlaybackUpdate {
+    /// A browse or artwork request completed.
+    Browse(BrowseUpdate),
     /// Negotiation succeeded and the child was asked to load.
     Loading {
         /// Item being opened.
@@ -597,7 +683,8 @@ enum SubtitleIntent {
     Set(Option<i32>),
 }
 
-/// Owns one Jellyfin client and one native player session.
+/// Owns one Jellyfin client, one native player session and the shared artwork
+/// cache used by `JellyfinClient::image`.
 pub struct PlaybackController {
     client: JellyfinClient,
     session: PlayerSession,
@@ -612,6 +699,7 @@ pub struct PlaybackController {
     last_library_filter: LibraryFilter,
     last_generation: u64,
     loads_sent: u64,
+    storage: Option<Storage>,
 }
 
 impl PlaybackController {
@@ -641,7 +729,25 @@ impl PlaybackController {
             last_library_filter: LibraryFilter::Jellyfin,
             last_generation: 0,
             loads_sent: 0,
+            storage: None,
         })
+    }
+
+    /// Attach the storage handle that backs artwork caching.
+    ///
+    /// Playback itself does not need storage; a controller built without one
+    /// still plays items and only rejects `LoadArtwork`. The handle must point
+    /// at the same state directory the client authenticated against.
+    #[must_use]
+    pub fn with_storage(mut self, storage: Storage) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Whether artwork can be cached and served.
+    #[must_use]
+    pub fn has_artwork_storage(&self) -> bool {
+        self.storage.is_some()
     }
 
     /// Jellyfin user this controller reports as.
@@ -1049,6 +1155,19 @@ impl PlaybackController {
                 let filter = self.last_library_filter;
                 self.load_library(filter, cancel).await
             }
+            PlaybackCommand::LoadJellyfinLibraries => self.load_jellyfin_libraries(cancel).await,
+            PlaybackCommand::LoadJellyfinItems {
+                library_id,
+                start_index,
+            } => {
+                self.load_jellyfin_items(&library_id, start_index, cancel)
+                    .await
+            }
+            PlaybackCommand::LoadArtwork {
+                item_id,
+                tag,
+                class,
+            } => self.load_artwork(&item_id, tag.as_deref(), class, cancel).await,
             PlaybackCommand::Unsupported { code, message } => {
                 let mut updates = self.stop(cancel).await;
                 updates.push(PlaybackUpdate::Failed {
@@ -1096,6 +1215,123 @@ impl PlaybackController {
                 filter,
                 message: error.to_string(),
             }],
+        }
+    }
+
+    async fn load_jellyfin_libraries(&mut self, cancel: &CancelToken) -> Vec<PlaybackUpdate> {
+        match self.client.libraries(cancel).await {
+            Ok(libraries) => vec![PlaybackUpdate::Browse(BrowseUpdate::LibrariesReady {
+                libraries,
+            })],
+            Err(JellyfinError::Unauthorized) => {
+                vec![PlaybackUpdate::Browse(BrowseUpdate::SessionExpired)]
+            }
+            Err(error) => vec![PlaybackUpdate::Browse(BrowseUpdate::LibrariesFailed {
+                message: error.to_string(),
+            })],
+        }
+    }
+
+    async fn load_jellyfin_items(
+        &mut self,
+        library_id: &str,
+        start_index: u32,
+        cancel: &CancelToken,
+    ) -> Vec<PlaybackUpdate> {
+        match self
+            .client
+            .browse(library_id, start_index, cancel)
+            .await
+        {
+            Ok(result) => {
+                let items: Vec<BrowseItem> = result
+                    .items
+                    .iter()
+                    .take(crate::jellyfin::BROWSE_PAGE_SIZE as usize)
+                    .map(BrowseItem::from_base_item)
+                    .collect();
+                let next = start_index.saturating_add(
+                    u32::try_from(items.len()).unwrap_or(u32::MAX),
+                );
+                let next_start = if !items.is_empty() && u64::from(next) < result.total_record_count {
+                    Some(next)
+                } else {
+                    None
+                };
+                vec![PlaybackUpdate::Browse(BrowseUpdate::ItemsReady {
+                    library_id: library_id.to_owned(),
+                    items,
+                    total: result.total_record_count,
+                    next_start,
+                })]
+            }
+            Err(JellyfinError::Unauthorized) => {
+                vec![PlaybackUpdate::Browse(BrowseUpdate::SessionExpired)]
+            }
+            Err(error) => vec![PlaybackUpdate::Browse(BrowseUpdate::ItemsFailed {
+                library_id: library_id.to_owned(),
+                message: error.to_string(),
+            })],
+        }
+    }
+
+    async fn load_artwork(
+        &mut self,
+        item_id: &str,
+        tag: Option<&str>,
+        class: ArtworkClass,
+        cancel: &CancelToken,
+    ) -> Vec<PlaybackUpdate> {
+        // No tag means the item has no primary artwork; do not issue a request.
+        let Some(tag) = tag.filter(|tag| !tag.is_empty()) else {
+            return vec![PlaybackUpdate::Browse(BrowseUpdate::ArtworkMissing {
+                item_id: item_id.to_owned(),
+                class,
+            })];
+        };
+        let request = match ImageRequest::with_class(
+            item_id,
+            ImageType::Primary,
+            Some(tag),
+            class,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                return vec![PlaybackUpdate::Browse(BrowseUpdate::ArtworkFailed {
+                    item_id: item_id.to_owned(),
+                    class,
+                    message: error.to_string(),
+                })];
+            }
+        };
+        let Self { client, storage, .. } = self;
+        let Some(storage) = storage.as_mut() else {
+            return vec![PlaybackUpdate::Browse(BrowseUpdate::ArtworkFailed {
+                item_id: item_id.to_owned(),
+                class,
+                message: "artwork storage is unavailable".to_string(),
+            })];
+        };
+        match client.image(storage, &request, cancel).await {
+            Ok(artwork) => vec![PlaybackUpdate::Browse(BrowseUpdate::ArtworkReady {
+                item_id: item_id.to_owned(),
+                class,
+                artwork,
+            })],
+            Err(JellyfinError::ArtworkMissing) => {
+                vec![PlaybackUpdate::Browse(BrowseUpdate::ArtworkMissing {
+                    item_id: item_id.to_owned(),
+                    class,
+                })]
+            }
+            Err(JellyfinError::Unauthorized) => {
+                vec![PlaybackUpdate::Browse(BrowseUpdate::SessionExpired)]
+            }
+            Err(error) => vec![PlaybackUpdate::Browse(BrowseUpdate::ArtworkFailed {
+                item_id: item_id.to_owned(),
+                class,
+                message: error.to_string(),
+            })],
         }
     }
 

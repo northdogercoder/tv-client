@@ -93,6 +93,11 @@ pub enum JellyfinError {
     /// The image magic or header was not a supported format.
     #[error("artwork header could not be decoded")]
     InvalidImage,
+    /// The item has no artwork of the requested kind (HTTP 404 or no tag).
+    ///
+    /// This is a normal browse outcome, not a page failure.
+    #[error("artwork is not available for this item")]
+    ArtworkMissing,
     /// Artwork storage failed.
     #[error("artwork cache failure")]
     Artwork(#[source] StorageError),
