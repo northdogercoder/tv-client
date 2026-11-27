@@ -285,16 +285,36 @@ async fn run_bounded(
     timeout: Duration,
     cancel: &CancelToken,
 ) -> Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus), ExtractorError> {
-    let mut child = tokio::process::Command::new(program)
+    let mut command = tokio::process::Command::new(program);
+    command
         .args(arguments)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| ExtractorError::ExtractorUnavailable {
-            reason: ExtractorFailure::MissingBinary,
-        })?;
+        .kill_on_drop(true);
+
+    // A busy host can transiently fail fork/exec. Retry only non-permanent
+    // spawn errors; a genuinely missing or non-executable binary still fails.
+    let mut spawn_attempts = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error)
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) && spawn_attempts < 2 =>
+            {
+                spawn_attempts += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(_) => {
+                return Err(ExtractorError::ExtractorUnavailable {
+                    reason: ExtractorFailure::MissingBinary,
+                });
+            }
+        }
+    };
 
     let mut stdout = child.stdout.take().ok_or(ExtractorError::InvalidOutput)?;
     let mut stderr = child.stderr.take().ok_or(ExtractorError::InvalidOutput)?;

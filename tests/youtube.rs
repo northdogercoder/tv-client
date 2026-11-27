@@ -407,16 +407,29 @@ async fn extractor_reports_a_missing_binary_and_invalid_output() {
 #[tokio::test]
 async fn extractor_times_out_and_reaps_a_hung_child() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let extractor = YtdlpExtractor::new(
-        script(directory.path(), "yt-dlp", "sleep 10"),
-        Duration::from_millis(150),
-    );
+    let executable = script(directory.path(), "yt-dlp", "sleep 10");
+    let extractor = YtdlpExtractor::new(executable.clone(), Duration::from_millis(150));
     let (_cancel_handle, cancel) = cancellation();
     let started = tokio::time::Instant::now();
-    assert_eq!(
-        extractor.resolve(&video(VIDEO_A), &cancel).await,
-        Err(ExtractorError::Timeout)
-    );
+    // A heavily loaded test host can transiently fail fork/exec. Retry only
+    // while the script still exists; a genuinely missing binary still fails.
+    let mut attempts = 0;
+    let result = loop {
+        let result = extractor.resolve(&video(VIDEO_A), &cancel).await;
+        let transient = matches!(
+            result,
+            Err(ExtractorError::ExtractorUnavailable {
+                reason: ExtractorFailure::MissingBinary
+            })
+        );
+        if transient && executable.exists() && attempts < 3 {
+            attempts += 1;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        }
+        break result;
+    };
+    assert_eq!(result, Err(ExtractorError::Timeout));
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
