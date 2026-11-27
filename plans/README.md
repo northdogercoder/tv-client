@@ -18,6 +18,9 @@ Greenfield backlog, 2026-11-25. All rows begin TODO; no application code exists 
 | [C012](012-webrtc.md) | Add optional browser screen sharing receiver | P3 | L | HIGH | C006, C008, C009 | IN PROGRESS (module; S009 external) |
 | [C013](013-release.md) | Package, deploy and recover the Pi kiosk | P1 | L | HIGH | C007, C008, C009, C010 | BLOCKED (hardware matrix partial) |
 | [C014](014-settings.md) | Add on-device settings, writable config and Jellyfin Quick Connect | P1 | L | HIGH | C004, C005, C009, C010 | IN PROGRESS |
+| [C015](015-music-audiobooks.md) | Add music and audiobook browsing/playback | P2 | L | MED | C005, C006, C007 | TODO |
+| [C016](016-books.md) | Add safe book/comic browsing and reading | P3 | L | HIGH | C004, C005 | TODO |
+| [C017](017-player-overlay.md) | Add a smooth video control bar overlay | P1 | M | HIGH | C004, C006, C007 | TODO |
 
 ## Dependency notes
 
