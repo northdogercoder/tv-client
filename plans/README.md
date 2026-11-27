@@ -17,6 +17,7 @@ Greenfield backlog, 2026-11-25. All rows begin TODO; no application code exists 
 | [C011](011-airplay.md) | Add opt-in LAN AirPlay mirroring | P2 | M | HIGH | C006, C008, C004 | TODO |
 | [C012](012-webrtc.md) | Add optional browser screen sharing receiver | P3 | L | HIGH | C006, C008, C009 | TODO |
 | [C013](013-release.md) | Package, deploy and recover the Pi kiosk | P1 | L | HIGH | C007, C008, C009, C010 | BLOCKED (artifact/hardware NOT RUN) |
+| [C014](014-settings.md) | Add on-device settings, writable config and Jellyfin Quick Connect | P1 | L | HIGH | C004, C005, C009, C010 | TODO |
 
 ## Dependency notes
 
