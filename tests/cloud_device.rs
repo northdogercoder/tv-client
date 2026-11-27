@@ -1485,8 +1485,9 @@ fn pairing_dismissal_error_clear_and_ended_state_contracts() {
 #[test]
 fn library_error_remote_select_requests_a_retry() {
     let mut model = UiModel::new();
-    model.handle_key(Key::Down, Duration::ZERO);
-    model.handle_key(Key::Enter, Duration::ZERO);
+    // Open the existing text Library screen directly; Home Jellyfin now opens
+    // the new library grid instead.
+    model.open_library(tv_client::ui::SourceFilter::Jellyfin);
     model.set_library_error("offline");
     assert_eq!(
         model.handle_remote_action(

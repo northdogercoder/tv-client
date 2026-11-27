@@ -1,0 +1,533 @@
+// Copyright (C) 2026 the tv-client authors.
+// SPDX-License-Identifier: GPL-3.0-only
+
+// Jellyfin browse screens: library tiles, poster grid and preview.
+//
+// All images are decoded in Rust from local cache paths produced by the
+// bounded artwork cache. No server URL is ever placed in a Slint model, and
+// this file performs no network I/O. A missing image is an empty `image`,
+// which leaves the placeholder background visible.
+
+import { ListView } from "std-widgets.slint";
+
+export struct LibraryTile {
+    title: string,
+    subtitle: string,
+    index: int,
+    focused: bool,
+}
+
+export struct LibraryRow {
+    tiles: [LibraryTile],
+}
+
+export struct PosterCard {
+    title: string,
+    subtitle: string,
+    image: image,
+    has-image: bool,
+    index: int,
+    focused: bool,
+}
+
+export struct PosterRow {
+    cards: [PosterCard],
+}
+
+component BrowseState inherits Rectangle {
+    in property <length> base: 720px;
+    in property <string> message;
+    in property <bool> retryable: false;
+    callback retry-requested();
+
+    height: root.retryable ? root.base / 8 : root.base / 14;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: root.base / 40;
+
+        Text {
+            text: root.message;
+            font-size: root.base / 26;
+            color: #c6d2e1;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        if root.retryable : Rectangle {
+            width: root.base / 7;
+            height: root.base / 14;
+            border-radius: root.base / 140;
+            background: #1f6feb;
+            border-width: 2px;
+            border-color: #a8c7ff;
+
+            Text {
+                text: "Retry";
+                font-size: root.base / 30;
+                font-weight: 700;
+                color: #ffffff;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => {
+                    root.retry-requested();
+                }
+            }
+        }
+    }
+}
+
+component PreviewButton inherits Rectangle {
+    in property <length> base: 720px;
+    in property <string> label;
+    in property <bool> focused: false;
+    callback activated();
+
+    width: root.base / 5;
+    height: root.base / 14;
+    border-radius: root.base / 120;
+    background: root.focused ? #1f6feb : #151c25;
+    border-width: root.focused ? 4px : 2px;
+    border-color: root.focused ? #a8c7ff : #38485c;
+
+    Text {
+        text: root.label;
+        font-size: root.base / 26;
+        font-weight: 700;
+        color: #f4f7fb;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        clicked => {
+            root.activated();
+        }
+    }
+}
+
+export component JellyfinLibrariesScreen inherits Rectangle {
+    in property <length> base: 720px;
+    in property <[LibraryRow]> rows;
+    in property <int> focus-index: 0;
+    in property <bool> loading: false;
+    in property <bool> empty: false;
+    in property <bool> error: false;
+    in property <string> error-text;
+
+    callback activated(int);
+    callback retry-requested();
+
+    background: transparent;
+
+    changed focus-index => {
+        if root.focus-index >= 0 {
+            libraries.ensure-row-visible(root.focus-index / 4, ScrollBehavior.instant);
+        }
+    }
+
+    VerticalLayout {
+        padding-left: root.base / 20;
+        padding-right: root.base / 20;
+        padding-top: root.base / 30;
+        padding-bottom: root.base / 30;
+        spacing: root.base / 40;
+
+        HorizontalLayout {
+            height: root.base / 12;
+            spacing: root.base / 40;
+
+            Text {
+                text: "Jellyfin libraries";
+                font-size: root.base / 17;
+                font-weight: 700;
+                color: #f4f7fb;
+                vertical-alignment: center;
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: "Enter opens a library";
+                font-size: root.base / 28;
+                color: #a9b7c8;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.loading : BrowseState {
+            base: root.base;
+            message: "Loading Jellyfin libraries";
+        }
+
+        if root.error : BrowseState {
+            base: root.base;
+            message: root.error-text;
+            retryable: true;
+            retry-requested() => {
+                root.retry-requested();
+            }
+        }
+
+        if root.empty : BrowseState {
+            base: root.base;
+            message: "No Jellyfin libraries";
+        }
+
+        libraries := ListView {
+            vertical-stretch: 1;
+            for row in root.rows : Rectangle {
+                height: root.base / 5.2;
+                background: transparent;
+
+                HorizontalLayout {
+                    spacing: root.base / 40;
+
+                    for tile in row.tiles : Rectangle {
+                        width: (parent.width - 3 * root.base / 40) / 4;
+                        height: parent.height;
+                        clip: true;
+                        border-radius: root.base / 80;
+                        background: tile.focused ? #1f6feb : #151c25;
+                        border-width: tile.focused ? 4px : 1px;
+                        border-color: tile.focused ? #a8c7ff : #2c3642;
+
+                        VerticalLayout {
+                            padding-left: root.base / 32;
+                            padding-right: root.base / 32;
+                            padding-top: root.base / 40;
+                            padding-bottom: root.base / 40;
+                            spacing: root.base / 160;
+
+                            Text {
+                                text: tile.title;
+                                font-size: root.base / 22;
+                                font-weight: tile.focused ? 700 : 400;
+                                color: #f4f7fb;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
+
+                            Text {
+                                text: tile.subtitle;
+                                font-size: root.base / 38;
+                                color: tile.focused ? #dbe8ff : #9fc2ff;
+                                overflow: elide;
+                            }
+
+                            Rectangle {
+                                vertical-stretch: 1;
+                                background: transparent;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.activated(tile.index);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component JellyfinItemsScreen inherits Rectangle {
+    in property <length> base: 720px;
+    in property <string> library-name: "Jellyfin";
+    in property <[PosterRow]> rows;
+    in property <int> focus-index: 0;
+    in property <int> item-count: 0;
+    in property <bool> loading: false;
+    in property <bool> empty: false;
+    in property <bool> error: false;
+    in property <string> error-text;
+    in property <bool> more-available: false;
+
+    callback activated(int);
+    callback more-requested();
+    callback retry-requested();
+
+    background: transparent;
+
+    changed focus-index => {
+        if root.focus-index >= 0 {
+            posters.ensure-row-visible(root.focus-index / 5, ScrollBehavior.instant);
+        }
+    }
+
+    VerticalLayout {
+        padding-left: root.base / 20;
+        padding-right: root.base / 20;
+        padding-top: root.base / 30;
+        padding-bottom: root.base / 30;
+        spacing: root.base / 40;
+
+        HorizontalLayout {
+            height: root.base / 12;
+            spacing: root.base / 40;
+
+            Text {
+                text: root.library-name;
+                font-size: root.base / 17;
+                font-weight: 700;
+                color: #f4f7fb;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            Text {
+                horizontal-stretch: 1;
+                text: "Enter previews an item";
+                font-size: root.base / 28;
+                color: #a9b7c8;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.loading : BrowseState {
+            base: root.base;
+            message: "Loading " + root.library-name;
+        }
+
+        if root.error : BrowseState {
+            base: root.base;
+            message: root.error-text;
+            retryable: true;
+            retry-requested() => {
+                root.retry-requested();
+            }
+        }
+
+        if root.empty : BrowseState {
+            base: root.base;
+            message: "No items in " + root.library-name;
+        }
+
+        posters := ListView {
+            vertical-stretch: 1;
+            for row in root.rows : Rectangle {
+                height: root.base / 3.0;
+                background: transparent;
+
+                HorizontalLayout {
+                    spacing: root.base / 42;
+
+                    for card in row.cards : Rectangle {
+                        width: (parent.width - 4 * root.base / 42) / 5;
+                        height: parent.height;
+                        clip: true;
+                        border-radius: root.base / 100;
+                        background: card.focused ? #1f6feb : #151c25;
+                        border-width: card.focused ? 4px : 1px;
+                        border-color: card.focused ? #a8c7ff : #2c3642;
+
+                        VerticalLayout {
+                            padding-left: root.base / 60;
+                            padding-right: root.base / 60;
+                            padding-top: root.base / 60;
+                            padding-bottom: root.base / 60;
+                            spacing: root.base / 160;
+
+                            Rectangle {
+                                height: root.base / 4.4;
+                                background: #0b0e13;
+                                border-radius: root.base / 140;
+
+                                Image {
+                                    source: card.image;
+                                    image-fit: cover;
+                                    width: parent.width;
+                                    height: parent.height;
+                                }
+
+                                Text {
+                                    text: "No image";
+                                    width: parent.width;
+                                    height: parent.height;
+                                    font-size: root.base / 40;
+                                    color: #5f7186;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    visible: !card.has-image;
+                                }
+                            }
+
+                            Text {
+                                text: card.title;
+                                font-size: root.base / 30;
+                                font-weight: card.focused ? 700 : 400;
+                                color: #f4f7fb;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
+
+                            Text {
+                                text: card.subtitle;
+                                font-size: root.base / 40;
+                                color: card.focused ? #dbe8ff : #a9b7c8;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
+
+                            Rectangle {
+                                vertical-stretch: 1;
+                                background: transparent;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                root.activated(card.index);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.more-available : Rectangle {
+            height: root.base / 10;
+            border-radius: root.base / 100;
+            background: root.focus-index == root.item-count ? #1f6feb : #151c25;
+            border-width: root.focus-index == root.item-count ? 4px : 1px;
+            border-color: root.focus-index == root.item-count ? #a8c7ff : #38485c;
+
+            Text {
+                text: "Load more";
+                font-size: root.base / 26;
+                font-weight: 700;
+                color: #f4f7fb;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => {
+                    root.more-requested();
+                }
+            }
+        }
+    }
+}
+
+export component JellyfinPreviewScreen inherits Rectangle {
+    in property <length> base: 720px;
+    in property <image> preview-image;
+    in property <bool> preview-has-image: false;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> overview;
+    in property <int> focus-index: 0;
+    in property <bool> play-enabled: true;
+
+    callback action-activated(int);
+
+    background: transparent;
+
+    HorizontalLayout {
+        padding-left: root.base / 20;
+        padding-right: root.base / 20;
+        padding-top: root.base / 24;
+        padding-bottom: root.base / 24;
+        spacing: root.base / 20;
+
+        Rectangle {
+            width: parent.width * 0.48;
+            height: parent.height;
+            clip: true;
+            background: #0b0e13;
+            border-radius: root.base / 60;
+            border-width: 2px;
+            border-color: #2c3642;
+
+            Image {
+                source: root.preview-image;
+                image-fit: cover;
+                width: parent.width;
+                height: parent.height;
+            }
+
+            Text {
+                text: "No preview image";
+                width: parent.width;
+                height: parent.height;
+                font-size: root.base / 30;
+                color: #5f7186;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                visible: !root.preview-has-image;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            height: parent.height;
+            spacing: root.base / 32;
+
+            Text {
+                text: root.title;
+                font-size: root.base / 11;
+                font-weight: 700;
+                color: #f4f7fb;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: root.subtitle;
+                font-size: root.base / 24;
+                color: #9fc2ff;
+                overflow: elide;
+            }
+
+            Text {
+                text: root.overview;
+                font-size: root.base / 30;
+                color: #c6d2e1;
+                wrap: word-wrap;
+                vertical-stretch: 1;
+            }
+
+            HorizontalLayout {
+                height: root.base / 14;
+                spacing: root.base / 40;
+
+                PreviewButton {
+                    base: root.base;
+                    label: root.play-enabled ? "Play" : "Unavailable";
+                    focused: root.focus-index == 0;
+                    activated() => {
+                        root.action-activated(0);
+                    }
+                }
+
+                PreviewButton {
+                    base: root.base;
+                    label: "Back";
+                    focused: root.focus-index == 1;
+                    activated() => {
+                        root.action-activated(1);
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+                }
+
+                Text {
+                    text: "ENTER select   ESC back";
+                    font-size: root.base / 38;
+                    color: #8fa3b8;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

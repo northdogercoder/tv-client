@@ -8,7 +8,7 @@ use std::time::Duration;
 use tv_client::model::{Action, AppState, Direction, InputOrigin, Mode, Source};
 use tv_client::ui::{
     HOME_ROW_COUNT, HomeRow, Key, LoadState, MediaItem, REPEAT_INTERVAL, Screen, SourceFilter,
-    UiInput, UiModel, UiOutcome, UiReject, key_from_text, source_label,
+    UiBrowseCommand, UiInput, UiModel, UiOutcome, UiReject, key_from_text, source_label,
 };
 use uuid::Uuid;
 
@@ -91,22 +91,23 @@ fn enter_opens_a_home_source_and_escape_returns_home() {
 
     assert_eq!(
         press(&mut model, Key::Enter, 0),
-        UiOutcome::Action(Action::Navigate {
-            direction: Direction::Select
-        })
+        UiOutcome::Browse(UiBrowseCommand::LoadLibraries)
     );
-    assert_eq!(model.screen(), Screen::Library);
-    assert_eq!(model.library_filter(), SourceFilter::Jellyfin);
-    assert!(matches!(model.library_load(), LoadState::Loading));
+    assert_eq!(model.screen(), Screen::JellyfinLibraries);
+    assert!(matches!(
+        model.jellyfin_libraries_load(),
+        LoadState::Loading
+    ));
     assert!(model.status_text().contains("Jellyfin"));
     assert!(model.status_text().contains("Loading"));
 
-    assert_eq!(
+    assert!(matches!(
         press(&mut model, Key::Escape, 200),
-        UiOutcome::Action(Action::Navigate {
-            direction: Direction::Back
-        })
-    );
+        UiOutcome::Navigated {
+            screen: Screen::Home,
+            ..
+        }
+    ));
     assert_eq!(model.screen(), Screen::Home);
 }
 
@@ -544,13 +545,7 @@ fn library_load_requests_follow_loading_transitions() {
     assert!(!model.is_library_loading());
     assert_eq!(model.pending_library_load(false), None);
 
-    model.set_home_focus(HomeRow::Jellyfin.index());
-    assert_eq!(
-        press(&mut model, Key::Enter, 0),
-        UiOutcome::Action(Action::Navigate {
-            direction: Direction::Select
-        })
-    );
+    model.open_library(SourceFilter::Jellyfin);
     assert!(model.is_library_loading());
     assert_eq!(
         model.pending_library_load(false),

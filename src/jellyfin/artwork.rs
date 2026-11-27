@@ -101,13 +101,13 @@ impl JellyfinClient {
             request.max_width(),
             request.max_height(),
         )?;
-        if let Some(path) = storage.artwork_path(&key).map_err(JellyfinError::Artwork)? {
-            if let Some(cached) = read_cached_artwork(path, class) {
-                return Ok(cached);
-            }
-            // A corrupt, tampered or outdated payload is treated as a miss and
-            // replaced in place under the same key.
+        if let Some(path) = storage.artwork_path(&key).map_err(JellyfinError::Artwork)?
+            && let Some(cached) = read_cached_artwork(path, class)
+        {
+            return Ok(cached);
         }
+        // A corrupt, tampered or outdated payload is treated as a miss and
+        // replaced in place under the same key.
 
         let mut url = self.endpoint(&[
             "Items",
@@ -140,12 +140,13 @@ impl JellyfinClient {
         {
             return Err(JellyfinError::ArtworkTooLarge);
         }
-        let body = read_body_limited(response, limit, cancel)
-            .await
-            .map_err(|error| match error {
-                JellyfinError::ResponseTooLarge => JellyfinError::ArtworkTooLarge,
-                other => other,
-            })?;
+        let body =
+            read_body_limited(response, limit, cancel)
+                .await
+                .map_err(|error| match error {
+                    JellyfinError::ResponseTooLarge => JellyfinError::ArtworkTooLarge,
+                    other => other,
+                })?;
         let (width, height) = validate_artwork(&body, class)?;
         storage
             .store_artwork(&key, &body)

@@ -280,6 +280,34 @@ they never move the player screen.
 character counts; no path, URL or token field exists, and `Debug` prints only
 these values.
 
+## Browse UI flow
+
+Home's Jellyfin row now opens `JellyfinLibraries`, not the text YouTube library
+screen. The flow is libraries (4 columns) -> items (5-column poster grid) ->
+preview (large image plus Play/Back) -> the existing `PlayJellyfin` action.
+Escape and Back move one level; Home returns to the launcher. Focus is stored
+as an opaque identifier so a refresh keeps the same library or item selected.
+
+The UI sends typed `UiBrowseCommand`s (`LoadLibraries`, `LoadItems`,
+`LoadArtwork`) through the router to the controller's existing
+`LoadJellyfinLibraries`, `LoadJellyfinItems` and `LoadArtwork` commands. On an
+`ItemsReady` page the view queues poster requests for at most 24 items and never
+fetches the next page automatically. The `Load more` tile is focusable and is
+the only way to request `next_start`.
+
+Retention is bounded: at most 32 library views and 64 items per library. A page
+is 24 items, so the third page is truncated at the retention limit and no
+further More tile is offered. Artwork results are local `CachedArtwork` paths;
+the Slint bridge decodes at most 64 images and shows an empty placeholder for
+missing, failed or tagless images. A missing/failed image never changes a
+browse page from `Ready` to an error state. `SessionExpired` and completed
+sign-out clear libraries, items, preview, image paths and the bridge cache.
+
+Known limits: the verified `/Users/{id}/Views` route is used with no
+`/UserViews` fallback; backdrops are not modelled, so the Primary image is used
+for posters and preview; and hardware image rendering (femtovg on the target
+TV) has **NOT RUN**.
+
 ## Cancellation and failures
 
 Every request send and every response body read runs inside `tokio::select!`

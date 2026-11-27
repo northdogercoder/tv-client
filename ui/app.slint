@@ -12,6 +12,7 @@
 
 import { CastScreen } from "cast.slint";
 import { HomeScreen } from "home.slint";
+import { JellyfinItemsScreen, JellyfinLibrariesScreen, JellyfinPreviewScreen, LibraryRow, PosterRow } from "jellyfin.slint";
 import { LibraryScreen, MediaCard } from "library.slint";
 import { PairDialog } from "pair.slint";
 import { PlayerScreen, TrackRow } from "player.slint";
@@ -64,6 +65,27 @@ export component AppWindow inherits Window {
     in-out property <string> track-menu-title;
     in-out property <int> track-focus: 0;
     in-out property <[TrackRow]> track-items;
+    in-out property <[LibraryRow]> jf-library-rows;
+    in-out property <int> jf-library-focus: 0;
+    in-out property <bool> jf-libraries-loading: false;
+    in-out property <bool> jf-libraries-empty: false;
+    in-out property <bool> jf-libraries-error: false;
+    in-out property <string> jf-browse-error;
+    in-out property <string> jf-library-name: "Jellyfin";
+    in-out property <[PosterRow]> jf-poster-rows;
+    in-out property <int> jf-item-focus: 0;
+    in-out property <int> jf-item-count: 0;
+    in-out property <bool> jf-items-loading: false;
+    in-out property <bool> jf-items-empty: false;
+    in-out property <bool> jf-items-error: false;
+    in-out property <bool> jf-more-available: false;
+    in-out property <image> jf-preview-image;
+    in-out property <bool> jf-preview-has-image: false;
+    in-out property <string> jf-preview-title;
+    in-out property <string> jf-preview-subtitle;
+    in-out property <string> jf-preview-overview;
+    in-out property <int> jf-preview-focus: 0;
+    in-out property <bool> jf-preview-playable: false;
     in-out property <string> cast-state: "No receiver attached";
     in-out property <string> settings-version;
     in-out property <[SettingsRow]> settings-left;
@@ -87,6 +109,12 @@ export component AppWindow inherits Window {
     callback library-more-requested();
     callback player-control-activated(int);
     callback track-activated(int);
+    callback jellyfin-library-activated(int);
+    callback jellyfin-library-retry-requested();
+    callback jellyfin-item-activated(int);
+    callback jellyfin-more-requested();
+    callback jellyfin-items-retry-requested();
+    callback jellyfin-preview-activated(int);
     callback settings-activated(int);
     callback settings-caret-requested(int, float);
     callback pair-choice-activated(int);
@@ -255,6 +283,70 @@ export component AppWindow inherits Window {
                 state: root.cast-state;
                 back-requested() => {
                     root.back-requested();
+                }
+            }
+
+            if root.screen == 5 : JellyfinLibrariesScreen {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                base: Math.min(root.base, screen-host.height);
+                rows: root.jf-library-rows;
+                focus-index: root.jf-library-focus;
+                loading: root.jf-libraries-loading;
+                empty: root.jf-libraries-empty;
+                error: root.jf-libraries-error;
+                error-text: root.jf-browse-error;
+                activated(index) => {
+                    root.jellyfin-library-activated(index);
+                }
+                retry-requested() => {
+                    root.jellyfin-library-retry-requested();
+                }
+            }
+
+            if root.screen == 6 : JellyfinItemsScreen {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                base: Math.min(root.base, screen-host.height);
+                library-name: root.jf-library-name;
+                rows: root.jf-poster-rows;
+                focus-index: root.jf-item-focus;
+                item-count: root.jf-item-count;
+                loading: root.jf-items-loading;
+                empty: root.jf-items-empty;
+                error: root.jf-items-error;
+                error-text: root.jf-browse-error;
+                more-available: root.jf-more-available;
+                activated(index) => {
+                    root.jellyfin-item-activated(index);
+                }
+                more-requested() => {
+                    root.jellyfin-more-requested();
+                }
+                retry-requested() => {
+                    root.jellyfin-items-retry-requested();
+                }
+            }
+
+            if root.screen == 7 : JellyfinPreviewScreen {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                base: Math.min(root.base, screen-host.height);
+                preview-image: root.jf-preview-image;
+                preview-has-image: root.jf-preview-has-image;
+                title: root.jf-preview-title;
+                subtitle: root.jf-preview-subtitle;
+                overview: root.jf-preview-overview;
+                focus-index: root.jf-preview-focus;
+                play-enabled: root.jf-preview-playable;
+                action-activated(index) => {
+                    root.jellyfin-preview-activated(index);
                 }
             }
         }

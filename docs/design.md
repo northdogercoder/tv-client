@@ -98,8 +98,40 @@ and is the left-hand button.
 
 `src/ui.rs` owns a pure `UiModel`; the declarative files only render it.
 
-Screens are `Home`, `Library`, `Player`, `Settings` and `Cast`. The home rows
-are fixed, in this order: Resume, Jellyfin, YouTube, Cast, Settings.
+Screens are `Home`, `Library`, `Player`, `Settings`, `Cast`,
+`JellyfinLibraries`, `JellyfinItems` and `Preview`. The home rows are fixed, in
+this order: Resume, Jellyfin, YouTube, Cast, Settings.
+
+The Jellyfin home row opens its own typed browse flow instead of the text
+`Library` screen used by YouTube:
+
+```
+Home -> JellyfinLibraries -> JellyfinItems -> Preview -> Player
+```
+
+`JellyfinLibraries` is a four-column tile grid (`JELLYFIN_LIBRARY_COLUMNS`);
+`JellyfinItems` is a five-column poster grid (`JELLYFIN_POSTER_COLUMNS`); both
+use a vertical `ListView` with `ensure-row-visible` on focus changes. Arrows
+move by one slot/row and wrap at every edge. Enter on a library requests
+`ParentId`-scoped items; Enter on a poster opens Preview; Preview's Play is the
+only action that emits `Action::PlayJellyfin`. Escape goes back exactly one
+level (Preview -> Items -> Libraries -> Home) and Home always returns home.
+
+Loaded libraries are capped at `MAX_JELLYFIN_LIBRARIES = 32`; retained items at
+`MAX_LIBRARY_ITEMS = 64`. A page is 24 items and a further page is fetched only
+from the explicit, focusable `Load more` tile. On a ready page the model queues
+at most `MAX_POSTER_REQUESTS_PER_PAGE = 24` poster requests; opening Preview
+requests one 1280x720 preview image. Artwork is fetched by the controller and
+the Slint bridge decodes only local `CachedArtwork` paths, at most 64 decoded
+images, never a server URL. Missing or failed artwork leaves the placeholder
+visible and never changes the page's `Ready` state. Sign-out and session
+expiry clear browse metadata, image paths and the bridge's decoded cache.
+
+All new sizes derive from the fixed header/footer host's `base`, so the grids
+remain inside the safe area at 720p and 1080p. Known limits: library views use
+the verified `/Users/{id}/Views` route (the newer `/UserViews` fallback is not
+wired), backdrops are not modelled (Primary is used for posters and preview),
+and hardware image rendering has **NOT RUN**.
 
 Key mapping:
 
