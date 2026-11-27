@@ -101,8 +101,13 @@ list_releases() {
   if [[ ! -d $TV_RELEASES_DIR ]]; then
     return 0
   fi
-  find "$TV_RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%f\n' \
-    | sort -V
+  # Install order, oldest first. Version sort is wrong for semver pre-release
+  # pairs such as 1.0.0 and 1.0.0-rc.1; the default rollback target is the
+  # release installed immediately before the current one.
+  find "$TV_RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.*' \
+    -printf '%T@\t%f\n' \
+    | LC_ALL=C sort -t $'\t' -k1,1n -k2,2 \
+    | cut -f2-
 }
 
 current_target=""

@@ -20,6 +20,9 @@ TV_KIOSK_HOME="/home/tvkiosk"
 TV_KIOSK_PROFILE="$TV_KIOSK_HOME/.profile"
 TV_REQUIRED_DEBIAN_VERSION="13"
 
+# Set by use_staging_prefix(); empty for a real install/rollback.
+TV_STAGING_PREFIX=""
+
 DRY_RUN="${DRY_RUN:-0}"
 CHECK_ONLY="${CHECK_ONLY:-0}"
 
@@ -80,6 +83,7 @@ use_staging_prefix() {
   TV_PREFIX=$prefix
   TV_RELEASES_DIR="$TV_PREFIX/releases"
   TV_CURRENT_LINK="$TV_PREFIX/current"
+  TV_STAGING_PREFIX=$prefix
 }
 
 require_aarch64() {

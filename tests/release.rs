@@ -185,6 +185,7 @@ fn release_artifact_name_and_feature_policy_are_fixed() {
         "SHA256SUMS",
         "gzip -n",
         "CycloneDX",
+        "--features native-ui,gstreamer-player",
     ] {
         assert!(
             package.contains(needle),
@@ -372,6 +373,90 @@ fn kiosk_session_uses_cage_gles_and_an_unprivileged_user() {
     );
 }
 
+#[test]
+fn install_dry_run_creates_state_directory_under_staging_prefix() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let build = temporary.path().join("build");
+    fs::create_dir_all(&build).expect("build directory");
+    for binary in ["tv-client", "tv-native-player"] {
+        let path = build.join(binary);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write binary");
+        let mut permissions = fs::metadata(&path).expect("stat binary").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("chmod binary");
+    }
+    fs::write(build.join("NOTICES"), "test notices\n").expect("write notices");
+    fs::write(build.join("SBOM.cdx.json"), "{}\n").expect("write SBOM");
+
+    let artifact = temporary.path().join("tv-client-linux-arm64-0.1.0.tar.gz");
+    let status = Command::new("tar")
+        .args([
+            "-czf",
+            artifact.to_str().expect("artifact path"),
+            "-C",
+            build.to_str().expect("build path"),
+            "tv-client",
+            "tv-native-player",
+            "NOTICES",
+            "SBOM.cdx.json",
+        ])
+        .status()
+        .expect("run tar");
+    assert!(status.success(), "tar failed");
+
+    let mut hash_command = Command::new("sha256sum");
+    hash_command.arg(&artifact);
+    let hash_output = hash_command.output().expect("run sha256sum");
+    assert!(hash_output.status.success(), "sha256sum failed");
+    let hash_text = String::from_utf8_lossy(&hash_output.stdout);
+    let hash = hash_text.split_whitespace().next().expect("sha256 output");
+    let artifact_name = artifact
+        .file_name()
+        .expect("artifact name")
+        .to_string_lossy();
+    fs::write(
+        temporary.path().join("SHA256SUMS"),
+        format!("{hash}  {artifact_name}\n"),
+    )
+    .expect("write checksums");
+
+    let prefix = temporary.path().join("stage");
+    let output = run_bash(
+        "scripts/install-release.sh",
+        &[
+            "--dry-run",
+            "--allow-foreign-arch",
+            "--allow-unsupported-os",
+            "--prefix",
+            prefix.to_str().expect("prefix path"),
+            "--artifact",
+            artifact.to_str().expect("artifact path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", describe(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let state_command = "install -d -m 0700 -o tvkiosk -g tvkiosk";
+    assert!(stderr.contains("would create state directory"), "{stderr}");
+    assert!(stderr.contains(state_command), "{stderr}");
+    assert!(
+        stderr.contains(
+            prefix
+                .join("var/lib/tv-client")
+                .to_str()
+                .expect("state path")
+        ),
+        "{stderr}"
+    );
+    assert!(!prefix.exists(), "dry-run must not create files");
+}
+
+fn set_directory_mtime(path: &Path, stamp: &str) {
+    let mut command = Command::new("touch");
+    command.arg("-d").arg(stamp).arg(path);
+    let status = command.status().expect("run touch");
+    assert!(status.success(), "touch failed for {stamp}");
+}
+
 fn write_fake_release(releases: &Path, version: &str) {
     let directory = releases.join(version);
     fs::create_dir_all(&directory).expect("create fake release");
@@ -390,7 +475,9 @@ fn rollback_selects_previous_release_and_preserves_state() {
     let prefix = temporary.path().join("opt");
     let releases = prefix.join("releases");
     write_fake_release(&releases, "0.9.0");
+    set_directory_mtime(&releases.join("0.9.0"), "2024-01-01 00:00:00");
     write_fake_release(&releases, "1.0.0");
+    set_directory_mtime(&releases.join("1.0.0"), "2024-01-02 00:00:00");
     std::os::unix::fs::symlink(releases.join("1.0.0"), prefix.join("current"))
         .expect("create current symlink");
 
@@ -499,6 +586,38 @@ fn rollback_selects_previous_release_and_preserves_state() {
 }
 
 #[test]
+fn rollback_uses_install_order_for_prerelease_versions() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let prefix = temporary.path().join("opt");
+    let releases = prefix.join("releases");
+    write_fake_release(&releases, "1.0.0-rc.1");
+    set_directory_mtime(&releases.join("1.0.0-rc.1"), "2024-01-01 00:00:00");
+    write_fake_release(&releases, "1.0.0");
+    set_directory_mtime(&releases.join("1.0.0"), "2024-01-02 00:00:00");
+    std::os::unix::fs::symlink(releases.join("1.0.0"), prefix.join("current"))
+        .expect("create current symlink");
+
+    let output = run_bash(
+        "scripts/rollback.sh",
+        &[
+            "--check",
+            "--prefix",
+            prefix.to_str().expect("temporary path"),
+        ],
+    );
+    assert!(output.status.success(), "{}", describe(&output));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("rollback target: 1.0.0-rc.1"),
+        "{}",
+        describe(&output)
+    );
+
+    let rollback = read("scripts/rollback.sh");
+    assert!(rollback.contains("-printf '%T@"));
+    assert!(!rollback.contains("sort -V"));
+}
+
+#[test]
 fn release_docs_report_unrun_gates_honestly() {
     let release = read("docs/release.md");
     for needle in [
@@ -534,6 +653,11 @@ fn release_docs_report_unrun_gates_honestly() {
         !release.contains("| PASS |"),
         "release docs must not claim an unrun gate"
     );
+    assert!(release.contains("/var/lib/tv-client/client.db"));
+    assert!(!release.contains("/var/lib/tv-client/state.db"));
+    assert!(release.contains("--prefix /var/tmp/tv-client-stage"));
+    assert!(release.contains("`--allow-foreign-arch` is rejected for a real install"));
+    assert!(release.contains("`--allow-unsupported-os`"));
 
     let build = read("docs/build.md");
     for section in [

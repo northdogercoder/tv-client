@@ -120,15 +120,30 @@ stat -c '%U:%G %a %n' /etc/tv-client/client.toml /var/lib/tv-client
 id -nG tvkiosk
 ```
 
+A workstation-only staging preflight uses a self-contained tree; `--prefix`
+is accepted only with `--check`/`--dry-run` and redirects the release,
+configuration, state, home and systemd paths under that tree:
+
+```sh
+scripts/install-release.sh --check --prefix /var/tmp/tv-client-stage \
+  --allow-foreign-arch --allow-unsupported-os \
+  --artifact dist/tv-client-linux-arm64-$version.tar.gz
+scripts/install-release.sh --dry-run --prefix /var/tmp/tv-client-stage \
+  --allow-foreign-arch --allow-unsupported-os \
+  --artifact dist/tv-client-linux-arm64-$version.tar.gz
+test ! -e /var/tmp/tv-client-stage   # read-only preflight creates nothing
+```
+
 Pass requires: only the intended version directory; `current` points at it;
-config and state unchanged by the second run; `tvkiosk` groups contain no
-`sudo`, `wheel` or `admin`; `/home/tvkiosk/.ssh` is absent or empty.
+`/var/lib/tv-client` exists owned by `tvkiosk` with mode 0700; config and state
+unchanged by the second run; `tvkiosk` groups contain no `sudo`, `wheel` or
+`admin`; `/home/tvkiosk/.ssh` is absent or empty.
 
 The scripts come from the repository checkout at the same tag; the release
-tarball contains the two binaries, `NOTICES` and `SBOM.cdx.json` only. For a
-read-only staging preflight on an x86_64 workstation, add
-`--allow-foreign-arch --allow-unsupported-os`; both flags are rejected for a
-real install.
+tarball contains the two binaries, `NOTICES` and `SBOM.cdx.json` only.
+`--allow-foreign-arch` is rejected for a real install; `--allow-unsupported-os`
+is an explicit operator override that is also accepted for a real install.
+`--prefix` is rejected for a real install.
 
 Evidence: `<paste preflight output>`, `<paste both install summaries>`,
 `<paste id/stat output>`. Status: **NOT RUN**.
@@ -296,7 +311,7 @@ Install a newer version first (or use the previously installed one), then:
 
 ```sh
 sudo scripts/rollback.sh --list
-sudo sha256sum /etc/tv-client/client.toml /var/lib/tv-client/state.db \
+sudo sha256sum /etc/tv-client/client.toml /var/lib/tv-client/client.db \
   > /tmp/tv-client-before-rollback.sha256
 sudo scripts/rollback.sh --check --to <previous-version>
 sudo scripts/rollback.sh --to <previous-version>
@@ -308,8 +323,11 @@ systemctl status getty@tty1.service --no-pager
 Pass requires: the symlink flips atomically to the previous release; the
 configuration and state checksums match the pre-rollback values; both release
 directories still exist; the kiosk starts and shows the previous last-view/
-progress state. Rollback never deletes a release and never migrates or clears
-the database. If the newer binary migrated the database to a schema the older
+progress state. By default the target is the release installed immediately
+before the current one (install order, not version sort), so a `1.0.0-rc.1`
+installed before `1.0.0` is selected when rolling back `1.0.0`; use `--to` for
+an explicit version. Rollback never deletes a release and never migrates or
+clears the database. If the newer binary migrated the database to a schema the older
 binary does not support, the older binary refuses to start with a typed error:
 reinstall the newer release instead of deleting `/var/lib/tv-client`.
 

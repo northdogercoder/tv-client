@@ -343,11 +343,12 @@ The tarball **`tv-client-linux-arm64-<version>.tar.gz`** contains exactly the
 two binaries at its root plus `NOTICES` and `SBOM.cdx.json`.
 `SHA256SUMS` is written next to it, and `NOTICES`/`SBOM.cdx.json` are also
 copied to `dist/` for direct inspection. `SBOM.cdx.json` is CycloneDX 1.5
-generated from `cargo metadata --locked --format-version 1`; `NOTICES` lists
-every crate with its declared license and the project's GPL-3.0-only notice.
-The release job also verifies that the tar root contains exactly those four
-entries and that `sha256sum -c SHA256SUMS` passes for the tarball, notices and
-SBOM.
+generated from
+`cargo metadata --locked --format-version 1 --features native-ui,gstreamer-player`;
+`NOTICES` lists every crate with its declared license and the project's
+GPL-3.0-only notice. The release job also verifies that the tar root contains
+exactly those four entries and that `sha256sum -c SHA256SUMS` passes for the
+tarball, notices and SBOM.
 
 Local equivalent on an ARM64 Debian 13 host (the package install is an operator
 action, not part of `scripts/check.sh`):

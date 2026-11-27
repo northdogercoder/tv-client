@@ -104,6 +104,16 @@ done
 
 if [[ -n $prefix ]]; then
   use_staging_prefix "$prefix"
+  # A staging prefix is a self-contained tree: preflight never reads or writes
+  # the real /etc, /var, /home or systemd paths.
+  TV_CONFIG_DIR="$TV_PREFIX/etc/tv-client"
+  TV_CONFIG_FILE="$TV_CONFIG_DIR/client.toml"
+  TV_STATE_DIR="$TV_PREFIX/var/lib/tv-client"
+  TV_KIOSK_HOME="$TV_PREFIX/home/tvkiosk"
+  TV_KIOSK_PROFILE="$TV_KIOSK_HOME/.profile"
+  TV_SYSTEMD_DIR="$TV_PREFIX/etc/systemd/system"
+  TV_GETTY_OVERRIDE_DIR="$TV_SYSTEMD_DIR/getty@tty1.service.d"
+  TV_GETTY_OVERRIDE="$TV_GETTY_OVERRIDE_DIR/override.conf"
 fi
 
 artifact_name() {
@@ -145,6 +155,10 @@ fi
 
 check_kiosk_user() {
   local groups group shell keyfile user_exists=0
+  if [[ -n ${TV_STAGING_PREFIX:-} ]]; then
+    log "staging prefix: skipping host kiosk-user checks"
+    return 0
+  fi
   if id -u "$TV_KIOSK_USER" >/dev/null 2>&1; then
     user_exists=1
     groups=$(id -nG "$TV_KIOSK_USER")
@@ -271,14 +285,27 @@ require_command awk
 require_command stat
 require_command find
 require_command getent
-require_command systemctl
-require_command useradd
-require_command usermod
-require_command passwd
-require_command cage
 require_debian_trixie "$allow_os"
 
-[[ -x /sbin/agetty ]] || die "/sbin/agetty is missing; getty autologin cannot work"
+if ((DRY_RUN)) && { ((allow_arch)) || [[ -n ${TV_STAGING_PREFIX:-} ]]; }; then
+  # Read-only preflight may run on a staging workstation without the Pi's
+  # runtime helpers. Report them without blocking --check/--dry-run.
+  for runtime_command in systemctl useradd usermod passwd cage; do
+    if ! command -v "$runtime_command" >/dev/null 2>&1; then
+      log "warning: $runtime_command is missing (required for a real install)"
+    fi
+  done
+  if [[ ! -x /sbin/agetty ]]; then
+    log "warning: /sbin/agetty is missing (required for getty autologin)"
+  fi
+else
+  require_command systemctl
+  require_command useradd
+  require_command usermod
+  require_command passwd
+  require_command cage
+  [[ -x /sbin/agetty ]] || die "/sbin/agetty is missing; getty autologin cannot work"
+fi
 if ! command -v cec-ctl >/dev/null 2>&1; then
   log "warning: cec-ctl is absent; HDMI-CEC will report unavailable and the USB keyboard remains usable"
 fi
@@ -444,9 +471,23 @@ restart_kiosk() {
   fi
 }
 
+install_state_dir() {
+  if [[ -d $TV_STATE_DIR ]]; then
+    log "keeping existing state directory $TV_STATE_DIR"
+    return 0
+  fi
+  run install -d -m 0700 -o "$TV_KIOSK_USER" -g "$TV_KIOSK_USER" "$TV_STATE_DIR"
+  if ((DRY_RUN)); then
+    log "would create state directory $TV_STATE_DIR for $TV_KIOSK_USER (0700)"
+  else
+    log "state directory $TV_STATE_DIR created for $TV_KIOSK_USER (0700)"
+  fi
+}
+
 run install -d -m 0755 -o root -g root "$TV_PREFIX" "$TV_RELEASES_DIR" "$TV_CONFIG_DIR"
 
 ensure_kiosk_user
+install_state_dir
 install_release
 install_config
 install_kiosk_profile
