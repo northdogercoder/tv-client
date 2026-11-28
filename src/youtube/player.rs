@@ -827,6 +827,9 @@ fn extractor_message(error: ExtractorError) -> &'static str {
             crate::youtube::resolve::ExtractorFailure::Stale => {
                 "The managed yt-dlp needs an update"
             }
+            crate::youtube::resolve::ExtractorFailure::UpdateFailed => {
+                "The managed yt-dlp could not update itself; check that its path is writable"
+            }
             _ => "The managed yt-dlp could not be used",
         },
         ExtractorError::Failed { reason } => match reason {
@@ -835,6 +838,9 @@ fn extractor_message(error: ExtractorError) -> &'static str {
             }
             crate::youtube::resolve::ExtractorFailure::Stale => {
                 "The managed yt-dlp needs an update"
+            }
+            crate::youtube::resolve::ExtractorFailure::UpdateFailed => {
+                "The managed yt-dlp could not update itself; check that its path is writable"
             }
             crate::youtube::resolve::ExtractorFailure::RateLimited => {
                 "YouTube rate-limited this device"
