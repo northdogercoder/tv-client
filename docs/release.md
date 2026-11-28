@@ -3,8 +3,8 @@
 This is the operator matrix for the packaged ARM64 kiosk. Rows below contain
 only measured evidence; unrun gates remain **NOT RUN**. The 0.1.13 artifact was
 built by the tag workflow, downloaded, checksum-verified and installed on the
-operator Pi. Rows R0, R2, R7, R10 and R12 have operator evidence; R9 was waived short of
-the two-hour gate. The remaining rows are still unrun.
+operator Pi. Rows R0, R2, R4, R7, R10 and R12 have operator evidence; R9 was waived short
+of the two-hour gate. The remaining rows are still unrun.
 
 The historical C010 result (local YouTube 720p30 under Cage/GLES: 2 dropped
 frames in 240) is an input to this matrix. It does not validate this artifact,
@@ -17,17 +17,17 @@ copy values from a plan or a previous release.
 
 | Field | Value |
 |---|---|
-| Version | `0.1.13` |
-| Git commit | `75f3159e7680b7a79f3caafe825d9dcae45ac81b` |
-| Workflow run | `46076618805` |
-| Artifact | `tv-client-linux-arm64-0.1.13.tar.gz` |
-| SHA256 | `3e9202de6b847d22bc9bbbf7c0a84ac8a2db9e29e89dc88e1286843490f87f86` |
+| Version | `0.1.16` |
+| Git commit | `ca0b783eb2799084918f6d0284e00ee6ced07c0f` |
+| Workflow run | `46092642266` |
+| Artifact | `tv-client-linux-arm64-0.1.16.tar.gz` |
+| SHA256 | `8872de135d8cac83cb914a5ff55aad45c7fef298b5b2fb4c430877380574564c` |
 | Attestation | workflow `attest-linux-arm64` job succeeded; local `gh` has no `attestation` command |
 | Build host | `ubuntu-24.04-arm` (GitHub-hosted) |
 | Install date | `2026-11-27` |
 | Operator | `operator` |
 
-Status: **0.1.13 built, checksum-verified and installed; R0/R2/R12 operator-observed.**
+Status: **0.1.16 built, checksum-verified and installed; R0/R2/R4/R7/R10/R12 operator-observed.**
 The tag workflow at `.github/workflows/release.yml` builds on
 `ubuntu-24.04-arm`, verifies the AArch64 ELF, packages the SBOM/NOTICES and
 checksums, attests provenance, then publishes a GitHub Release for tag builds
@@ -66,11 +66,11 @@ the SBOM: no credentials, config or state.
 
 | ID | Gate | Pass criterion | Status |
 |---|---|---|---|
-| R0 | Artifact build and verification | Workflow green on `ubuntu-24.04-arm`; checksum and attestation verify; both binaries are AArch64 with no unresolved libraries | **PASS** (workflow 46076618805; SHA256/ELF checked; attestation job green) |
+| R0 | Artifact build and verification | Workflow green on `ubuntu-24.04-arm`; checksum and attestation verify; both binaries are AArch64 with no unresolved libraries | **PASS** (workflow 46092642266; SHA256/ELF checked; attestation job green) |
 | R1 | Install preflight, dry-run and idempotence | `--check` and `--dry-run` change nothing; repeated install keeps one release and one config | **NOT RUN** |
 | R2 | Core local Jellyfin | Library loads, playback starts with audio, remote/keyboard input works, no stale process | **PASS** (operator TV; 0.1.10–0.1.13 playback/audio/controls) |
 | R3 | Pairing and cloud control | Device pairs, TV approval requires local keyboard/CEC, remote pause/seek acknowledged | **NOT RUN** |
-| R4 | YouTube search and playback | Search returns results; local 720p30 under Cage/GLES plays without sustained stutter; 1080p30 is reported unsupported | **NOT RUN** |
+| R4 | YouTube search and playback | Search returns results; local 720p30 under Cage/GLES plays without sustained stutter; 1080p30 is reported unsupported | **PASS** (operator TV; 720p probe, audio, pause/seek/volume) |
 | R5 | Reboot x5 | Five consecutive boots reach the kiosk with exactly one `cage` and one `tv-client`, no duplicate or stale process | **NOT RUN** |
 | R6 | Safe power-loss | After the documented safe procedure the database opens, config is intact, kiosk recovers | **NOT RUN** |
 | R7 | Offline Jellyfin / relay | Local UI shows a typed error without crashing; reconnect recovers without a restart | **PASS** (operator TV; network drop/recovery) |
@@ -357,9 +357,12 @@ when the renderer is Cage/GLES and frame drops are comparable to the C010
 720p30 run (2/240). Do not present a 1080p run as a pass; record it as
 unsupported and keep the 720p-first policy.
 
-Evidence: `<format id, resolution, fps>`, `<hwdec-current and renderer>`,
-`<dropped/total frames>`, `<playback duration>`. Status: **NOT RUN** — operator
-reported YouTube is not configured on the kiosk on 2026-11-27.
+Operator evidence 2026-11-27: YouTube search returned results with thumbnails;
+720p30 probe `6v2L2UGZJAM` played smoothly under Cage with dmabuf/v4l2m2m,
+HDMI audio and working pause/seek/volume. Numerical frame/drop counters were
+not captured; the acceptance rests on the operator's visual report.
+
+Evidence: operator TV observation. Status: **PASS (operator; no frame counters)**.
 
 ## R5: reboot x5
 
@@ -537,7 +540,7 @@ Status: **NOT RUN**.
 | R1 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R2 | operator | 2026-11-27 | PASS | operator TV; 0.1.10–0.1.13 |
 | R3 | `<name>` | `<date>` | NOT RUN | `<link>` |
-| R4 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R4 | operator | 2026-11-27 | PASS | operator TV; 720p probe |
 | R5 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R6 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R7 | operator | 2026-11-27 | PASS | operator TV; network drop/recovery |

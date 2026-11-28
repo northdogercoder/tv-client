@@ -1036,6 +1036,7 @@ fn release_docs_report_unrun_gates_honestly() {
     for row in [
         "| R0 | operator | 2026-11-27 | PASS | workflow 46076618805 |",
         "| R2 | operator | 2026-11-27 | PASS | operator TV; 0.1.10–0.1.13 |",
+        "| R4 | operator | 2026-11-27 | PASS | operator TV; 720p probe |",
         "| R7 | operator | 2026-11-27 | PASS | operator TV; network drop/recovery |",
         "| R10 | operator | 2026-11-27 | PASS | operator terminal; SHA256 OK |",
         "| R12 | operator | 2026-11-27 | PASS | operator TV; 0.1.12/0.1.13 |",
