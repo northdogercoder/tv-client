@@ -28,7 +28,7 @@ use tv_client::youtube::player::{
 };
 use tv_client::youtube::resolve::{
     Extractor, ExtractorError, ExtractorFailure, FORMAT_SELECTOR, ResolvedMedia, YtdlpExtractor,
-    build_ytdlp_arguments, parse_resolved_media,
+    build_update_arguments, build_ytdlp_arguments, parse_resolved_media,
 };
 use tv_client::youtube::search::{
     MAX_PAGE_TOKEN_BYTES, MAX_QUERY_CHARS, SearchClient, SearchError, SearchRequest,
@@ -431,6 +431,44 @@ async fn extractor_times_out_and_reaps_a_hung_child() {
     };
     assert_eq!(result, Err(ExtractorError::Timeout));
     assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn stale_extractor_updates_once_and_retries() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let marker = directory.path().join("updated");
+    let output = json!({
+        "url": "https://rr1---sn.example.googlevideo.com/videoplayback",
+        "vcodec": "avc1.640028",
+        "acodec": "mp4a.40.2",
+        "height": 720,
+        "width": 1280,
+        "fps": 30,
+        "format_id": "136",
+        "title": "Example",
+        "duration": 30.0
+    })
+    .to_string();
+    let body = format!(
+        "if [ \"$1\" = \"--ignore-config\" ] && [ \"$2\" = \"--no-warnings\" ] && [ \"$3\" = \"--update\" ]; then touch '{}'; exit 0; fi\nif [ -f '{}' ]; then cat <<'JSON'\n{}\nJSON\nelse echo 'ERROR: page needs to be reloaded' >&2; exit 1; fi",
+        marker.display(),
+        marker.display(),
+        output
+    );
+    let extractor = YtdlpExtractor::new(
+        script(directory.path(), "yt-dlp", &body),
+        Duration::from_secs(2),
+    );
+    let (_cancel_handle, cancel) = cancellation();
+    let media = extractor
+        .resolve(&video(VIDEO_A), &cancel)
+        .await
+        .expect("updated and resolved");
+    assert_eq!(media.height, 720);
+    assert!(marker.exists());
+    let args = build_update_arguments();
+    assert_eq!(args, ["--ignore-config", "--no-warnings", "--update"]);
+    assert!(args.iter().all(|arg| !arg.contains("http")));
 }
 
 #[tokio::test]

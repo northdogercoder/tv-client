@@ -40,9 +40,12 @@ Authorization: Bearer <device token>
   next_page_token}` with at most **10** items. Unknown fields, a longer list,
   a non-11-character `video_id`, an over-long title/channel or a non-official
   thumbnail URL is `invalid_response`.
-- `thumbnail_url` must be `https` on `i.ytimg.com` or a `*.ytimg.com` host. The
-  launcher is text-only and never fetches thumbnails; validating the host
-  prevents a server bug from turning into an arbitrary image request.
+- `thumbnail_url` must be `https` on `i.ytimg.com` or a `*.ytimg.com` host.
+  Search still succeeds without an image. The launcher fetches only these
+  official thumbnails, refuses redirects, caps the response at 2 MiB and
+  validates the image header/dimensions before caching it by video id in the
+  existing artwork cache. The URL is never logged and a failed thumbnail never
+  fails the search page.
 - Typed non-fatal failures: `400` bad request, `401/403` unauthorized, `404`
   feature disabled, `429` rate limited, `503` temporarily unavailable, any
   other status as a bounded server code. Failures never stop local Jellyfin
@@ -132,7 +135,8 @@ keys still fail strict TOML parsing, and the cloud policy advertises the
 | Kill switch off | `youtube_disabled` (ack rejected) |
 | Extractor missing/unusable | `youtube_disabled` when readiness fails; `extractor_unavailable` (`missing_binary`, …) when configured but spawn/use fails |
 | YouTube blocks or challenges | `extractor_failed` (`blocked`) |
-| Stale extractor | `extractor_failed` (`stale_extractor`) |
+| Stale extractor | auto-update, then retry; `extractor_failed` (`stale_extractor`) if retry fails |
+| Updater failed | `extractor_failed` (`update_failed`) |
 | Rate limited | `extractor_failed` (`rate_limited`) |
 | Private/removed video | `extractor_failed` (`video_unavailable`) |
 | Playlist expansion | `extractor_failed` (`playlist_rejected`) |
@@ -164,7 +168,8 @@ owner to report idle before starting the other source.
   search prompt. Typing updates the local field; nothing leaves the process
   until Enter.
 - Loading, empty ("Search YouTube with Enter."), error and Retry states are
-  distinct; results show title, channel and a `YouTube` source label.
+  distinct; results show title, channel, a `YouTube` source label and a cached
+  thumbnail when the official image was available.
 - `More results` appears only when the server returned a continuation token;
   it requests exactly one more page and is disabled while a request is
   pending.
@@ -234,15 +239,18 @@ The accepted renderer decision:
   silently preferring a dropping or desynchronized path.
 
 The `/tmp` venv is a probe only. Production uses the absolute managed path in
-`youtube_ytdlp_path`, kept updated with:
+`youtube_ytdlp_path`. The path must be writable by `tvkiosk` for self-update.
 
-```sh
-"$HOME/.local/share/tv-client/yt-dlp/bin/pip" install --upgrade yt-dlp
-```
-
-After an update, record the new version and rerun the short probe. A playback
-classification of `stale_extractor` is the signal to update; the kill switch is
-the rollback. Do not add cookies, accounts, DRM/age-restriction bypasses or ad
+When extraction classifies `stale_extractor`, the client automatically runs
+the configured executable with the fixed, shell-free argument vector
+`--ignore-config --no-warnings --update` (45 s bound). If that reports failure,
+it tries the sibling `pip` with
+`install --disable-pip-version-check --upgrade yt-dlp`. It retries extraction
+once after a successful update. A failed update is a typed `update_failed`
+error, and another attempt is suppressed for ten minutes. No URL, cookie or
+caller-supplied argument reaches either updater. After a manual/operator update,
+record the new version and rerun the short probe; the kill switch remains the
+rollback. Do not add cookies, accounts, DRM/age-restriction bypasses or ad
 blocking to the device.
 
 ## Known limits

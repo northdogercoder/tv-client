@@ -33,7 +33,7 @@ mod auth;
 mod cancel;
 mod client;
 mod error;
-mod image;
+pub(crate) mod image;
 mod library;
 mod models;
 mod playback;

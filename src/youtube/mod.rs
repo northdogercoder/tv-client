@@ -16,6 +16,7 @@ pub mod ownership;
 pub mod player;
 pub mod resolve;
 pub mod search;
+pub mod thumbnail;
 
 pub use mpv::{
     BackendCommand, BackendError, BackendEvent, BackendFactory, MpvBackend, MpvBackendFactory,
@@ -28,11 +29,15 @@ pub use player::{
 };
 pub use resolve::{
     Extractor, ExtractorError, ExtractorFailure, ResolvedMedia, YtdlpExtractor,
-    build_ytdlp_arguments, parse_resolved_media,
+    build_update_arguments, build_ytdlp_arguments, parse_resolved_media,
 };
 pub use search::{
     HttpSearchTransport, MAX_PAGE_TOKEN_BYTES, MAX_QUERY_CHARS, MAX_SEARCH_RESULTS, SearchClient,
     SearchError, SearchPage, SearchRequest, SearchResult, SearchTransport,
+};
+pub use thumbnail::{
+    MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_HEIGHT, MAX_THUMBNAIL_WIDTH, THUMBNAIL_TIMEOUT,
+    ThumbnailError, ThumbnailFetcher, validate_thumbnail_url,
 };
 
 use crate::model::{AppState, Mode, Source, YOUTUBE_ID_LEN, is_valid_youtube_id};

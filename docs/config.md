@@ -65,7 +65,7 @@ ui_safe_area_percent = 0
 | `cloud_enabled` | boolean | `false` | Must remain `false` until the control server is validated |
 | `youtube_enabled` | boolean | `false` | Requires `server_url`; enables search/metadata and the YouTube row |
 | `youtube_playback_enabled` | boolean | `false` | Local kill switch; effective only when `youtube_ytdlp_path` is an executable managed extractor |
-| `youtube_ytdlp_path` | string, optional | absent | Absolute path to the managed yt-dlp executable; no distro pin; missing/non-executable leaves playback disabled |
+| `youtube_ytdlp_path` | string, optional | absent | Absolute path to the managed yt-dlp executable; no distro pin; missing/non-executable leaves playback disabled. It must be writable by `tvkiosk` for automatic stale-extractor updates. |
 | `youtube_mpv_path` | string, optional | `mpv` on `PATH` | Absolute path to the mpv binary used for local playback |
 | `youtube_playback_timeout_secs` | integer | `60` | `10..=300` seconds for resolve/start |
 | `youtube_hwdec` | string | `"auto-safe"` | `auto-safe`, `v4l2m2m` or `none` |

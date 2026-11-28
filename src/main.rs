@@ -12,6 +12,9 @@ use tv_client::cloud::{self, CloudError, CloudHttp, EnrollmentToken};
 use tv_client::config::{self, ClientConfig, ConfigError};
 use tv_client::storage::{self, Storage, StorageError};
 
+#[cfg(feature = "native-ui")]
+use tv_client::youtube::{ThumbnailFetcher, validate_thumbnail_url};
+
 /// Headless-first TV client.
 #[derive(Debug, Parser)]
 #[command(name = "tv-client", version, about = "Headless-first TV client")]
@@ -1989,6 +1992,8 @@ fn start_media_thread(
                     client,
                     searches,
                     ui.clone(),
+                    state_directory.clone(),
+                    config.artwork_cache_bytes,
                     search_signal,
                 ));
                 let bridge =
@@ -2073,6 +2078,8 @@ async fn run_youtube_search(
     client: Option<tv_client::youtube::SearchClient>,
     mut commands: tokio::sync::mpsc::Receiver<SearchCommand>,
     ui: tv_client::ui::UiHandle,
+    state_directory: PathBuf,
+    artwork_cache_bytes: u64,
     mut shutdown: tv_client::state::ShutdownSignal,
 ) {
     use tv_client::jellyfin::cancellation;
@@ -2116,6 +2123,7 @@ async fn run_youtube_search(
                     continue;
                 };
                 let ui = ui.clone();
+                let state_directory = state_directory.clone();
                 current = Some(tokio::spawn(async move {
                     let request = match SearchRequest::new(&query, page_token.as_deref()) {
                         Ok(request) => request,
@@ -2128,6 +2136,13 @@ async fn run_youtube_search(
                     let (_cancel_handle, token) = cancellation();
                     match client.search(&request, &token).await {
                         Ok(page) => {
+                            let thumbnails: Vec<(String, String)> = page
+                                .items
+                                .iter()
+                                .map(|result| {
+                                    (result.video_id.clone(), result.thumbnail_url.clone())
+                                })
+                                .collect();
                             let items = page
                                 .items
                                 .into_iter()
@@ -2142,11 +2157,56 @@ async fn run_youtube_search(
                                 })
                                 .collect();
                             ui.set_youtube_page(request_id, items, page.next_page_token);
+                            if !thumbnails.is_empty() {
+                                let state_directory = state_directory.clone();
+                                let ui = ui.clone();
+                                tokio::spawn(fetch_youtube_thumbnails(
+                                    state_directory,
+                                    artwork_cache_bytes,
+                                    thumbnails,
+                                    ui,
+                                ));
+                            }
                         }
                         Err(error) => ui.set_youtube_error(request_id, error.to_string()),
                     }
                 }));
             }
+        }
+    }
+}
+
+#[cfg(feature = "native-ui")]
+async fn fetch_youtube_thumbnails(
+    state_directory: PathBuf,
+    artwork_cache_bytes: u64,
+    entries: Vec<(String, String)>,
+    ui: tv_client::ui::UiHandle,
+) {
+    let Ok(mut storage) = Storage::open(&state_directory, artwork_cache_bytes) else {
+        return;
+    };
+    let Ok(fetcher) = ThumbnailFetcher::new() else {
+        return;
+    };
+    for (video_id, raw_url) in entries {
+        let key = format!("youtube-thumb:{video_id}");
+        if let Ok(Some(path)) = storage.artwork_path(&key) {
+            ui.set_youtube_thumbnail(video_id, path);
+            continue;
+        }
+        let Ok(url) = validate_thumbnail_url(&raw_url) else {
+            continue;
+        };
+        let (_cancel_handle, cancel) = tv_client::jellyfin::cancellation();
+        let Ok(bytes) = fetcher.fetch(&url, &cancel).await else {
+            continue;
+        };
+        if storage.store_artwork(&key, &bytes).is_err() {
+            continue;
+        }
+        if let Ok(Some(path)) = storage.artwork_path(&key) {
+            ui.set_youtube_thumbnail(video_id, path);
         }
     }
 }

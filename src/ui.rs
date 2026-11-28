@@ -10,7 +10,7 @@
 //! remote action can never approve the local confirmation prompt.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -321,13 +321,15 @@ impl SourceFilter {
     }
 }
 
-/// One library entry. Text only: the launcher never loads unbounded images.
+/// One library entry. Artwork is optional and always a local cache path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaItem {
     pub id: String,
     pub title: String,
     pub subtitle: String,
     pub source: Source,
+    /// Local cached thumbnail; never a remote URL.
+    pub thumbnail: Option<PathBuf>,
 }
 
 impl MediaItem {
@@ -339,7 +341,15 @@ impl MediaItem {
             title: title.into(),
             subtitle: String::new(),
             source,
+            thumbnail: None,
         }
+    }
+
+    /// Attach a local cached thumbnail path.
+    #[must_use]
+    pub fn with_thumbnail(mut self, thumbnail: impl Into<PathBuf>) -> Self {
+        self.thumbnail = Some(thumbnail.into());
+        self
     }
 
     /// Attach a secondary line of text.
@@ -2195,6 +2205,24 @@ impl UiModel {
             return false;
         }
         self.library.youtube.load = LoadState::Loading;
+        if self.screen == Screen::Library {
+            self.refresh_status();
+        }
+        true
+    }
+
+    /// Attach or replace one YouTube thumbnail path without changing selection.
+    pub fn set_youtube_thumbnail(&mut self, video_id: &str, path: PathBuf) -> bool {
+        let Some(item) = self
+            .library
+            .youtube
+            .items
+            .iter_mut()
+            .find(|item| item.id == video_id)
+        else {
+            return false;
+        };
+        item.thumbnail = Some(path);
         if self.screen == Screen::Library {
             self.refresh_status();
         }
@@ -4106,6 +4134,13 @@ mod native {
             self.post(move |model| model.set_library_items(items));
         }
 
+        /// Attach a cached thumbnail to one YouTube result.
+        pub fn set_youtube_thumbnail(&self, video_id: String, path: std::path::PathBuf) {
+            self.post(move |model| {
+                model.set_youtube_thumbnail(&video_id, path);
+            });
+        }
+
         /// Mark the library as loading from a controller thread.
         pub fn set_library_loading(&self) {
             self.post(UiModel::set_library_loading);
@@ -4956,6 +4991,8 @@ mod native {
                 title: item.title.as_str().into(),
                 subtitle: item.subtitle.as_str().into(),
                 source: source_label(item.source).into(),
+                image: cached_image(model.artwork_epoch(), item.thumbnail.as_deref()),
+                has_image: item.thumbnail.is_some(),
                 index: index as i32,
                 focused: index == model.library_focus(),
             })

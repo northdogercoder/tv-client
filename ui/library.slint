@@ -12,6 +12,8 @@ export struct MediaCard {
     source: string,
     index: int,
     focused: bool,
+    image: image,
+    has-image: bool,
 }
 
 export component LibraryScreen inherits Rectangle {
@@ -197,39 +199,51 @@ export component LibraryScreen inherits Rectangle {
                 border-width: card.focused ? 4px : 1px;
                 border-color: card.focused ? #a8c7ff : #2c3642;
 
-                VerticalLayout {
-                    alignment: start;
+                HorizontalLayout {
                     padding-left: root.base / 36;
                     padding-right: root.base / 36;
                     padding-top: root.base / 80;
                     padding-bottom: root.base / 80;
-                    spacing: root.base / 150;
+                    spacing: root.base / 50;
 
-                    HorizontalLayout {
-                        Text {
-                            horizontal-stretch: 1;
-                            text: card.title;
-                            font-size: root.base / 20;
-                            font-weight: card.focused ? 700 : 400;
-                            color: #f4f7fb;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-
-                        Text {
-                            text: card.source;
-                            font-size: root.base / 28;
-                            font-weight: 700;
-                            color: card.focused ? #ffffff : #9fc2ff;
-                            vertical-alignment: center;
-                        }
+                    Image {
+                        width: card.has-image ? root.base / 4 : 0px;
+                        height: parent.height;
+                        source: card.image;
+                        visible: card.has-image;
+                        image-fit: contain;
                     }
 
-                    Text {
-                        text: card.subtitle;
-                        font-size: root.base / 34;
-                        color: #c6d2e1;
-                        overflow: elide;
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: root.base / 150;
+
+                        HorizontalLayout {
+                            Text {
+                                horizontal-stretch: 1;
+                                text: card.title;
+                                font-size: root.base / 20;
+                                font-weight: card.focused ? 700 : 400;
+                                color: #f4f7fb;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: card.source;
+                                font-size: root.base / 28;
+                                font-weight: 700;
+                                color: card.focused ? #ffffff : #9fc2ff;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: card.subtitle;
+                            font-size: root.base / 34;
+                            color: #c6d2e1;
+                            overflow: elide;
+                        }
                     }
                 }
 

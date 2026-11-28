@@ -8,7 +8,8 @@
 //! page.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
 use serde::Deserialize;
@@ -23,6 +24,10 @@ use crate::youtube::VideoId;
 pub const MAX_INFO_BYTES: usize = 2 * 1024 * 1024;
 /// Largest accepted extractor stderr used for classification.
 pub const MAX_ERROR_BYTES: usize = 8 * 1024;
+/// Budget for one managed yt-dlp self-update.
+pub const UPDATE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Do not start another self-update within this window after a failed attempt.
+pub const UPDATE_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 /// Fixed socket timeout passed to yt-dlp.
 const SOCKET_TIMEOUT_SECS: &str = "15";
 
@@ -164,6 +169,8 @@ pub enum ExtractorFailure {
     Blocked,
     /// The extractor is stale and needs an update.
     Stale,
+    /// The configured extractor could not update itself.
+    UpdateFailed,
     /// YouTube rate-limited this address.
     RateLimited,
     /// The video is unavailable, private or removed.
@@ -182,6 +189,7 @@ impl ExtractorFailure {
             Self::MissingBinary => "missing_binary",
             Self::Blocked => "blocked",
             Self::Stale => "stale_extractor",
+            Self::UpdateFailed => "update_failed",
             Self::RateLimited => "rate_limited",
             Self::VideoUnavailable => "video_unavailable",
             Self::Playlist => "playlist_rejected",
@@ -205,6 +213,8 @@ pub trait Extractor: Send + Sync {
 pub struct YtdlpExtractor {
     program: PathBuf,
     timeout: Duration,
+    update_timeout: Duration,
+    last_update: Arc<Mutex<Option<Instant>>>,
 }
 
 impl YtdlpExtractor {
@@ -213,7 +223,9 @@ impl YtdlpExtractor {
     pub fn new(program: impl Into<PathBuf>, timeout: Duration) -> Self {
         Self {
             program: program.into(),
+            update_timeout: timeout.min(UPDATE_TIMEOUT),
             timeout,
+            last_update: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -230,6 +242,84 @@ impl YtdlpExtractor {
     }
 }
 
+impl YtdlpExtractor {
+    async fn resolve_once(
+        &self,
+        video_id: &VideoId,
+        cancel: &CancelToken,
+    ) -> Result<ResolvedMedia, ExtractorError> {
+        if cancel.is_cancelled() {
+            return Err(ExtractorError::Cancelled);
+        }
+        let url = video_id.watch_url();
+        let arguments = build_ytdlp_arguments(&url);
+        let (stdout, stderr, status) =
+            run_bounded(&self.program, &arguments, self.timeout, cancel).await?;
+        if !status.success() {
+            return Err(ExtractorError::Failed {
+                reason: classify_failure(&stderr),
+            });
+        }
+        parse_resolved_media(&stdout)
+    }
+
+    fn claim_update(&self) -> bool {
+        let mut last = self
+            .last_update
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if last.is_some_and(|at| at.elapsed() < UPDATE_COOLDOWN) {
+            return false;
+        }
+        *last = Some(Instant::now());
+        true
+    }
+
+    async fn update(&self, cancel: &CancelToken) -> Result<(), ExtractorError> {
+        let arguments = build_update_arguments();
+        match run_bounded(&self.program, &arguments, self.update_timeout, cancel).await {
+            Ok((_, _, status)) if status.success() => return Ok(()),
+            Err(ExtractorError::Cancelled) => return Err(ExtractorError::Cancelled),
+            Ok(_) | Err(_) => {}
+        }
+        if cancel.is_cancelled() {
+            return Err(ExtractorError::Cancelled);
+        }
+        // A managed venv install cannot self-update with `-U`; its sibling
+        // pip is the documented updater. Both commands are fixed, bounded and
+        // shell-free.
+        let pip = self
+            .program
+            .parent()
+            .map(|parent| parent.join("pip"))
+            .filter(|path| path.is_file());
+        let Some(pip) = pip else {
+            return Err(ExtractorError::Failed {
+                reason: ExtractorFailure::UpdateFailed,
+            });
+        };
+        let arguments = [
+            "install",
+            "--disable-pip-version-check",
+            "--upgrade",
+            "yt-dlp",
+        ]
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect::<Vec<_>>();
+        match run_bounded(&pip, &arguments, self.update_timeout, cancel).await {
+            Ok((_, _, status)) if status.success() => Ok(()),
+            Ok(_) => Err(ExtractorError::Failed {
+                reason: ExtractorFailure::UpdateFailed,
+            }),
+            Err(ExtractorError::Cancelled) => Err(ExtractorError::Cancelled),
+            Err(_) => Err(ExtractorError::Failed {
+                reason: ExtractorFailure::UpdateFailed,
+            }),
+        }
+    }
+}
+
 impl Extractor for YtdlpExtractor {
     fn resolve<'a>(
         &'a self,
@@ -237,21 +327,39 @@ impl Extractor for YtdlpExtractor {
         cancel: &'a CancelToken,
     ) -> BoxFuture<'a, Result<ResolvedMedia, ExtractorError>> {
         Box::pin(async move {
+            let first = self.resolve_once(video_id, cancel).await;
+            let stale = matches!(
+                first,
+                Err(ExtractorError::Failed {
+                    reason: ExtractorFailure::Stale
+                }) | Err(ExtractorError::ExtractorUnavailable {
+                    reason: ExtractorFailure::Stale
+                })
+            );
+            if !stale {
+                return first;
+            }
             if cancel.is_cancelled() {
                 return Err(ExtractorError::Cancelled);
             }
-            let url = video_id.watch_url();
-            let arguments = build_ytdlp_arguments(&url);
-            let (stdout, stderr, status) =
-                run_bounded(&self.program, &arguments, self.timeout, cancel).await?;
-            if !status.success() {
-                return Err(ExtractorError::Failed {
-                    reason: classify_failure(&stderr),
-                });
+            if !self.claim_update() {
+                return first;
             }
-            parse_resolved_media(&stdout)
+            self.update(cancel).await?;
+            self.resolve_once(video_id, cancel).await
         })
     }
+}
+
+/// Build the fixed self-update argument vector.
+///
+/// No URL, config file or caller-supplied flag reaches this command.
+#[must_use]
+pub fn build_update_arguments() -> Vec<String> {
+    ["--ignore-config", "--no-warnings", "--update"]
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect()
 }
 
 /// Build the fixed extractor argument vector.
