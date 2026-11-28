@@ -3,8 +3,8 @@
 This is the operator matrix for the packaged ARM64 kiosk. Rows below contain
 only measured evidence; unrun gates remain **NOT RUN**. The 0.1.13 artifact was
 built by the tag workflow, downloaded, checksum-verified and installed on the
-operator Pi. Rows R0, R2, R4, R7, R10 and R12 have operator evidence; R9 was waived short
-of the two-hour gate. The remaining rows are still unrun.
+operator Pi. Rows R0, R2, R4, R5, R7, R10 and R12 have operator evidence; R9 was waived
+short of the two-hour gate. The remaining rows are still unrun.
 
 The historical C010 result (local YouTube 720p30 under Cage/GLES: 2 dropped
 frames in 240) is an input to this matrix. It does not validate this artifact,
@@ -27,7 +27,7 @@ copy values from a plan or a previous release.
 | Install date | `2026-11-27` |
 | Operator | `operator` |
 
-Status: **0.1.16 built, checksum-verified and installed; R0/R2/R4/R7/R10/R12 operator-observed.**
+Status: **0.1.16 built, checksum-verified and installed; R0/R2/R4/R5/R7/R10/R12 operator-observed.**
 The tag workflow at `.github/workflows/release.yml` builds on
 `ubuntu-24.04-arm`, verifies the AArch64 ELF, packages the SBOM/NOTICES and
 checksums, attests provenance, then publishes a GitHub Release for tag builds
@@ -71,7 +71,7 @@ the SBOM: no credentials, config or state.
 | R2 | Core local Jellyfin | Library loads, playback starts with audio, remote/keyboard input works, no stale process | **PASS** (operator TV; 0.1.10–0.1.13 playback/audio/controls) |
 | R3 | Pairing and cloud control | Device pairs, TV approval requires local keyboard/CEC, remote pause/seek acknowledged | **NOT RUN** |
 | R4 | YouTube search and playback | Search returns results; local 720p30 under Cage/GLES plays without sustained stutter; 1080p30 is reported unsupported | **PASS** (operator TV; 720p probe, audio, pause/seek/volume) |
-| R5 | Reboot x5 | Five consecutive boots reach the kiosk with exactly one `cage` and one `tv-client`, no duplicate or stale process | **NOT RUN** |
+| R5 | Reboot x5 | Five consecutive boots reach the kiosk with exactly one `cage` and one `tv-client`, no duplicate or stale process | **PASS** (five boot IDs; one kiosk tree each) |
 | R6 | Safe power-loss | After the documented safe procedure the database opens, config is intact, kiosk recovers | **NOT RUN** |
 | R7 | Offline Jellyfin / relay | Local UI shows a typed error without crashing; reconnect recovers without a restart | **PASS** (operator TV; network drop/recovery) |
 | R8 | Network relay and reconnect | Remote commands survive a short network loss or fail with a typed ack, then reconnect | **NOT RUN** |
@@ -381,6 +381,10 @@ Repeat five times. Pass requires exactly one kiosk `cage` and one `tv-client`
 per boot, no `getty@tty1` failure state and no stale child left by the previous
 boot. A boot that reaches a login prompt instead of the kiosk fails.
 
+Operator evidence 2026-11-27: five distinct boot IDs (`fd6bbe…`, `f6039e…`,
+`9017f1…`, `b7df9c…`, `8620c0…`); every boot had exactly one `cage` and one
+`tv-client`, `getty@tty1` active, and zero failed units. Status: **PASS**.
+
 Evidence: `<table: boot number / cage count / tv-client count / failures>`.
 Status: **NOT RUN**.
 
@@ -541,7 +545,7 @@ Status: **NOT RUN**.
 | R2 | operator | 2026-11-27 | PASS | operator TV; 0.1.10–0.1.13 |
 | R3 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R4 | operator | 2026-11-27 | PASS | operator TV; 720p probe |
-| R5 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R5 | operator | 2026-11-27 | PASS | five boot IDs; one cage/tv-client each |
 | R6 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R7 | operator | 2026-11-27 | PASS | operator TV; network drop/recovery |
 | R8 | `<name>` | `<date>` | NOT RUN | `<link>` |
