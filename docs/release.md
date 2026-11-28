@@ -3,8 +3,9 @@
 This is the operator matrix for the packaged ARM64 kiosk. Rows below contain
 only measured evidence; unrun gates remain **NOT RUN**. The 0.1.13 artifact was
 built by the tag workflow, downloaded, checksum-verified and installed on the
-operator Pi. Rows R0, R2, R4, R5, R7, R10 and R12 have operator evidence; R9 was waived
-short of the two-hour gate. The remaining rows are still unrun.
+operator Pi. Rows R0, R2, R4, R5, R7, R10 and R12 have operator evidence; R8 has no
+paired remote and is waived; R9 was waived short of the two-hour gate. R11
+failed on 0.1.16 (black screen, stuck cage) and awaits the wrapper fix.
 
 The historical C010 result (local YouTube 720p30 under Cage/GLES: 2 dropped
 frames in 240) is an input to this matrix. It does not validate this artifact,
@@ -74,10 +75,10 @@ the SBOM: no credentials, config or state.
 | R5 | Reboot x5 | Five consecutive boots reach the kiosk with exactly one `cage` and one `tv-client`, no duplicate or stale process | **PASS** (five boot IDs; one kiosk tree each) |
 | R6 | Safe power-loss | After the documented safe procedure the database opens, config is intact, kiosk recovers | **NOT RUN** |
 | R7 | Offline Jellyfin / relay | Local UI shows a typed error without crashing; reconnect recovers without a restart | **PASS** (operator TV; network drop/recovery) |
-| R8 | Network relay and reconnect | Remote commands survive a short network loss or fail with a typed ack, then reconnect | **NOT RUN** |
+| R8 | Network relay and reconnect | Remote commands survive a short network loss or fail with a typed ack, then reconnect | **WAIVED** (no paired remote) |
 | R9 | Two-hour soak | 2 h of repeated playback has stable RSS/FD counts, no leaked mpv sockets and no orphan children | **NOT RUN** |
 | R10 | Rollback | Rollback selects the previous release atomically, preserves config/state bytes and restarts the kiosk | **PASS** (0.1.13→0.1.12→0.1.13; SHA256 OK) |
-| R11 | Crash backoff and tty2 recovery | Repeated kiosk exits back off to 60 s; tty2 allows local recovery without rebooting | **NOT RUN** |
+| R11 | Crash backoff and tty2 recovery | Repeated kiosk exits back off to 60 s; tty2 allows local recovery without rebooting | **FAIL** (0.1.16: app zombie, cage stuck, black screen) |
 | R12 | mpv playback and pause-only OSC | Smooth dmabuf/v4l2m2m playback; bar appears only while paused and hides on resume; keyboard/remote controls remain usable | **PASS** (operator TV; 0.1.12/0.1.13) |
 
 ## R0: artifact build and verification
@@ -443,7 +444,7 @@ new command applies. Core local Jellyfin playback is not stopped by a cloud
 failure.
 
 Evidence: `<ack results before/during/after>`, `<reconnect timestamps>`.
-Status: **NOT RUN** — no paired remote was available on 2026-11-27.
+Status: **WAIVED** — no paired remote was available on 2026-11-27.
 
 ## R9: two-hour soak
 
@@ -548,10 +549,10 @@ Status: **NOT RUN**.
 | R5 | operator | 2026-11-27 | PASS | five boot IDs; one cage/tv-client each |
 | R6 | `<name>` | `<date>` | NOT RUN | `<link>` |
 | R7 | operator | 2026-11-27 | PASS | operator TV; network drop/recovery |
-| R8 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R8 | operator | 2026-11-27 | WAIVED | no paired remote |
 | R9 | operator | 2026-11-27 | WAIVED | short soak; operator stopped before 2h |
 | R10 | operator | 2026-11-27 | PASS | operator terminal; SHA256 OK |
-| R11 | `<name>` | `<date>` | NOT RUN | `<link>` |
+| R11 | operator | 2026-11-27 | FAIL | black screen; cage stuck after app kill |
 | R12 | operator | 2026-11-27 | PASS | operator TV; 0.1.12/0.1.13 |
 
 A row may be marked PASS only with its evidence filled in. The accepted C010

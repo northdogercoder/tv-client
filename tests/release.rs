@@ -350,10 +350,11 @@ fn kiosk_session_uses_cage_gles_and_an_unprivileged_user() {
         "WLR_RENDERER=gles2",
         "unset WLR_BACKENDS",
         "SLINT_BACKEND=winit-femtovg",
-        "cage -- /opt/tv-client/current/tv-client",
+        "cage -- /bin/sh -c",
         "/var/lib/tv-client/client.toml",
         "/etc/tv-client/client.toml",
-        r#"--config "$kiosk_config""#,
+        r#"--config "$1""#,
+        r#"kill -TERM "$PPID""#,
         "--state-dir /var/lib/tv-client",
         "/dev/tty1",
         "SSH_CONNECTION",
@@ -1030,7 +1031,7 @@ fn release_docs_report_unrun_gates_honestly() {
         );
     }
     assert!(
-        release.matches("NOT RUN").count() >= 10,
+        release.matches("NOT RUN").count() >= 8,
         "every unexecuted matrix row must be marked NOT RUN"
     );
     for row in [
@@ -1039,7 +1040,9 @@ fn release_docs_report_unrun_gates_honestly() {
         "| R4 | operator | 2026-11-27 | PASS | operator TV; 720p probe |",
         "| R5 | operator | 2026-11-27 | PASS | five boot IDs; one cage/tv-client each |",
         "| R7 | operator | 2026-11-27 | PASS | operator TV; network drop/recovery |",
+        "| R8 | operator | 2026-11-27 | WAIVED | no paired remote |",
         "| R10 | operator | 2026-11-27 | PASS | operator terminal; SHA256 OK |",
+        "| R11 | operator | 2026-11-27 | FAIL | black screen; cage stuck after app kill |",
         "| R12 | operator | 2026-11-27 | PASS | operator TV; 0.1.12/0.1.13 |",
     ] {
         assert!(

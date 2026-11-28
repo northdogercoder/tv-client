@@ -61,9 +61,15 @@ if [ "$(tty)" = /dev/tty1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
   # hammering the GPU, the state database or the journal. The cap is 60 s.
   backoff=5
   while :; do
-    cage -- /opt/tv-client/current/tv-client \
-      --config "$kiosk_config" \
-      --state-dir /var/lib/tv-client
+    # Run the client under a shell inside cage. If the client dies while cage
+    # stays alive, the shell runs the cleanup and terminates cage, so this loop
+    # receives an exit status and the bounded backoff actually runs.
+    cage -- /bin/sh -c '
+      /opt/tv-client/current/tv-client --config "$1" --state-dir /var/lib/tv-client
+      rc=$?
+      kill -TERM "$PPID" 2>/dev/null || true
+      exit "$rc"
+    ' sh "$kiosk_config"
     rc=$?
     logger -t tv-kiosk "kiosk exited ($rc); restarting in ${backoff}s"
     sleep "$backoff"
