@@ -93,6 +93,11 @@ pub enum PlayerCommand {
         /// Absolute position in milliseconds.
         position_ms: u64,
     },
+    /// Set linear volume, 0 through 100.
+    SetVolume {
+        /// Requested volume.
+        volume: u8,
+    },
     /// Stop and reap the player.
     Stop,
     /// Explicitly retry the last request after a failure.
@@ -383,6 +388,32 @@ pub async fn run_player(
                             continue;
                         }
                         emit(&events, PlayerEvent::Paused { paused }).await?;
+                    }
+                    PlayerCommand::SetVolume { volume } => {
+                        if phase != Phase::Active {
+                            continue;
+                        }
+                        let send_failed = match backend.as_ref() {
+                            Some(backend) => backend
+                                .commands
+                                .send(BackendCommand::SetVolume { volume })
+                                .await
+                                .is_err(),
+                            None => false,
+                        };
+                        if send_failed {
+                            fail_active(
+                                &events,
+                                &mut phase,
+                                &mut session,
+                                &mut backend,
+                                &mut deadline,
+                                config.mpv.reap_timeout,
+                                "player_closed",
+                                "The local player stopped",
+                            )
+                            .await?;
+                        }
                     }
                     PlayerCommand::Seek { position_ms } => {
                         if phase != Phase::Active {

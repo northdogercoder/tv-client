@@ -2847,7 +2847,27 @@ impl UiModel {
                     now,
                 )
             }
-            crate::input::Route::Volume { .. } => UiOutcome::Ignored,
+            crate::input::Route::Volume { key, .. } => {
+                if self.screen != Screen::Player
+                    || self.player.source != Some(crate::model::Source::YouTube)
+                {
+                    return UiOutcome::Ignored;
+                }
+                let volume = match key {
+                    crate::input::Key::VolumeUp => self.volume.saturating_add(5).min(100),
+                    crate::input::Key::VolumeDown => self.volume.saturating_sub(5),
+                    crate::input::Key::Mute => {
+                        if self.volume == 0 {
+                            50
+                        } else {
+                            0
+                        }
+                    }
+                    _ => return UiOutcome::Ignored,
+                };
+                self.volume = volume;
+                UiOutcome::Action(crate::model::Action::SetVolume { volume })
+            }
             crate::input::Route::Rejected(_) => {
                 if self.modal.is_some() {
                     UiOutcome::Rejected(UiReject::RemoteApprovalDenied)

@@ -55,6 +55,8 @@ pub enum BackendCommand {
     Pause(bool),
     /// Seek to an absolute position.
     Seek { position_ms: u64 },
+    /// Set linear volume, 0 through 100.
+    SetVolume { volume: u8 },
     /// Quit the backend and reap it.
     Stop,
 }
@@ -158,7 +160,14 @@ impl BackendFactory for MpvBackendFactory {
 /// identifier. It is public so tests can assert that invariant.
 #[must_use]
 pub fn mpv_arguments(socket: &Path, hwdec: YoutubeHwdec) -> Vec<String> {
-    [
+    let hwdec = if hwdec == YoutubeHwdec::None {
+        "none"
+    } else {
+        // dmabuf-wayland needs a dmabuf-capable decoder; the Pi's only
+        // proven path is v4l2m2m. auto-safe probes VDPAU first and can fail.
+        "v4l2m2m"
+    };
+    let mut arguments = [
         "--no-config".to_owned(),
         "--no-terminal".to_owned(),
         "--really-quiet".to_owned(),
@@ -172,12 +181,26 @@ pub fn mpv_arguments(socket: &Path, hwdec: YoutubeHwdec) -> Vec<String> {
         "--ytdl=no".to_owned(),
         "--osc=no".to_owned(),
         "--osd-level=0".to_owned(),
-        "--vo=gpu".to_owned(),
-        "--gpu-context=wayland".to_owned(),
-        format!("--hwdec={}", hwdec.as_arg()),
+        "--vo=dmabuf-wayland".to_owned(),
+        "--volume=50".to_owned(),
+        format!("--hwdec={hwdec}"),
         format!("--input-ipc-server={}", socket.display()),
     ]
-    .into()
+    .to_vec();
+    if std::env::var("TV_AUDIO_SINK").as_deref() == Ok("alsa") {
+        arguments.push("--ao=alsa".to_owned());
+        if let Ok(device) = std::env::var("TV_PLAYER_AUDIO_DEVICE")
+            && !device.trim().is_empty()
+        {
+            arguments.push(format!("--audio-device={}", device.trim()));
+        } else if let Ok(device) = std::env::var("TV_AUDIO_DEVICE")
+            && !device.trim().is_empty()
+            && (device.trim().starts_with("alsa/") || device.trim() == "auto")
+        {
+            arguments.push(format!("--audio-device={}", device.trim()));
+        }
+    }
+    arguments
 }
 
 /// Removes a temporary private socket directory unless ownership is moved into
@@ -361,6 +384,10 @@ impl PlayerBackend for MpvBackend {
                 BackendCommand::Seek { position_ms } => {
                     let seconds = position_ms as f64 / 1000.0;
                     self.send(&json!({"command": ["seek", seconds, "absolute+exact"]}))
+                        .await
+                }
+                BackendCommand::SetVolume { volume } => {
+                    self.send(&json!({"command": ["set_property", "volume", volume]}))
                         .await
                 }
                 BackendCommand::Stop => {

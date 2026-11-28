@@ -343,7 +343,12 @@ fn mpv_arguments_never_carry_a_url_or_token() {
     assert!(
         arguments
             .iter()
-            .any(|argument| argument == "--gpu-context=wayland")
+            .any(|argument| argument == "--vo=dmabuf-wayland")
+    );
+    assert!(
+        arguments
+            .iter()
+            .any(|argument| argument == "--hwdec=v4l2m2m")
     );
 }
 

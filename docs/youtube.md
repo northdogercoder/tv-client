@@ -90,7 +90,12 @@ Authorization: Bearer <device token>
 6. The resolved stream URLs live only in memory for one session. `Debug`
    prints `redacted`, no URL is written to argv, the log, the database or a
    file, and the temporary socket directory is removed on teardown.
-7. `mpv` is started with no media in argv and `--ytdl=no`:
+7. `mpv` is started with no media in argv and `--ytdl=no`. The kiosk path
+   uses the proven Pi output/audio settings: `--vo=dmabuf-wayland`,
+   `--hwdec=v4l2m2m`, `--ao=alsa` and the HDMI ALSA device from the kiosk
+   profile; `--volume=50` is the initial linear volume. Remote/keyboard volume
+   keys are routed to the active YouTube backend and pause/seek use the same
+   private IPC.
 
    ```text
    --no-config --no-terminal --really-quiet --idle=yes --force-window=yes

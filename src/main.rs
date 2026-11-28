@@ -121,6 +121,8 @@ enum RouteCommand {
     PlayYoutube { video_id: String, remote: bool },
     /// Pause or resume the active source.
     Pause(bool),
+    /// Set the active YouTube volume.
+    SetVolume(u8),
     /// Seek the active source.
     Seek(u64),
     /// Stop whichever source is active.
@@ -162,6 +164,7 @@ fn route_command(command: &tv_client::ui::UiCommand) -> Option<RouteCommand> {
             remote: false,
         }),
         UiCommand::Action(Action::SetPaused { paused }) => Some(RouteCommand::Pause(*paused)),
+        UiCommand::Action(Action::SetVolume { volume }) => Some(RouteCommand::SetVolume(*volume)),
         UiCommand::Action(Action::Seek { position_ms }) => Some(RouteCommand::Seek(*position_ms)),
         UiCommand::Action(Action::Stop) => Some(RouteCommand::Stop),
         UiCommand::Action(Action::Navigate { direction })
@@ -2354,6 +2357,11 @@ async fn run_router(
                                 PlaybackCommand::Resume
                             };
                             let _ = jellyfin.send(command).await;
+                        }
+                    },
+                    RouteCommand::SetVolume(volume) => {
+                        if ownership.active() == Some(Source::YouTube) {
+                            let _ = youtube.send(PlayerCommand::SetVolume { volume }).await;
                         }
                     },
                     RouteCommand::Seek(position_ms) => match ownership.active() {
