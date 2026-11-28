@@ -76,6 +76,8 @@ pub enum BackendEvent {
     Paused(bool),
     /// Playback reached the end of the media.
     Ended,
+    /// The user explicitly stopped the local player.
+    Stopped,
     /// The backend hit an error. `code` is never remote text.
     Failed { code: &'static str },
 }
@@ -159,7 +161,7 @@ impl BackendFactory for MpvBackendFactory {
 /// The returned vector never contains a media URL, a token or a playlist
 /// identifier. It is public so tests can assert that invariant.
 #[must_use]
-pub fn mpv_arguments(socket: &Path, hwdec: YoutubeHwdec) -> Vec<String> {
+pub fn mpv_arguments(socket: &Path, hwdec: YoutubeHwdec, input_conf: &Path) -> Vec<String> {
     let hwdec = if hwdec == YoutubeHwdec::None {
         "none"
     } else {
@@ -185,6 +187,7 @@ pub fn mpv_arguments(socket: &Path, hwdec: YoutubeHwdec) -> Vec<String> {
         "--volume=50".to_owned(),
         format!("--hwdec={hwdec}"),
         format!("--input-ipc-server={}", socket.display()),
+        format!("--input-conf={}", input_conf.display()),
     ]
     .to_vec();
     if std::env::var("TV_AUDIO_SINK").as_deref() == Ok("alsa") {
@@ -201,6 +204,24 @@ pub fn mpv_arguments(socket: &Path, hwdec: YoutubeHwdec) -> Vec<String> {
         }
     }
     arguments
+}
+
+fn write_input_conf(path: &Path) -> Result<(), BackendError> {
+    let contents = "\
+ESC quit
+SPACE cycle pause
+LEFT seek -10
+RIGHT seek 10
+UP add volume 5
+DOWN add volume -5
+";
+    std::fs::write(path, contents).map_err(|_| BackendError::Unavailable)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// Removes a temporary private socket directory unless ownership is moved into
@@ -263,7 +284,9 @@ impl MpvBackend {
         if socket.as_os_str().len() >= 100 {
             return Err(BackendError::Unavailable);
         }
-        let arguments = mpv_arguments(&socket, options.hwdec);
+        let input_conf = guard.path().join("input.conf");
+        write_input_conf(&input_conf)?;
+        let arguments = mpv_arguments(&socket, options.hwdec, &input_conf);
         let mut child = tokio::process::Command::new(&options.program)
             .args(&arguments)
             .stdin(std::process::Stdio::null())
@@ -423,7 +446,7 @@ impl PlayerBackend for MpvBackend {
                         let reason = value.get("reason").and_then(Value::as_str);
                         return match reason {
                             Some("eof") => Some(BackendEvent::Ended),
-                            Some("stop") | Some("quit") => None,
+                            Some("stop") | Some("quit") => Some(BackendEvent::Stopped),
                             _ => Some(BackendEvent::Failed {
                                 code: "player_decode",
                             }),
@@ -515,6 +538,7 @@ mod tests {
         let arguments = mpv_arguments(
             Path::new("/tmp/tv-client-mpv-test/ipc.sock"),
             YoutubeHwdec::V4l2m2m,
+            Path::new("/tmp/tv-client-mpv-test/input.conf"),
         );
         assert!(!arguments.iter().any(|argument| argument.contains("http")));
         assert!(

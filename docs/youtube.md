@@ -93,9 +93,11 @@ Authorization: Bearer <device token>
 7. `mpv` is started with no media in argv and `--ytdl=no`. The kiosk path
    uses the proven Pi output/audio settings: `--vo=dmabuf-wayland`,
    `--hwdec=v4l2m2m`, `--ao=alsa` and the HDMI ALSA device from the kiosk
-   profile; `--volume=50` is the initial linear volume. Remote/keyboard volume
-   keys are routed to the active YouTube backend and pause/seek use the same
-   private IPC.
+   profile; `--volume=50` is the initial linear volume. The private input map
+   binds ESC to quit, Space to pause, arrows to seek and Up/Down to volume so
+   the focused mpv surface is never a trap; an explicit quit becomes a
+   `Stopped` event and returns to the launcher. Remote volume keys are also
+   routed to the active YouTube backend; pause/seek use the same IPC.
 
    ```text
    --no-config --no-terminal --really-quiet --idle=yes --force-window=yes

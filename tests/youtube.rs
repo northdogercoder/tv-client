@@ -327,6 +327,7 @@ fn mpv_arguments_never_carry_a_url_or_token() {
     let arguments = mpv_arguments(
         Path::new("/tmp/tv-client-mpv-test/ipc.sock"),
         YoutubeHwdec::V4l2m2m,
+        Path::new("/tmp/tv-client-mpv-test/input.conf"),
     );
     assert!(!arguments.iter().any(|argument| argument.contains("http")));
     assert!(

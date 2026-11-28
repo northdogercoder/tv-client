@@ -658,6 +658,13 @@ pub async fn run_player(
                         session = None;
                         emit(&events, PlayerEvent::Ended { video_id, position_ms }).await?;
                     }
+                    BackendEvent::Stopped => {
+                        stop_backend(&mut backend, config.mpv.reap_timeout).await;
+                        phase = Phase::Idle;
+                        deadline = None;
+                        let video_id = session.take().map(|session| session.video_id);
+                        emit(&events, PlayerEvent::Stopped { video_id }).await?;
+                    }
                     BackendEvent::Failed { code } => {
                         let video_id = session.as_ref().map(|session| session.video_id.clone());
                         stop_backend(&mut backend, config.mpv.reap_timeout).await;
@@ -736,7 +743,9 @@ fn spawn_backend(mut backend: Box<dyn PlayerBackend>) -> BackendHandle {
                         Some(event) => {
                             let terminal = matches!(
                                 event,
-                                BackendEvent::Ended | BackendEvent::Failed { .. }
+                                BackendEvent::Ended
+                                    | BackendEvent::Stopped
+                                    | BackendEvent::Failed { .. }
                             );
                             if event_tx.send(event).await.is_err() {
                                 break;
